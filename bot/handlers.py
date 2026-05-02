@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -28,10 +30,18 @@ def _is_admin(user_id: int | None, admin_id: int) -> bool:
 def _moderation_keyboard(draft_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("✅ Опубликовать", callback_data=f"publish:{draft_id}")],
-            [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")],
-            [InlineKeyboardButton("✍️ Переписать", callback_data=f"rewrite:{draft_id}")],
+            [InlineKeyboardButton("✅ Publish now", callback_data=f"publish:{draft_id}")],
+            [InlineKeyboardButton("🗓️ Schedule", callback_data=f"schedule:{draft_id}")],
+            [InlineKeyboardButton("❌ Reject", callback_data=f"reject:{draft_id}")],
+            [InlineKeyboardButton("✍️ Rewrite", callback_data=f"rewrite:{draft_id}")],
         ]
+    )
+
+
+def _schedule_keyboard(draft_id: int) -> InlineKeyboardMarkup:
+    slots = ["10:00", "14:00", "18:00", "21:00"]
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(slot, callback_data=f"schedule_slot:{draft_id}:{slot}")] for slot in slots]
     )
 
 
@@ -146,9 +156,15 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
 
     try:
-        action, draft_id_raw = query.data.split(":", maxsplit=1)
-        draft_id = int(draft_id_raw)
-    except (AttributeError, ValueError):
+        parts = (query.data or "").split(":")
+        action = parts[0]
+        if action == "schedule_slot":
+            draft_id = int(parts[1])
+            slot = parts[2]
+        else:
+            draft_id = int(parts[1])
+            slot = None
+    except (AttributeError, ValueError, IndexError):
         await query.edit_message_text("Некорректное действие.")
         return
 
@@ -163,6 +179,30 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             db.update_status(draft_id, "published")
             await query.edit_message_text(f"✅ Черновик #{draft_id} опубликован в канал.")
 
+        elif action == "schedule":
+            db.update_status(draft_id, "approved")
+            await query.edit_message_text(
+                f"Выбери слот публикации для черновика #{draft_id} (часовой пояс: {settings.schedule_timezone}):",
+                reply_markup=_schedule_keyboard(draft_id),
+            )
+
+        elif action == "schedule_slot":
+            if slot is None:
+                await query.edit_message_text("Некорректный слот времени.")
+                return
+            tz = ZoneInfo(settings.schedule_timezone)
+            now_local = datetime.now(tz)
+            hour, minute = map(int, slot.split(":"))
+            scheduled_local = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if scheduled_local <= now_local:
+                scheduled_local += timedelta(days=1)
+
+            scheduled_utc = scheduled_local.astimezone(ZoneInfo("UTC"))
+            db.schedule_draft(draft_id, scheduled_utc.strftime("%Y-%m-%d %H:%M:%S"))
+            await query.edit_message_text(
+                f"🗓️ Черновик #{draft_id} запланирован на {scheduled_local.strftime('%Y-%m-%d %H:%M')} ({settings.schedule_timezone})."
+            )
+
         elif action == "reject":
             db.update_status(draft_id, "rejected")
             await query.edit_message_text(f"❌ Черновик #{draft_id} отклонён.")
@@ -170,7 +210,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         elif action == "rewrite":
             rewritten = rewrite_test_draft(draft["content"])
             db.update_draft_content(draft_id, rewritten)
-            db.update_status(draft_id, "pending")
+            db.update_status(draft_id, "draft")
             await query.edit_message_text(
                 _build_moderation_text(draft_id, rewritten, draft.get("source_url")),
                 reply_markup=_moderation_keyboard(draft_id),
