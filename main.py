@@ -16,6 +16,7 @@ from bot.handlers import (
     moderation_callback,
     start_command,
 )
+from bot.publisher import run_scheduled_publishing
 
 
 def setup_logging() -> None:
@@ -39,6 +40,7 @@ def main() -> None:
     application.add_handler(CommandHandler("generate", generate_command))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), admin_url_message))
     application.add_handler(CallbackQueryHandler(moderation_callback))
+    application.job_queue.run_repeating(run_scheduled_publishing, interval=60, first=10)
 
     # Railway sets PORT by default for web services. This bot uses long polling,
     # so it should run as a worker process. PORT is ignored safely.

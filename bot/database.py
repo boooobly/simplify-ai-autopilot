@@ -28,13 +28,15 @@ class DraftDatabase:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     content TEXT NOT NULL,
                     source_url TEXT,
-                    status TEXT NOT NULL DEFAULT 'pending',
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    scheduled_at TIMESTAMP,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
             self._ensure_column(conn, "drafts", "source_url", "TEXT")
+            self._ensure_column(conn, "drafts", "scheduled_at", "TIMESTAMP")
             conn.commit()
 
     def _ensure_column(
@@ -50,7 +52,7 @@ class DraftDatabase:
     def create_draft(self, content: str, source_url: str | None = None) -> int:
         with self._connect() as conn:
             cursor = conn.execute(
-                "INSERT INTO drafts (content, source_url, status) VALUES (?, ?, 'pending')",
+                "INSERT INTO drafts (content, source_url, status) VALUES (?, ?, 'draft')",
                 (content, source_url),
             )
             conn.commit()
@@ -98,3 +100,29 @@ class DraftDatabase:
                 (status, draft_id),
             )
             conn.commit()
+
+    def schedule_draft(self, draft_id: int, scheduled_at_utc: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE drafts
+                SET status = 'scheduled', scheduled_at = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (scheduled_at_utc, draft_id),
+            )
+            conn.commit()
+
+    def get_due_scheduled_drafts(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM drafts
+                WHERE status = 'scheduled'
+                  AND scheduled_at IS NOT NULL
+                  AND scheduled_at <= CURRENT_TIMESTAMP
+                ORDER BY scheduled_at ASC
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
