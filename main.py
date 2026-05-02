@@ -9,7 +9,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler
 
 from bot.config import load_settings
 from bot.database import DraftDatabase
-from bot.handlers import draft_command, moderation_callback, start_command
+from bot.handlers import draft_command, generate_command, moderation_callback, start_command
 
 
 def setup_logging() -> None:
@@ -30,6 +30,7 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("draft", draft_command))
+    application.add_handler(CommandHandler("generate", generate_command))
     application.add_handler(CallbackQueryHandler(moderation_callback))
 
     # Railway sets PORT by default for web services. This bot uses long polling,

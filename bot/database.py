@@ -27,18 +27,31 @@ class DraftDatabase:
                 CREATE TABLE IF NOT EXISTS drafts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     content TEXT NOT NULL,
+                    source_url TEXT,
                     status TEXT NOT NULL DEFAULT 'pending',
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
+            self._ensure_column(conn, "drafts", "source_url", "TEXT")
             conn.commit()
 
-    def create_draft(self, content: str) -> int:
+    def _ensure_column(
+        self, conn: sqlite3.Connection, table_name: str, column_name: str, column_sql_type: str
+    ) -> None:
+        columns = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        existing = {row[1] for row in columns}
+        if column_name not in existing:
+            conn.execute(
+                f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql_type}"
+            )
+
+    def create_draft(self, content: str, source_url: str | None = None) -> int:
         with self._connect() as conn:
             cursor = conn.execute(
-                "INSERT INTO drafts (content, status) VALUES (?, 'pending')", (content,)
+                "INSERT INTO drafts (content, source_url, status) VALUES (?, ?, 'pending')",
+                (content, source_url),
             )
             conn.commit()
             return int(cursor.lastrowid)
