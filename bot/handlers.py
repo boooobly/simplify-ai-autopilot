@@ -648,8 +648,7 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     except Exception as exc:
         logger.exception("Failed to process URL %s: %s", source_url, exc)
         await update.message.reply_text(
-            "Не удалось получить страницу или подготовить черновик. "
-            "Проверь ссылку и попробуй ещё раз."
+            "Не удалось нормально прочитать страницу. Возможно, там мало текста, сайт закрыл доступ или страница требует JavaScript. Попробуй другую ссылку или пришли текст новости вручную."
         )
         return
 
