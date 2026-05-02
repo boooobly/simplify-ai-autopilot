@@ -15,6 +15,12 @@ def _fit_caption(text: str) -> str:
     return text if len(text) <= MEDIA_CAPTION_LIMIT else text[: MEDIA_CAPTION_LIMIT - 1].rstrip() + "…"
 
 
+def _short_media_caption(text: str) -> str:
+    if len(text) <= 300:
+        return text
+    return text[:299].rstrip() + "…"
+
+
 async def publish_to_channel(
     bot: Bot,
     channel_id: str,
@@ -25,13 +31,25 @@ async def publish_to_channel(
     """Publish text or media post to the configured Telegram channel."""
 
     if media_url and media_type == "photo":
-        await bot.send_photo(chat_id=channel_id, photo=media_url, caption=_fit_caption(content))
+        if len(content) <= MEDIA_CAPTION_LIMIT:
+            await bot.send_photo(chat_id=channel_id, photo=media_url, caption=content)
+        else:
+            await bot.send_photo(chat_id=channel_id, photo=media_url, caption=_short_media_caption(content))
+            await bot.send_message(chat_id=channel_id, text=content)
         return
     if media_url and media_type == "video":
-        await bot.send_video(chat_id=channel_id, video=media_url, caption=_fit_caption(content))
+        if len(content) <= MEDIA_CAPTION_LIMIT:
+            await bot.send_video(chat_id=channel_id, video=media_url, caption=content)
+        else:
+            await bot.send_video(chat_id=channel_id, video=media_url, caption=_short_media_caption(content))
+            await bot.send_message(chat_id=channel_id, text=content)
         return
     if media_url and media_type == "animation":
-        await bot.send_animation(chat_id=channel_id, animation=media_url, caption=_fit_caption(content))
+        if len(content) <= MEDIA_CAPTION_LIMIT:
+            await bot.send_animation(chat_id=channel_id, animation=media_url, caption=content)
+        else:
+            await bot.send_animation(chat_id=channel_id, animation=media_url, caption=_short_media_caption(content))
+            await bot.send_message(chat_id=channel_id, text=content)
         return
 
     await bot.send_message(chat_id=channel_id, text=content)
