@@ -94,6 +94,12 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     source_url = " ".join(context.args).strip() if context.args else None
+
+    if not settings.openai_api_key:
+        if update.message:
+            await update.message.reply_text("OpenAI API ключ не настроен. Добавь OPENAI_API_KEY в переменные окружения и перезапусти бота.")
+        return
+
     if update.message:
         await update.message.reply_text("Генерирую черновик...")
 

@@ -6,7 +6,7 @@
 
 - `/start` доступен только администратору
 - `/draft` создаёт тестовый черновик и отправляет его на модерацию
-- `/generate [source_url]` создаёт черновик для Telegram через OpenAI на русском для `@simplify_ai`
+- `/generate [source_url]` создаёт черновик для Telegram через OpenAI на русском для `@simplify_ai` (если настроен `OPENAI_API_KEY`)
 - Сгенерированные черновики используют правила стиля из `prompts/post_style.md` (человечный тон, краткость, без канцелярита)
 - Кнопки модерации в интерфейсе:
   - ✅ Опубликовать
@@ -40,7 +40,7 @@ README.md
 
 - Python 3.11+
 - Telegram bot token от BotFather
-- OpenAI API key
+- OpenAI API key (опционально, нужен только для `/generate`)
 
 ## Установка
 
@@ -63,7 +63,9 @@ cp .env.example .env
 - `BOT_TOKEN` — токен бота
 - `ADMIN_ID` — числовой user ID администратора в Telegram
 - `CHANNEL_ID` — username канала (пример: `@my_channel`) или id канала
-- `OPENAI_API_KEY` — OpenAI API key для команды `/generate`
+- `OPENAI_API_KEY` — опциональный OpenAI API key для команды `/generate`
+- `OPENAI_API_KEY` можно не задавать: бот запускается и работает без него (`/start`, `/draft`, модерация, отклонение, переписывание, публикация).
+- Команда `/generate` требует `OPENAI_API_KEY`; без него бот подскажет, что нужно добавить ключ.
 
 ## Команды
 
@@ -94,7 +96,7 @@ python main.py
   - `BOT_TOKEN`
   - `ADMIN_ID`
   - `CHANNEL_ID`
-  - `OPENAI_API_KEY`
+  - `OPENAI_API_KEY` (опционально, только для `/generate`)
 
 ## Безопасность
 
