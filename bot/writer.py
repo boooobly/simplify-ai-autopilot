@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -13,6 +13,46 @@ from openai import OpenAI
 
 STYLE_PATH = Path("prompts/post_style.md")
 URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
+TRACKING_PARAMS = {
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_term",
+    "utm_content",
+    "utm_id",
+    "fbclid",
+    "gclid",
+    "yclid",
+    "mc_cid",
+    "mc_eid",
+    "ref",
+    "ref_src",
+}
+NOISE_PATTERNS = [
+    "cookie",
+    "cookies",
+    "accept all",
+    "subscribe",
+    "sign up",
+    "newsletter",
+    "privacy policy",
+    "terms of use",
+    "реклама",
+    "подписаться",
+    "принять",
+    "куки",
+    "политика конфиденциальности",
+]
+ARTICLE_SELECTORS = [
+    "article",
+    "main",
+    '[role="main"]',
+    ".post",
+    ".article",
+    ".entry-content",
+    ".post-content",
+    ".content",
+]
 
 
 def _load_style_prompt() -> str:
@@ -55,8 +95,41 @@ def find_first_url(text: str) -> str | None:
 def normalize_url(url: str) -> str:
     parts = urlsplit(url.strip())
     path = parts.path or "/"
-    normalized = urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, parts.query, ""))
+    filtered_query = urlencode(
+        [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k.lower() not in TRACKING_PARAMS],
+        doseq=True,
+    )
+    normalized = urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, filtered_query, ""))
     return normalized.rstrip("/")
+
+
+def _is_noisy_line(line: str) -> bool:
+    lowered = line.lower()
+    if any(pattern in lowered for pattern in NOISE_PATTERNS):
+        return True
+    if len(line) < 25 and not re.search(r"[0-9]", line):
+        useful_tokens = ("ai", "ml", "llm", "openai", "anthropic", "google", "meta", "nvidia", "gpt", "api")
+        if not any(token in lowered for token in useful_tokens):
+            return True
+    return False
+
+
+def _clean_lines(lines: list[str]) -> str:
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for raw in lines:
+        line = " ".join(raw.split())
+        if not line:
+            continue
+        normalized = line.casefold()
+        if normalized in seen:
+            continue
+        if _is_noisy_line(line):
+            continue
+        seen.add(normalized)
+        cleaned.append(line)
+    text = "\n".join(cleaned).strip()
+    return text[:12000]
 
 
 def fetch_page_content(source_url: str, timeout_seconds: int = 12) -> tuple[str, str]:
@@ -72,15 +145,34 @@ def fetch_page_content(source_url: str, timeout_seconds: int = 12) -> tuple[str,
         raise ValueError("URL не содержит HTML-страницу.")
 
     soup = BeautifulSoup(response.text, "html.parser")
-    for tag in soup(["script", "style", "noscript"]):
+    for tag in soup(
+        ["script", "style", "noscript", "svg", "iframe", "form", "button", "input", "nav", "footer", "header", "aside"]
+    ):
         tag.decompose()
 
     title = (soup.title.string or "").strip() if soup.title else ""
-    text = "\n".join(line.strip() for line in soup.get_text("\n").splitlines() if line.strip())
-    if not text:
-        raise ValueError("Не удалось извлечь текст страницы.")
+    if not title:
+        og_title = soup.find("meta", property="og:title")
+        tw_title = soup.find("meta", attrs={"name": "twitter:title"})
+        title = (og_title.get("content", "") if og_title else "").strip() or (tw_title.get("content", "") if tw_title else "").strip()
+    if not title:
+        title = "Без заголовка"
 
-    return title or "Без заголовка", text[:12000]
+    container = None
+    for selector in ARTICLE_SELECTORS:
+        found = soup.select_one(selector)
+        if found:
+            container = found
+            break
+    if container is None:
+        container = soup.body or soup
+
+    raw_lines = container.get_text("\n").splitlines()
+    text = _clean_lines(raw_lines)
+    if len(text) < 700:
+        raise ValueError("На странице слишком мало полезного текста.")
+
+    return title, text
 
 
 def generate_post_draft_from_page(
@@ -90,8 +182,11 @@ def generate_post_draft_from_page(
     style = _load_style_prompt()
 
     user_prompt = (
-        "Ниже ссылка и текст страницы. "
-        "Сначала коротко суммаризуй материал для себя, затем на основе summary создай один готовый пост в стиле @simplify_ai. "
+        "Ниже ссылка и извлечённый текст страницы. "
+        "Опирайся только на этот текст страницы. "
+        "Если факт не подтверждается текстом, не выдумывай его. "
+        "Сделай один готовый пост в стиле @simplify_ai длиной до 900 символов. "
+        "В конце обязательно добавь строку: Источник: <source_url>. "
         "Верни только финальный текст поста без комментариев и без markdown-блоков.\n\n"
         f"Источник: {source_url}\n"
         f"Заголовок: {title}\n\n"

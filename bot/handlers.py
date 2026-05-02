@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 ALLOWED_MEDIA_TYPES = {"photo", "video", "animation"}
 ALLOWED_DRAFT_STATUSES = {"draft", "approved", "scheduled", "published", "rejected"}
 ACTIONABLE_DRAFT_STATUSES = {"draft", "approved"}
+TELEGRAM_CAPTION_LIMIT = 1024
+SHORT_MEDIA_PREVIEW_LIMIT = 850
 
 
 def _is_admin(user_id: int | None, admin_id: int) -> bool:
@@ -59,6 +61,53 @@ def _build_moderation_text(
     source = source_url or "не указан"
     media_line = f"\nМедиа: {media_type}" if media_type and media_url else "\nМедиа: нет"
     return f"📝 Черновик #{draft_id}\nИсточник: {source}{media_line}\n\n{content}\n\nВыбери действие:"
+
+
+def _is_media_callback_message(query) -> bool:
+    message = query.message if query else None
+    if not message:
+        return False
+    return bool(message.photo or message.video or message.animation or message.document or message.caption)
+
+
+async def _edit_callback_message(
+    query, text: str, reply_markup: InlineKeyboardMarkup | None = None
+) -> None:
+    if _is_media_callback_message(query):
+        if len(text) <= TELEGRAM_CAPTION_LIMIT:
+            await query.edit_message_caption(caption=text, reply_markup=reply_markup)
+            return
+        await query.edit_message_caption(
+            caption="Готово. Полный текст отправил отдельным сообщением ниже.",
+            reply_markup=reply_markup,
+        )
+        if query.message:
+            await query.message.reply_text(text)
+        return
+    await query.edit_message_text(text, reply_markup=reply_markup)
+
+
+def _build_media_preview_caption(
+    draft_id: int,
+    content: str,
+    source_url: str | None = None,
+    media_type: str | None = None,
+) -> str:
+    source = source_url or "не указан"
+    media = media_type or "неизвестно"
+    snippet = content[:500]
+    caption = (
+        f"📝 Черновик #{draft_id}\n"
+        f"Источник: {source}\n"
+        f"Медиа: {media}\n\n"
+        f"{snippet}"
+    )
+    if len(content) > 500:
+        caption += f"\n...\nПолный текст можно открыть через /draft_info {draft_id}"
+    caption += "\n\nВыбери действие:"
+    if len(caption) > SHORT_MEDIA_PREVIEW_LIMIT:
+        caption = caption[: SHORT_MEDIA_PREVIEW_LIMIT - 1].rstrip() + "…"
+    return caption
 
 
 
@@ -129,15 +178,17 @@ async def _send_moderation_preview(
 ) -> None:
     text = _build_moderation_text(draft_id, content, source_url, media_type, media_url)
     keyboard = _moderation_keyboard(draft_id)
-    if media_url and media_type == "photo":
-        await context.bot.send_photo(chat_id=admin_id, photo=media_url, caption=text, reply_markup=keyboard)
-        return
-    if media_url and media_type == "video":
-        await context.bot.send_video(chat_id=admin_id, video=media_url, caption=text, reply_markup=keyboard)
-        return
-    if media_url and media_type == "animation":
-        await context.bot.send_animation(chat_id=admin_id, animation=media_url, caption=text, reply_markup=keyboard)
-        return
+    if media_url and media_type in {"photo", "video", "animation"}:
+        short_caption = _build_media_preview_caption(draft_id, content, source_url, media_type)
+        if media_type == "photo":
+            await context.bot.send_photo(chat_id=admin_id, photo=media_url, caption=short_caption, reply_markup=keyboard)
+            return
+        if media_type == "video":
+            await context.bot.send_video(chat_id=admin_id, video=media_url, caption=short_caption, reply_markup=keyboard)
+            return
+        if media_type == "animation":
+            await context.bot.send_animation(chat_id=admin_id, animation=media_url, caption=short_caption, reply_markup=keyboard)
+            return
     await context.bot.send_message(chat_id=admin_id, text=text, reply_markup=keyboard)
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Allow /start only for admin user."""
@@ -431,12 +482,12 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             draft_id = int(parts[1])
             slot = None
     except (AttributeError, ValueError, IndexError):
-        await query.edit_message_text("Некорректное действие.")
+        await _edit_callback_message(query, "Некорректное действие.")
         return
 
     draft = db.get_draft(draft_id)
     if not draft:
-        await query.edit_message_text(f"Черновик #{draft_id} не найден.")
+        await _edit_callback_message(query, f"Черновик #{draft_id} не найден.")
         return
 
     try:
@@ -449,18 +500,19 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 draft.get("media_type"),
             )
             db.update_status(draft_id, "published")
-            await query.edit_message_text(f"✅ Черновик #{draft_id} опубликован в канал.")
+            await _edit_callback_message(query, f"✅ Черновик #{draft_id} опубликован в канал.")
 
         elif action == "schedule":
             db.update_status(draft_id, "approved")
-            await query.edit_message_text(
+            await _edit_callback_message(
+                query,
                 f"Выбери слот публикации для черновика #{draft_id} (часовой пояс: {settings.schedule_timezone}):",
                 reply_markup=_schedule_keyboard(draft_id),
             )
 
         elif action == "schedule_slot":
             if slot is None:
-                await query.edit_message_text("Некорректный слот времени.")
+                await _edit_callback_message(query, "Некорректный слот времени.")
                 return
             tz = ZoneInfo(settings.schedule_timezone)
             now_local = datetime.now(tz)
@@ -471,26 +523,29 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             scheduled_utc = scheduled_local.astimezone(ZoneInfo("UTC"))
             db.schedule_draft(draft_id, scheduled_utc.strftime("%Y-%m-%d %H:%M:%S"))
-            await query.edit_message_text(
+            await _edit_callback_message(
+                query,
                 f"🗓️ Черновик #{draft_id} запланирован на {scheduled_local.strftime('%Y-%m-%d %H:%M')} ({settings.schedule_timezone})."
             )
 
         elif action == "reject":
             db.update_status(draft_id, "rejected")
-            await query.edit_message_text(f"❌ Черновик #{draft_id} отклонён.")
+            await _edit_callback_message(query, f"❌ Черновик #{draft_id} отклонён.")
 
         elif action == "rewrite":
             rewritten = rewrite_test_draft(draft["content"])
             db.update_draft_content(draft_id, rewritten)
             db.update_status(draft_id, "draft")
-            await query.edit_message_text(
+            await _edit_callback_message(
+                query,
                 _build_moderation_text(draft_id, rewritten, draft.get("source_url")),
                 reply_markup=_moderation_keyboard(draft_id),
             )
 
         elif action == "draft_info":
             reply_markup = _moderation_keyboard(draft_id) if draft.get("status") in ACTIONABLE_DRAFT_STATUSES else None
-            await query.edit_message_text(
+            await _edit_callback_message(
+                query,
                 _full_draft_text(draft),
                 reply_markup=reply_markup,
             )
@@ -498,10 +553,10 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         elif action == "topic_generate":
             topic = db.get_topic_candidate(draft_id)
             if not topic:
-                await query.edit_message_text("Тема не найдена.")
+                await _edit_callback_message(query, "Тема не найдена.")
                 return
             if not settings.openai_api_key:
-                await query.edit_message_text("OPENAI_API_KEY не настроен.")
+                await _edit_callback_message(query, "OPENAI_API_KEY не настроен.")
                 return
 
             title, page_text = fetch_page_content(topic["url"])
@@ -513,14 +568,19 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             new_draft_id = db.create_draft(content, source_url=topic["url"])
             await _send_moderation_preview(context, settings.admin_id, new_draft_id, content, topic["url"])
-            await query.edit_message_text(f"Создан черновик #{new_draft_id} из темы #{topic['id']}.")
+            await _edit_callback_message(query, f"Создан черновик #{new_draft_id} из темы #{topic['id']}.")
 
         else:
-            await query.edit_message_text("Неизвестное действие.")
+            await _edit_callback_message(query, "Неизвестное действие.")
 
     except Exception as exc:  # Keep user-facing flow stable on runtime errors.
         logger.exception("Error while handling moderation callback: %s", exc)
-        await query.edit_message_text("Что-то пошло не так. Попробуй ещё раз.")
+        try:
+            await _edit_callback_message(query, "Что-то пошло не так. Попробуй ещё раз.")
+        except Exception as edit_exc:
+            logger.exception("Failed to edit callback message after error: %s", edit_exc)
+            if query.message:
+                await query.message.reply_text("Что-то пошло не так. Посмотри логи.")
 
 
 async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -588,8 +648,7 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     except Exception as exc:
         logger.exception("Failed to process URL %s: %s", source_url, exc)
         await update.message.reply_text(
-            "Не удалось получить страницу или подготовить черновик. "
-            "Проверь ссылку и попробуй ещё раз."
+            "Не удалось нормально прочитать страницу. Возможно, там мало текста, сайт закрыл доступ или страница требует JavaScript. Попробуй другую ссылку или пришли текст новости вручную."
         )
         return
 
