@@ -15,10 +15,10 @@
 - Добавлена базовая защита от дублей по `source_url` (повторная ссылка не создаёт новый черновик)
 - Сгенерированные черновики используют правила стиля из `prompts/post_style.md` (человечный тон, краткость, без канцелярита)
 - Кнопки модерации в интерфейсе:
-  - ✅ Publish now
-  - 🗓️ Schedule
-  - ❌ Reject
-  - ✍️ Rewrite
+  - ✅ Опубликовать
+  - 🗓️ Запланировать
+  - ❌ Отклонить
+  - ✍️ Переписать
 - Для Schedule доступны слоты: `10:00`, `14:00`, `18:00`, `21:00`
 - Публикация одобренного контента в канал
 - Черновики поддерживают опциональные `media_url` и `media_type` (`photo`, `animation`, `video`)
@@ -28,7 +28,7 @@
 - Сохранение текста черновика, статуса, `source_url`, `scheduled_at`, `media_url` и `media_type` в SQLite
 - Статусы черновиков: `draft`, `approved`, `scheduled`, `published`, `rejected`
 - Автосбор тем по AI через `/collect` из RSS и публичных страниц (OpenAI, Anthropic, Google AI, Perplexity, Hugging Face, GitHub Trending AI)
-- `/topics` показывает последние topic candidates с кнопкой `Generate post` для создания черновика
+- `/topics` показывает последние topic candidates с кнопкой `✍️ Создать пост` для создания черновика
 - `/attach_media <draft_id> <photo|video|animation> <media_url>` — прикрепить медиа к черновику вручную
 - Если администратор отвечает на сообщение модерации фото/анимацией/видео, бот сохраняет Telegram `file_id` в черновик
 - Дедупликация тем по URL (повторная тема не добавляется)
@@ -83,6 +83,7 @@ cp .env.example .env
 - `CHANNEL_ID` — username канала (пример: `@my_channel`) или id канала
 - `OPENAI_API_KEY` — опциональный OpenAI API key для команды `/generate`
 - `SCHEDULE_TIMEZONE` — таймзона для планирования (по умолчанию `Europe/Moscow`)
+- `DB_PATH` — путь к SQLite-файлу черновиков (по умолчанию `data/drafts.db`)
 - `OPENAI_API_KEY` можно не задавать: бот запускается и работает без него (`/start`, `/draft`, модерация, отклонение, переписывание, публикация).
 - Команда `/generate` требует `OPENAI_API_KEY`; без него бот подскажет, что нужно добавить ключ.
 
@@ -93,7 +94,7 @@ cp .env.example .env
 - `/generate` — создание AI-черновика
 - `/generate https://example.com/article` — создание AI-черновика и сохранение source URL в БД
 - `/collect` — собрать свежие темы-кандидаты
-- `/topics` — показать последние темы с кнопками `Generate post`
+- `/topics` — показать последние темы с кнопками `✍️ Создать пост`
 - `/attach_media <draft_id> <photo|video|animation> <media_url>` — прикрепить медиа к черновику
 - `https://example.com/article` (обычным сообщением) — авто-создание черновика из содержимого страницы
 
@@ -117,11 +118,14 @@ python main.py
 
 Важно:
 - Разворачивай бота как **worker/background service** (долгоживущий процесс).
+- Если нужно сохранять черновики и отложенные публикации после рестарта, размести SQLite-файл на persistent storage / volume и укажи путь через `DB_PATH`.
+- Отложенные публикации проверяются каждые 60 секунд.
 - Задай переменные окружения в настройках проекта Railway:
   - `BOT_TOKEN`
   - `ADMIN_ID`
   - `CHANNEL_ID`
   - `OPENAI_API_KEY` (опционально, только для `/generate`)
+  - `DB_PATH` (опционально; по умолчанию `data/drafts.db`)
 
 ## Безопасность
 
