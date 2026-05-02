@@ -22,6 +22,7 @@ from bot.writer import (
 )
 
 logger = logging.getLogger(__name__)
+ALLOWED_MEDIA_TYPES = {"photo", "video", "animation"}
 
 
 def _is_admin(user_id: int | None, admin_id: int) -> bool:
@@ -46,11 +47,55 @@ def _schedule_keyboard(draft_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def _build_moderation_text(draft_id: int, content: str, source_url: str | None = None) -> str:
+def _build_moderation_text(
+    draft_id: int,
+    content: str,
+    source_url: str | None = None,
+    media_type: str | None = None,
+    media_url: str | None = None,
+) -> str:
     source = source_url or "не указан"
-    return f"📝 Черновик #{draft_id}\nИсточник: {source}\n\n{content}\n\nВыбери действие:"
+    media_line = f"\nМедиа: {media_type}" if media_type and media_url else "\nМедиа: нет"
+    return f"📝 Черновик #{draft_id}\nИсточник: {source}{media_line}\n\n{content}\n\nВыбери действие:"
 
 
+def _extract_draft_id_from_text(message_text: str) -> int | None:
+    marker = "Черновик #"
+    if marker not in message_text:
+        return None
+    tail = message_text.split(marker, maxsplit=1)[1]
+    digits = ""
+    for ch in tail:
+        if ch.isdigit():
+            digits += ch
+        else:
+            break
+    return int(digits) if digits else None
+
+
+
+
+async def _send_moderation_preview(
+    context: ContextTypes.DEFAULT_TYPE,
+    admin_id: int,
+    draft_id: int,
+    content: str,
+    source_url: str | None = None,
+    media_url: str | None = None,
+    media_type: str | None = None,
+) -> None:
+    text = _build_moderation_text(draft_id, content, source_url, media_type, media_url)
+    keyboard = _moderation_keyboard(draft_id)
+    if media_url and media_type == "photo":
+        await context.bot.send_photo(chat_id=admin_id, photo=media_url, caption=text, reply_markup=keyboard)
+        return
+    if media_url and media_type == "video":
+        await context.bot.send_video(chat_id=admin_id, video=media_url, caption=text, reply_markup=keyboard)
+        return
+    if media_url and media_type == "animation":
+        await context.bot.send_animation(chat_id=admin_id, animation=media_url, caption=text, reply_markup=keyboard)
+        return
+    await context.bot.send_message(chat_id=admin_id, text=text, reply_markup=keyboard)
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Allow /start only for admin user."""
 
@@ -70,7 +115,45 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "/draft - создать тестовый черновик\n"
             "/generate - создать черновик через ИИ\n"
             "/generate <ссылка> - создать черновик по ссылке"
+            "/attach_media <draft_id> <photo|video|animation> <media_url> - прикрепить медиа"
         )
+
+
+async def attach_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_admin(user_id, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+
+    if len(context.args) < 3:
+        await update.message.reply_text("Использование: /attach_media <draft_id> <photo|video|animation> <media_url>")
+        return
+
+    try:
+        draft_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("draft_id должен быть числом.")
+        return
+
+    media_type = context.args[1].lower().strip()
+    media_url = " ".join(context.args[2:]).strip()
+    if media_type not in ALLOWED_MEDIA_TYPES:
+        await update.message.reply_text("media_type должен быть одним из: photo, video, animation.")
+        return
+    if not media_url:
+        await update.message.reply_text("media_url не может быть пустым.")
+        return
+
+    draft = db.get_draft(draft_id)
+    if not draft:
+        await update.message.reply_text(f"Черновик #{draft_id} не найден.")
+        return
+
+    db.attach_media(draft_id, media_url, media_type)
+    await update.message.reply_text(f"Медиа добавлено к черновику #{draft_id}: {media_type}.")
 
 
 async def draft_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -88,11 +171,7 @@ async def draft_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     content = create_test_draft()
     draft_id = db.create_draft(content)
 
-    await context.bot.send_message(
-        chat_id=settings.admin_id,
-        text=_build_moderation_text(draft_id, content),
-        reply_markup=_moderation_keyboard(draft_id),
-    )
+    await _send_moderation_preview(context, settings.admin_id, draft_id, content)
 
     if update.message:
         await update.message.reply_text(f"Тестовый черновик #{draft_id} создан и отправлен на модерацию.")
@@ -129,11 +208,7 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     draft_id = db.create_draft(content, source_url=source_url)
-    await context.bot.send_message(
-        chat_id=settings.admin_id,
-        text=_build_moderation_text(draft_id, content, source_url),
-        reply_markup=_moderation_keyboard(draft_id),
-    )
+    await _send_moderation_preview(context, settings.admin_id, draft_id, content, source_url)
 
     if update.message:
         await update.message.reply_text(f"Черновик #{draft_id} создан и отправлен на модерацию.")
@@ -226,7 +301,13 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     try:
         if action == "publish":
-            await publish_to_channel(context.bot, settings.channel_id, draft["content"])
+            await publish_to_channel(
+                context.bot,
+                settings.channel_id,
+                draft["content"],
+                draft.get("media_url"),
+                draft.get("media_type"),
+            )
             db.update_status(draft_id, "published")
             await query.edit_message_text(f"✅ Черновик #{draft_id} опубликован в канал.")
 
@@ -284,11 +365,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 page_text=page_text,
             )
             new_draft_id = db.create_draft(content, source_url=topic["url"])
-            await context.bot.send_message(
-                chat_id=settings.admin_id,
-                text=_build_moderation_text(new_draft_id, content, topic["url"]),
-                reply_markup=_moderation_keyboard(new_draft_id),
-            )
+            await _send_moderation_preview(context, settings.admin_id, new_draft_id, content, topic["url"])
             await query.edit_message_text(f"Создан черновик #{new_draft_id} из темы #{topic['id']}.")
 
         else:
@@ -307,7 +384,35 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     user_id = update.effective_user.id if update.effective_user else None
     message_text = (update.message.text or "").strip() if update.message else ""
 
-    if not _is_admin(user_id, settings.admin_id) or not message_text:
+    if not _is_admin(user_id, settings.admin_id):
+        return
+
+    if update.message and update.message.reply_to_message:
+        reply_text = update.message.reply_to_message.text or update.message.reply_to_message.caption or ""
+        draft_id = _extract_draft_id_from_text(reply_text)
+        if draft_id is not None:
+            media_url = None
+            media_type = None
+            if update.message.photo:
+                media_type = "photo"
+                media_url = update.message.photo[-1].file_id
+            elif update.message.animation:
+                media_type = "animation"
+                media_url = update.message.animation.file_id
+            elif update.message.video:
+                media_type = "video"
+                media_url = update.message.video.file_id
+
+            if media_type and media_url:
+                draft = db.get_draft(draft_id)
+                if not draft:
+                    await update.message.reply_text(f"Черновик #{draft_id} не найден.")
+                    return
+                db.attach_media(draft_id, media_url, media_type)
+                await update.message.reply_text(f"Привязал {media_type} к черновику #{draft_id}.")
+                return
+
+    if not message_text:
         return
 
     source_url_raw = find_first_url(message_text)
@@ -342,9 +447,5 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     draft_id = db.create_draft(content, source_url=source_url)
-    await context.bot.send_message(
-        chat_id=settings.admin_id,
-        text=_build_moderation_text(draft_id, content, source_url),
-        reply_markup=_moderation_keyboard(draft_id),
-    )
+    await _send_moderation_preview(context, settings.admin_id, draft_id, content, source_url)
     await update.message.reply_text(f"Черновик #{draft_id} готов и отправлен на модерацию.")

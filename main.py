@@ -14,6 +14,7 @@ from bot.handlers import (
     draft_command,
     generate_command,
     collect_command,
+    attach_media_command,
     moderation_callback,
     start_command,
     topics_command,
@@ -41,8 +42,9 @@ def main() -> None:
     application.add_handler(CommandHandler("draft", draft_command))
     application.add_handler(CommandHandler("generate", generate_command))
     application.add_handler(CommandHandler("collect", collect_command))
+    application.add_handler(CommandHandler("attach_media", attach_media_command))
     application.add_handler(CommandHandler("topics", topics_command))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), admin_url_message))
+    application.add_handler(MessageHandler(~filters.COMMAND, admin_url_message))
     application.add_handler(CallbackQueryHandler(moderation_callback))
     application.job_queue.run_repeating(run_scheduled_publishing, interval=60, first=10)
 

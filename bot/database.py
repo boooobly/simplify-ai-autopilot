@@ -28,6 +28,8 @@ class DraftDatabase:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     content TEXT NOT NULL,
                     source_url TEXT,
+                    media_url TEXT,
+                    media_type TEXT,
                     status TEXT NOT NULL DEFAULT 'draft',
                     scheduled_at TIMESTAMP,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -37,6 +39,8 @@ class DraftDatabase:
             )
             self._ensure_column(conn, "drafts", "source_url", "TEXT")
             self._ensure_column(conn, "drafts", "scheduled_at", "TIMESTAMP")
+            self._ensure_column(conn, "drafts", "media_url", "TEXT")
+            self._ensure_column(conn, "drafts", "media_type", "TEXT")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS topic_candidates (
@@ -99,6 +103,18 @@ class DraftDatabase:
                 WHERE id = ?
                 """,
                 (content, draft_id),
+            )
+            conn.commit()
+
+    def attach_media(self, draft_id: int, media_url: str, media_type: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE drafts
+                SET media_url = ?, media_type = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (media_url, media_type, draft_id),
             )
             conn.commit()
 
