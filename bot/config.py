@@ -18,7 +18,7 @@ class Settings:
     bot_token: str
     admin_id: int
     channel_id: str
-    openai_api_key: str
+    openai_api_key: str | None
     db_path: str = "data/drafts.db"
 
 
@@ -28,7 +28,8 @@ def load_settings() -> Settings:
     token = os.getenv("BOT_TOKEN", "").strip()
     admin_raw = os.getenv("ADMIN_ID", "").strip()
     channel_id = os.getenv("CHANNEL_ID", "").strip()
-    openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    openai_api_key_raw = os.getenv("OPENAI_API_KEY", "").strip()
+    openai_api_key = openai_api_key_raw or None
 
     missing = []
     if not token:
@@ -37,8 +38,6 @@ def load_settings() -> Settings:
         missing.append("ADMIN_ID")
     if not channel_id:
         missing.append("CHANNEL_ID")
-    if not openai_api_key:
-        missing.append("OPENAI_API_KEY")
 
     if missing:
         raise ValueError(
