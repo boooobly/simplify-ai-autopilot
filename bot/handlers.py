@@ -24,6 +24,7 @@ from bot.writer import (
 logger = logging.getLogger(__name__)
 ALLOWED_MEDIA_TYPES = {"photo", "video", "animation"}
 ALLOWED_DRAFT_STATUSES = {"draft", "approved", "scheduled", "published", "rejected"}
+ACTIONABLE_DRAFT_STATUSES = {"draft", "approved"}
 
 
 def _is_admin(user_id: int | None, admin_id: int) -> bool:
@@ -77,14 +78,12 @@ def _draft_snippet_text(draft: dict[str, object]) -> str:
     )
 
 
-def _draft_actions_keyboard(draft_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton(f"Открыть #{draft_id}", callback_data=f"draft_info:{draft_id}")],
-            [InlineKeyboardButton(f"Опубликовать #{draft_id}", callback_data=f"publish:{draft_id}")],
-            [InlineKeyboardButton(f"Запланировать #{draft_id}", callback_data=f"schedule:{draft_id}")],
-        ]
-    )
+def _draft_actions_keyboard(draft_id: int, status: str | None) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(f"Открыть #{draft_id}", callback_data=f"draft_info:{draft_id}")]]
+    if status in ACTIONABLE_DRAFT_STATUSES:
+        rows.append([InlineKeyboardButton(f"Опубликовать #{draft_id}", callback_data=f"publish:{draft_id}")])
+        rows.append([InlineKeyboardButton(f"Запланировать #{draft_id}", callback_data=f"schedule:{draft_id}")])
+    return InlineKeyboardMarkup(rows)
 
 
 def _full_draft_text(draft: dict[str, object]) -> str:
@@ -195,7 +194,7 @@ async def drafts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await context.bot.send_message(
             chat_id=settings.admin_id,
             text=_draft_snippet_text(draft),
-            reply_markup=_draft_actions_keyboard(int(draft["id"])),
+            reply_markup=_draft_actions_keyboard(int(draft["id"]), str(draft.get("status") or "")),
         )
 
 
@@ -222,7 +221,8 @@ async def draft_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"Черновик #{draft_id} не найден.")
         return
 
-    await update.message.reply_text(_full_draft_text(draft), reply_markup=_moderation_keyboard(draft_id))
+    reply_markup = _moderation_keyboard(draft_id) if draft.get("status") in ACTIONABLE_DRAFT_STATUSES else None
+    await update.message.reply_text(_full_draft_text(draft), reply_markup=reply_markup)
 
 
 async def delete_draft_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -241,6 +241,15 @@ async def delete_draft_command(update: Update, context: ContextTypes.DEFAULT_TYP
         draft_id = int(context.args[0])
     except ValueError:
         await update.message.reply_text("id должен быть числом.")
+        return
+
+    draft = db.get_draft(draft_id)
+    if not draft:
+        await update.message.reply_text(f"Черновик #{draft_id} не найден.")
+        return
+
+    if draft.get("status") == "published":
+        await update.message.reply_text("Нельзя удалить опубликованный черновик. Он остаётся в истории.")
         return
 
     deleted = db.delete_draft(draft_id)
@@ -480,9 +489,10 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
 
         elif action == "draft_info":
+            reply_markup = _moderation_keyboard(draft_id) if draft.get("status") in ACTIONABLE_DRAFT_STATUSES else None
             await query.edit_message_text(
                 _full_draft_text(draft),
-                reply_markup=_moderation_keyboard(draft_id),
+                reply_markup=reply_markup,
             )
 
         elif action == "topic_generate":
