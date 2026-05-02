@@ -21,11 +21,16 @@
   - ✍️ Rewrite
 - Для Schedule доступны слоты: `10:00`, `14:00`, `18:00`, `21:00`
 - Публикация одобренного контента в канал
+- Черновики поддерживают опциональные `media_url` и `media_type` (`photo`, `animation`, `video`)
+- Превью модерации показывает медиа, если оно прикреплено к черновику
+- Публикация в канал отправляет media+caption, а без медиа отправляет текст
 - Фоновый scheduler каждые 60 секунд проверяет запланированные черновики и публикует их в `CHANNEL_ID`
-- Сохранение текста черновика, статуса, `source_url` и `scheduled_at` в SQLite
+- Сохранение текста черновика, статуса, `source_url`, `scheduled_at`, `media_url` и `media_type` в SQLite
 - Статусы черновиков: `draft`, `approved`, `scheduled`, `published`, `rejected`
 - Автосбор тем по AI через `/collect` из RSS и публичных страниц (OpenAI, Anthropic, Google AI, Perplexity, Hugging Face, GitHub Trending AI)
 - `/topics` показывает последние topic candidates с кнопкой `Generate post` для создания черновика
+- `/attach_media <draft_id> <photo|video|animation> <media_url>` — прикрепить медиа к черновику вручную
+- Если администратор отвечает на сообщение модерации фото/анимацией/видео, бот сохраняет Telegram `file_id` в черновик
 - Дедупликация тем по URL (повторная тема не добавляется)
 - Работа через long polling (подходит для Railway worker service)
 
@@ -89,6 +94,7 @@ cp .env.example .env
 - `/generate https://example.com/article` — создание AI-черновика и сохранение source URL в БД
 - `/collect` — собрать свежие темы-кандидаты
 - `/topics` — показать последние темы с кнопками `Generate post`
+- `/attach_media <draft_id> <photo|video|animation> <media_url>` — прикрепить медиа к черновику
 - `https://example.com/article` (обычным сообщением) — авто-создание черновика из содержимого страницы
 
 `source_url` показывается в сообщениях модерации, чтобы администратор мог проверить контекст. Он не добавляется в пост автоматически, если только сам сгенерированный текст его не содержит.

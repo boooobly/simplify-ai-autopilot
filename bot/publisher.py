@@ -8,8 +8,31 @@ from telegram.ext import ContextTypes
 from bot.database import DraftDatabase
 
 
-async def publish_to_channel(bot: Bot, channel_id: str, content: str) -> None:
-    """Publish a plain text post to the configured Telegram channel."""
+MEDIA_CAPTION_LIMIT = 1024
+
+
+def _fit_caption(text: str) -> str:
+    return text if len(text) <= MEDIA_CAPTION_LIMIT else text[: MEDIA_CAPTION_LIMIT - 1].rstrip() + "…"
+
+
+async def publish_to_channel(
+    bot: Bot,
+    channel_id: str,
+    content: str,
+    media_url: str | None = None,
+    media_type: str | None = None,
+) -> None:
+    """Publish text or media post to the configured Telegram channel."""
+
+    if media_url and media_type == "photo":
+        await bot.send_photo(chat_id=channel_id, photo=media_url, caption=_fit_caption(content))
+        return
+    if media_url and media_type == "video":
+        await bot.send_video(chat_id=channel_id, video=media_url, caption=_fit_caption(content))
+        return
+    if media_url and media_type == "animation":
+        await bot.send_animation(chat_id=channel_id, animation=media_url, caption=_fit_caption(content))
+        return
 
     await bot.send_message(chat_id=channel_id, text=content)
 
@@ -22,5 +45,11 @@ async def run_scheduled_publishing(context: ContextTypes.DEFAULT_TYPE) -> None:
     due_drafts = db.get_due_scheduled_drafts()
 
     for draft in due_drafts:
-        await publish_to_channel(context.bot, settings.channel_id, draft["content"])
+        await publish_to_channel(
+            context.bot,
+            settings.channel_id,
+            draft["content"],
+            draft.get("media_url"),
+            draft.get("media_type"),
+        )
         db.update_status(int(draft["id"]), "published")
