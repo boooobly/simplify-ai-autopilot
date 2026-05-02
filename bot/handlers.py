@@ -10,7 +10,13 @@ from telegram.ext import ContextTypes
 from bot.database import DraftDatabase
 from bot.drafts import create_test_draft, rewrite_test_draft
 from bot.publisher import publish_to_channel
-from bot.writer import generate_post_draft
+from bot.writer import (
+    fetch_page_content,
+    find_first_url,
+    generate_post_draft,
+    generate_post_draft_from_page,
+    normalize_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -176,3 +182,54 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as exc:  # Keep user-facing flow stable on runtime errors.
         logger.exception("Error while handling moderation callback: %s", exc)
         await query.edit_message_text("Что-то пошло не так. Попробуй ещё раз.")
+
+
+async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Generate a draft from any URL sent by admin in a regular message."""
+
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    user_id = update.effective_user.id if update.effective_user else None
+    message_text = (update.message.text or "").strip() if update.message else ""
+
+    if not _is_admin(user_id, settings.admin_id) or not message_text:
+        return
+
+    source_url_raw = find_first_url(message_text)
+    if not source_url_raw:
+        return
+
+    source_url = normalize_url(source_url_raw)
+    duplicate = db.find_by_source_url(source_url)
+    if duplicate:
+        await update.message.reply_text(
+            f"Похоже, эта ссылка уже обрабатывалась: черновик #{duplicate['id']} (статус: {duplicate['status']})."
+        )
+        return
+
+    if not settings.openai_api_key:
+        await update.message.reply_text("OPENAI_API_KEY не настроен. Добавь ключ и перезапусти бота.")
+        return
+
+    await update.message.reply_text("Нашёл ссылку. Читаю страницу и готовлю черновик...")
+
+    try:
+        title, page_text = fetch_page_content(source_url)
+        content = generate_post_draft_from_page(
+            settings.openai_api_key, source_url=source_url, title=title, page_text=page_text
+        )
+    except Exception as exc:
+        logger.exception("Failed to process URL %s: %s", source_url, exc)
+        await update.message.reply_text(
+            "Не удалось получить страницу или подготовить черновик. "
+            "Проверь ссылку и попробуй ещё раз."
+        )
+        return
+
+    draft_id = db.create_draft(content, source_url=source_url)
+    await context.bot.send_message(
+        chat_id=settings.admin_id,
+        text=_build_moderation_text(draft_id, content, source_url),
+        reply_markup=_moderation_keyboard(draft_id),
+    )
+    await update.message.reply_text(f"Черновик #{draft_id} готов и отправлен на модерацию.")
