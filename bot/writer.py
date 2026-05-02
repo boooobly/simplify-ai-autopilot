@@ -19,10 +19,10 @@ def generate_post_draft(api_key: str, source_url: str | None = None) -> str:
     client = OpenAI(api_key=api_key)
     style = _load_style_prompt()
 
-    source_line = f"Source URL: {source_url}" if source_url else "Source URL: not provided"
+    source_line = f"Источник: {source_url}" if source_url else "Источник: не указан"
     user_prompt = (
-        "Create one draft post for Telegram channel @simplify_ai. "
-        "Return only the final post text without markdown code fences or explanations. "
+        "Создай один черновик поста для Telegram-канала @simplify_ai. "
+        "Верни только готовый текст поста, без пояснений, без markdown-блока и без служебных комментариев. "
         f"{source_line}"
     )
 

@@ -22,16 +22,16 @@ def _is_admin(user_id: int | None, admin_id: int) -> bool:
 def _moderation_keyboard(draft_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("Publish now", callback_data=f"publish:{draft_id}")],
-            [InlineKeyboardButton("Reject", callback_data=f"reject:{draft_id}")],
-            [InlineKeyboardButton("Rewrite", callback_data=f"rewrite:{draft_id}")],
+            [InlineKeyboardButton("✅ Опубликовать", callback_data=f"publish:{draft_id}")],
+            [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")],
+            [InlineKeyboardButton("✍️ Переписать", callback_data=f"rewrite:{draft_id}")],
         ]
     )
 
 
 def _build_moderation_text(draft_id: int, content: str, source_url: str | None = None) -> str:
-    source = source_url or "(not provided)"
-    return f"📝 Draft #{draft_id}\nSource: {source}\n\n{content}\n\nChoose an action:"
+    source = source_url or "не указан"
+    return f"📝 Черновик #{draft_id}\nИсточник: {source}\n\n{content}\n\nВыбери действие:"
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -42,12 +42,17 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if not _is_admin(user_id, settings.admin_id):
         if update.message:
-            await update.message.reply_text("Access denied. This bot is for admin only.")
+            await update.message.reply_text("Нет доступа. Этот бот только для администратора.")
         return
 
     if update.message:
         await update.message.reply_text(
-            "Hello admin 👋\nUse /draft to create a test draft or /generate to create an AI draft."
+            "Привет 👋\n"
+            "Бот работает.\n\n"
+            "Команды:\n"
+            "/draft - создать тестовый черновик\n"
+            "/generate - создать черновик через ИИ\n"
+            "/generate <ссылка> - создать черновик по ссылке"
         )
 
 
@@ -60,7 +65,7 @@ async def draft_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if not _is_admin(user_id, settings.admin_id):
         if update.message:
-            await update.message.reply_text("Access denied.")
+            await update.message.reply_text("Нет доступа.")
         return
 
     content = create_test_draft()
@@ -73,7 +78,7 @@ async def draft_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
     if update.message:
-        await update.message.reply_text(f"Draft #{draft_id} created and sent for moderation.")
+        await update.message.reply_text(f"Тестовый черновик #{draft_id} создан и отправлен на модерацию.")
 
 
 async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -85,19 +90,19 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if not _is_admin(user_id, settings.admin_id):
         if update.message:
-            await update.message.reply_text("Access denied.")
+            await update.message.reply_text("Нет доступа.")
         return
 
     source_url = " ".join(context.args).strip() if context.args else None
     if update.message:
-        await update.message.reply_text("Generating draft...")
+        await update.message.reply_text("Генерирую черновик...")
 
     try:
         content = generate_post_draft(settings.openai_api_key, source_url=source_url)
     except Exception as exc:
         logger.exception("Error during generation: %s", exc)
         if update.message:
-            await update.message.reply_text("Failed to generate draft. Please try again.")
+            await update.message.reply_text("Не удалось сгенерировать черновик. Попробуй ещё раз.")
         return
 
     draft_id = db.create_draft(content, source_url=source_url)
@@ -108,7 +113,7 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
     if update.message:
-        await update.message.reply_text(f"Generated draft #{draft_id} sent for moderation.")
+        await update.message.reply_text(f"Черновик #{draft_id} создан и отправлен на модерацию.")
 
 
 async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -123,7 +128,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     user_id = query.from_user.id if query.from_user else None
     if not _is_admin(user_id, settings.admin_id):
-        await query.answer("Only admin can moderate.", show_alert=True)
+        await query.answer("Только администратор может модерировать.", show_alert=True)
         return
 
     await query.answer()
@@ -132,23 +137,23 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         action, draft_id_raw = query.data.split(":", maxsplit=1)
         draft_id = int(draft_id_raw)
     except (AttributeError, ValueError):
-        await query.edit_message_text("Invalid action payload.")
+        await query.edit_message_text("Некорректное действие.")
         return
 
     draft = db.get_draft(draft_id)
     if not draft:
-        await query.edit_message_text(f"Draft #{draft_id} not found.")
+        await query.edit_message_text(f"Черновик #{draft_id} не найден.")
         return
 
     try:
         if action == "publish":
             await publish_to_channel(context.bot, settings.channel_id, draft["content"])
             db.update_status(draft_id, "published")
-            await query.edit_message_text(f"✅ Draft #{draft_id} published to channel.")
+            await query.edit_message_text(f"✅ Черновик #{draft_id} опубликован в канал.")
 
         elif action == "reject":
             db.update_status(draft_id, "rejected")
-            await query.edit_message_text(f"❌ Draft #{draft_id} rejected.")
+            await query.edit_message_text(f"❌ Черновик #{draft_id} отклонён.")
 
         elif action == "rewrite":
             rewritten = rewrite_test_draft(draft["content"])
@@ -160,8 +165,8 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
 
         else:
-            await query.edit_message_text("Unknown action.")
+            await query.edit_message_text("Неизвестное действие.")
 
     except Exception as exc:  # Keep user-facing flow stable on runtime errors.
         logger.exception("Error while handling moderation callback: %s", exc)
-        await query.edit_message_text("Something went wrong. Please try again.")
+        await query.edit_message_text("Что-то пошло не так. Попробуй ещё раз.")
