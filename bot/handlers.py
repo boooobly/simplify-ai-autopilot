@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -10,6 +12,7 @@ from telegram.ext import ContextTypes
 from bot.database import DraftDatabase
 from bot.drafts import create_test_draft, rewrite_test_draft
 from bot.publisher import publish_to_channel
+from bot.sources import collect_topics
 from bot.writer import (
     fetch_page_content,
     find_first_url,
@@ -28,10 +31,18 @@ def _is_admin(user_id: int | None, admin_id: int) -> bool:
 def _moderation_keyboard(draft_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("✅ Опубликовать", callback_data=f"publish:{draft_id}")],
-            [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")],
-            [InlineKeyboardButton("✍️ Переписать", callback_data=f"rewrite:{draft_id}")],
+            [InlineKeyboardButton("✅ Publish now", callback_data=f"publish:{draft_id}")],
+            [InlineKeyboardButton("🗓️ Schedule", callback_data=f"schedule:{draft_id}")],
+            [InlineKeyboardButton("❌ Reject", callback_data=f"reject:{draft_id}")],
+            [InlineKeyboardButton("✍️ Rewrite", callback_data=f"rewrite:{draft_id}")],
         ]
+    )
+
+
+def _schedule_keyboard(draft_id: int) -> InlineKeyboardMarkup:
+    slots = ["10:00", "14:00", "18:00", "21:00"]
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(slot, callback_data=f"schedule_slot:{draft_id}:{slot}")] for slot in slots]
     )
 
 
@@ -128,6 +139,56 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text(f"Черновик #{draft_id} создан и отправлен на модерацию.")
 
 
+async def collect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_admin(user_id, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+
+    if update.message:
+        await update.message.reply_text("Собираю свежие AI-темы из источников...")
+
+    items = collect_topics()
+    added = 0
+    for item in items:
+        if db.create_topic_candidate(item.title, item.url, item.source, item.published_at):
+            added += 1
+
+    if update.message:
+        await update.message.reply_text(f"Готово. Найдено: {len(items)}, добавлено новых: {added}.")
+
+
+async def topics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_admin(user_id, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+
+    topics = db.list_topic_candidates(limit=10)
+    if not topics:
+        if update.message:
+            await update.message.reply_text("Пока нет тем. Запусти /collect")
+        return
+
+    for topic in topics:
+        text = (
+            f"🧠 Тема #{topic['id']}\n"
+            f"Источник: {topic['source']}\n"
+            f"Заголовок: {topic['title']}\n"
+            f"URL: {topic['url']}"
+        )
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Generate post", callback_data=f"topic_generate:{topic['id']}")]]
+        )
+        await context.bot.send_message(chat_id=settings.admin_id, text=text, reply_markup=keyboard)
+
+
 async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle Publish/Reject/Rewrite button clicks."""
 
@@ -146,9 +207,15 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
 
     try:
-        action, draft_id_raw = query.data.split(":", maxsplit=1)
-        draft_id = int(draft_id_raw)
-    except (AttributeError, ValueError):
+        parts = (query.data or "").split(":")
+        action = parts[0]
+        if action == "schedule_slot":
+            draft_id = int(parts[1])
+            slot = parts[2]
+        else:
+            draft_id = int(parts[1])
+            slot = None
+    except (AttributeError, ValueError, IndexError):
         await query.edit_message_text("Некорректное действие.")
         return
 
@@ -163,6 +230,30 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             db.update_status(draft_id, "published")
             await query.edit_message_text(f"✅ Черновик #{draft_id} опубликован в канал.")
 
+        elif action == "schedule":
+            db.update_status(draft_id, "approved")
+            await query.edit_message_text(
+                f"Выбери слот публикации для черновика #{draft_id} (часовой пояс: {settings.schedule_timezone}):",
+                reply_markup=_schedule_keyboard(draft_id),
+            )
+
+        elif action == "schedule_slot":
+            if slot is None:
+                await query.edit_message_text("Некорректный слот времени.")
+                return
+            tz = ZoneInfo(settings.schedule_timezone)
+            now_local = datetime.now(tz)
+            hour, minute = map(int, slot.split(":"))
+            scheduled_local = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if scheduled_local <= now_local:
+                scheduled_local += timedelta(days=1)
+
+            scheduled_utc = scheduled_local.astimezone(ZoneInfo("UTC"))
+            db.schedule_draft(draft_id, scheduled_utc.strftime("%Y-%m-%d %H:%M:%S"))
+            await query.edit_message_text(
+                f"🗓️ Черновик #{draft_id} запланирован на {scheduled_local.strftime('%Y-%m-%d %H:%M')} ({settings.schedule_timezone})."
+            )
+
         elif action == "reject":
             db.update_status(draft_id, "rejected")
             await query.edit_message_text(f"❌ Черновик #{draft_id} отклонён.")
@@ -170,11 +261,35 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         elif action == "rewrite":
             rewritten = rewrite_test_draft(draft["content"])
             db.update_draft_content(draft_id, rewritten)
-            db.update_status(draft_id, "pending")
+            db.update_status(draft_id, "draft")
             await query.edit_message_text(
                 _build_moderation_text(draft_id, rewritten, draft.get("source_url")),
                 reply_markup=_moderation_keyboard(draft_id),
             )
+
+        elif action == "topic_generate":
+            topic = db.get_topic_candidate(draft_id)
+            if not topic:
+                await query.edit_message_text("Тема не найдена.")
+                return
+            if not settings.openai_api_key:
+                await query.edit_message_text("OPENAI_API_KEY не настроен.")
+                return
+
+            title, page_text = fetch_page_content(topic["url"])
+            content = generate_post_draft_from_page(
+                settings.openai_api_key,
+                source_url=topic["url"],
+                title=title,
+                page_text=page_text,
+            )
+            new_draft_id = db.create_draft(content, source_url=topic["url"])
+            await context.bot.send_message(
+                chat_id=settings.admin_id,
+                text=_build_moderation_text(new_draft_id, content, topic["url"]),
+                reply_markup=_moderation_keyboard(new_draft_id),
+            )
+            await query.edit_message_text(f"Создан черновик #{new_draft_id} из темы #{topic['id']}.")
 
         else:
             await query.edit_message_text("Неизвестное действие.")
