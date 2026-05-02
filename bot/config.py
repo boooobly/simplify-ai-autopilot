@@ -32,6 +32,7 @@ def load_settings() -> Settings:
     openai_api_key_raw = os.getenv("OPENAI_API_KEY", "").strip()
     openai_api_key = openai_api_key_raw or None
     schedule_timezone = os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow").strip() or "Europe/Moscow"
+    db_path = os.getenv("DB_PATH", "data/drafts.db").strip() or "data/drafts.db"
 
     missing = []
     if not token:
@@ -56,5 +57,6 @@ def load_settings() -> Settings:
         admin_id=admin_id,
         channel_id=channel_id,
         openai_api_key=openai_api_key,
+        db_path=db_path,
         schedule_timezone=schedule_timezone,
     )

@@ -32,10 +32,10 @@ def _is_admin(user_id: int | None, admin_id: int) -> bool:
 def _moderation_keyboard(draft_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("✅ Publish now", callback_data=f"publish:{draft_id}")],
-            [InlineKeyboardButton("🗓️ Schedule", callback_data=f"schedule:{draft_id}")],
-            [InlineKeyboardButton("❌ Reject", callback_data=f"reject:{draft_id}")],
-            [InlineKeyboardButton("✍️ Rewrite", callback_data=f"rewrite:{draft_id}")],
+            [InlineKeyboardButton("✅ Опубликовать", callback_data=f"publish:{draft_id}")],
+            [InlineKeyboardButton("🗓️ Запланировать", callback_data=f"schedule:{draft_id}")],
+            [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")],
+            [InlineKeyboardButton("✍️ Переписать", callback_data=f"rewrite:{draft_id}")],
         ]
     )
 
@@ -114,8 +114,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "Команды:\n"
             "/draft - создать тестовый черновик\n"
             "/generate - создать черновик через ИИ\n"
-            "/generate <ссылка> - создать черновик по ссылке"
-            "/attach_media <draft_id> <photo|video|animation> <media_url> - прикрепить медиа"
+            "/generate <ссылка> - создать черновик по ссылке\n"
+            "/collect - собрать свежие темы\n"
+            "/topics - показать найденные темы\n"
+            "/attach_media <id> <photo|video|animation> <url> - прикрепить медиа"
         )
 
 
@@ -259,7 +261,7 @@ async def topics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"URL: {topic['url']}"
         )
         keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Generate post", callback_data=f"topic_generate:{topic['id']}")]]
+            [[InlineKeyboardButton("✍️ Создать пост", callback_data=f"topic_generate:{topic['id']}")]]
         )
         await context.bot.send_message(chat_id=settings.admin_id, text=text, reply_markup=keyboard)
 
