@@ -23,6 +23,7 @@ from bot.writer import (
 
 logger = logging.getLogger(__name__)
 ALLOWED_MEDIA_TYPES = {"photo", "video", "animation"}
+ALLOWED_DRAFT_STATUSES = {"draft", "approved", "scheduled", "published", "rejected"}
 
 
 def _is_admin(user_id: int | None, admin_id: int) -> bool:
@@ -57,6 +58,49 @@ def _build_moderation_text(
     source = source_url or "не указан"
     media_line = f"\nМедиа: {media_type}" if media_type and media_url else "\nМедиа: нет"
     return f"📝 Черновик #{draft_id}\nИсточник: {source}{media_line}\n\n{content}\n\nВыбери действие:"
+
+
+
+
+def _draft_snippet_text(draft: dict[str, object]) -> str:
+    content = str(draft.get("content") or "")
+    short = (content[:120] + "...") if len(content) > 120 else content
+    source = str(draft.get("source_url") or "не указан")
+    media_type = str(draft.get("media_type") or "нет")
+    created_at = str(draft.get("created_at") or "")
+    return (
+        f"📝 #{draft['id']} | {draft['status']}\n"
+        f"Источник: {source}\n"
+        f"Медиа: {media_type}\n"
+        f"Создан: {created_at}\n"
+        f"Текст: {short}"
+    )
+
+
+def _draft_actions_keyboard(draft_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(f"Открыть #{draft_id}", callback_data=f"draft_info:{draft_id}")],
+            [InlineKeyboardButton(f"Опубликовать #{draft_id}", callback_data=f"publish:{draft_id}")],
+            [InlineKeyboardButton(f"Запланировать #{draft_id}", callback_data=f"schedule:{draft_id}")],
+        ]
+    )
+
+
+def _full_draft_text(draft: dict[str, object]) -> str:
+    media_url = draft.get("media_url")
+    scheduled_at = draft.get("scheduled_at")
+    return (
+        f"📝 Черновик #{draft['id']}\n"
+        f"Статус: {draft.get('status')}\n"
+        f"Источник: {draft.get('source_url') or 'не указан'}\n"
+        f"Тип медиа: {draft.get('media_type') or 'нет'}\n"
+        f"URL медиа: {media_url if media_url else 'нет'}\n"
+        f"Запланирован: {scheduled_at if scheduled_at else 'нет'}\n"
+        f"Создан: {draft.get('created_at')}\n"
+        f"Обновлён: {draft.get('updated_at')}\n\n"
+        f"Текст:\n{draft.get('content') or ''}"
+    )
 
 
 def _extract_draft_id_from_text(message_text: str) -> int | None:
@@ -117,8 +161,93 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "/generate <ссылка> - создать черновик по ссылке\n"
             "/collect - собрать свежие темы\n"
             "/topics - показать найденные темы\n"
-            "/attach_media <id> <photo|video|animation> <url> - прикрепить медиа"
+            "/attach_media <id> <photo|video|animation> <url> - прикрепить медиа\n"
+            "/drafts - показать последние черновики\n"
+            "/drafts <status> - показать черновики по статусу\n"
+            "/draft_info <id> - открыть черновик\n"
+            "/delete_draft <id> - удалить черновик"
         )
+
+
+
+async def drafts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_admin(user_id, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+
+    status = context.args[0].strip().lower() if context.args else None
+    if status and status not in ALLOWED_DRAFT_STATUSES:
+        await update.message.reply_text(
+            "Неизвестный статус. Доступные статусы: draft, approved, scheduled, published, rejected"
+        )
+        return
+
+    drafts = db.list_drafts(limit=10, status=status)
+    if not drafts:
+        await update.message.reply_text("Черновики не найдены.")
+        return
+
+    for draft in drafts:
+        await context.bot.send_message(
+            chat_id=settings.admin_id,
+            text=_draft_snippet_text(draft),
+            reply_markup=_draft_actions_keyboard(int(draft["id"])),
+        )
+
+
+async def draft_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_admin(user_id, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Использование: /draft_info <id>")
+        return
+    try:
+        draft_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("id должен быть числом.")
+        return
+
+    draft = db.get_draft(draft_id)
+    if not draft:
+        await update.message.reply_text(f"Черновик #{draft_id} не найден.")
+        return
+
+    await update.message.reply_text(_full_draft_text(draft), reply_markup=_moderation_keyboard(draft_id))
+
+
+async def delete_draft_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_admin(user_id, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Использование: /delete_draft <id>")
+        return
+    try:
+        draft_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("id должен быть числом.")
+        return
+
+    deleted = db.delete_draft(draft_id)
+    if deleted:
+        await update.message.reply_text(f"Черновик #{draft_id} удалён.")
+    else:
+        await update.message.reply_text(f"Черновик #{draft_id} не найден.")
 
 
 async def attach_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -347,6 +476,12 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             db.update_status(draft_id, "draft")
             await query.edit_message_text(
                 _build_moderation_text(draft_id, rewritten, draft.get("source_url")),
+                reply_markup=_moderation_keyboard(draft_id),
+            )
+
+        elif action == "draft_info":
+            await query.edit_message_text(
+                _full_draft_text(draft),
                 reply_markup=_moderation_keyboard(draft_id),
             )
 

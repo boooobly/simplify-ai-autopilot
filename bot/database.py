@@ -156,6 +156,37 @@ class DraftDatabase:
             ).fetchall()
             return [dict(row) for row in rows]
 
+
+    def list_drafts(self, limit: int = 10, status: str | None = None) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            if status is None:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM drafts
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM drafts
+                    WHERE status = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (status, limit),
+                ).fetchall()
+            return [dict(row) for row in rows]
+
+    def delete_draft(self, draft_id: int) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute("DELETE FROM drafts WHERE id = ?", (draft_id,))
+            conn.commit()
+            return cursor.rowcount > 0
     def create_topic_candidate(self, title: str, url: str, source: str, published_at: str | None) -> bool:
         with self._connect() as conn:
             cursor = conn.execute(

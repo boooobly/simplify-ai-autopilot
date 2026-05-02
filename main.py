@@ -18,6 +18,9 @@ from bot.handlers import (
     moderation_callback,
     start_command,
     topics_command,
+    drafts_command,
+    draft_info_command,
+    delete_draft_command,
 )
 from bot.publisher import run_scheduled_publishing
 
@@ -44,6 +47,9 @@ def main() -> None:
     application.add_handler(CommandHandler("collect", collect_command))
     application.add_handler(CommandHandler("attach_media", attach_media_command))
     application.add_handler(CommandHandler("topics", topics_command))
+    application.add_handler(CommandHandler("drafts", drafts_command))
+    application.add_handler(CommandHandler("draft_info", draft_info_command))
+    application.add_handler(CommandHandler("delete_draft", delete_draft_command))
     application.add_handler(MessageHandler(~filters.COMMAND, admin_url_message))
     application.add_handler(CallbackQueryHandler(moderation_callback))
 
