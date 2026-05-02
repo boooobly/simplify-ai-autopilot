@@ -56,6 +56,20 @@ class DraftDatabase:
             conn.commit()
             return int(cursor.lastrowid)
 
+    def find_by_source_url(self, source_url: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM drafts
+                WHERE source_url = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (source_url,),
+            ).fetchone()
+            return dict(row) if row else None
+
     def get_draft(self, draft_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM drafts WHERE id = ?", (draft_id,)).fetchone()
