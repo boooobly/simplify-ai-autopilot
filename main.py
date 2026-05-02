@@ -48,7 +48,9 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(moderation_callback))
 
     if application.job_queue is None:
-        raise RuntimeError("JobQueue недоступен. Установи python-telegram-bot[job-queue].")
+        raise RuntimeError(
+            "JobQueue недоступен. Установи зависимость python-telegram-bot[job-queue]."
+        )
 
     application.job_queue.run_repeating(run_scheduled_publishing, interval=60, first=10)
 
