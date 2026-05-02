@@ -7,9 +7,13 @@ def create_test_draft() -> str:
     """Return a simple starter draft used by /draft command."""
 
     return (
-        "🚀 Test post for our AI Telegram channel\n\n"
-        "Today we're testing our new moderation flow. "
-        "Soon this bot will help us review and publish content faster!"
+        "⚡️ Тестовый пост для канала\n\n"
+        "Проверяем новую систему модерации.\n\n"
+        "➖ бот создаёт черновик\n"
+        "➖ присылает его на проверку\n"
+        "➖ ты нажимаешь кнопку\n"
+        "➖ пост уходит в канал\n\n"
+        "Пока это тест, но основа уже работает 💭"
     )
 
 
@@ -17,7 +21,7 @@ def rewrite_test_draft(original: str) -> str:
     """Return a basic rewritten version without external AI services."""
 
     return (
-        "✍️ Rewritten draft version\n\n"
+        "✍️ Обновлённая версия черновика\n\n"
         f"{original}\n\n"
-        "(Tweaked wording for clarity and a friendlier tone.)"
+        "Формулировку чуть упростил и сделал ближе к стилю канала."
     )
