@@ -24,6 +24,9 @@
 - Фоновый scheduler каждые 60 секунд проверяет запланированные черновики и публикует их в `CHANNEL_ID`
 - Сохранение текста черновика, статуса, `source_url` и `scheduled_at` в SQLite
 - Статусы черновиков: `draft`, `approved`, `scheduled`, `published`, `rejected`
+- Автосбор тем по AI через `/collect` из RSS и публичных страниц (OpenAI, Anthropic, Google AI, Perplexity, Hugging Face, GitHub Trending AI)
+- `/topics` показывает последние topic candidates с кнопкой `Generate post` для создания черновика
+- Дедупликация тем по URL (повторная тема не добавляется)
 - Работа через long polling (подходит для Railway worker service)
 
 ## Структура проекта
@@ -84,6 +87,8 @@ cp .env.example .env
 - `/draft` — создание тестового черновика (для проверки)
 - `/generate` — создание AI-черновика
 - `/generate https://example.com/article` — создание AI-черновика и сохранение source URL в БД
+- `/collect` — собрать свежие темы-кандидаты
+- `/topics` — показать последние темы с кнопками `Generate post`
 - `https://example.com/article` (обычным сообщением) — авто-создание черновика из содержимого страницы
 
 `source_url` показывается в сообщениях модерации, чтобы администратор мог проверить контекст. Он не добавляется в пост автоматически, если только сам сгенерированный текст его не содержит.

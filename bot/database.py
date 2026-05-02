@@ -37,6 +37,19 @@ class DraftDatabase:
             )
             self._ensure_column(conn, "drafts", "source_url", "TEXT")
             self._ensure_column(conn, "drafts", "scheduled_at", "TIMESTAMP")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS topic_candidates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    url TEXT NOT NULL UNIQUE,
+                    source TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'new',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    published_at TIMESTAMP
+                )
+                """
+            )
             conn.commit()
 
     def _ensure_column(
@@ -126,3 +139,33 @@ class DraftDatabase:
                 """
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def create_topic_candidate(self, title: str, url: str, source: str, published_at: str | None) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO topic_candidates (title, url, source, published_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (title, url, source, published_at),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def list_topic_candidates(self, limit: int = 10) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM topic_candidates
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_topic_candidate(self, topic_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM topic_candidates WHERE id = ?", (topic_id,)).fetchone()
+            return dict(row) if row else None

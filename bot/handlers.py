@@ -12,6 +12,7 @@ from telegram.ext import ContextTypes
 from bot.database import DraftDatabase
 from bot.drafts import create_test_draft, rewrite_test_draft
 from bot.publisher import publish_to_channel
+from bot.sources import collect_topics
 from bot.writer import (
     fetch_page_content,
     find_first_url,
@@ -138,6 +139,56 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text(f"Черновик #{draft_id} создан и отправлен на модерацию.")
 
 
+async def collect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_admin(user_id, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+
+    if update.message:
+        await update.message.reply_text("Собираю свежие AI-темы из источников...")
+
+    items = collect_topics()
+    added = 0
+    for item in items:
+        if db.create_topic_candidate(item.title, item.url, item.source, item.published_at):
+            added += 1
+
+    if update.message:
+        await update.message.reply_text(f"Готово. Найдено: {len(items)}, добавлено новых: {added}.")
+
+
+async def topics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_admin(user_id, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+
+    topics = db.list_topic_candidates(limit=10)
+    if not topics:
+        if update.message:
+            await update.message.reply_text("Пока нет тем. Запусти /collect")
+        return
+
+    for topic in topics:
+        text = (
+            f"🧠 Тема #{topic['id']}\n"
+            f"Источник: {topic['source']}\n"
+            f"Заголовок: {topic['title']}\n"
+            f"URL: {topic['url']}"
+        )
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Generate post", callback_data=f"topic_generate:{topic['id']}")]]
+        )
+        await context.bot.send_message(chat_id=settings.admin_id, text=text, reply_markup=keyboard)
+
+
 async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle Publish/Reject/Rewrite button clicks."""
 
@@ -215,6 +266,30 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 _build_moderation_text(draft_id, rewritten, draft.get("source_url")),
                 reply_markup=_moderation_keyboard(draft_id),
             )
+
+        elif action == "topic_generate":
+            topic = db.get_topic_candidate(draft_id)
+            if not topic:
+                await query.edit_message_text("Тема не найдена.")
+                return
+            if not settings.openai_api_key:
+                await query.edit_message_text("OPENAI_API_KEY не настроен.")
+                return
+
+            title, page_text = fetch_page_content(topic["url"])
+            content = generate_post_draft_from_page(
+                settings.openai_api_key,
+                source_url=topic["url"],
+                title=title,
+                page_text=page_text,
+            )
+            new_draft_id = db.create_draft(content, source_url=topic["url"])
+            await context.bot.send_message(
+                chat_id=settings.admin_id,
+                text=_build_moderation_text(new_draft_id, content, topic["url"]),
+                reply_markup=_moderation_keyboard(new_draft_id),
+            )
+            await query.edit_message_text(f"Создан черновик #{new_draft_id} из темы #{topic['id']}.")
 
         else:
             await query.edit_message_text("Неизвестное действие.")

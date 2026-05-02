@@ -13,8 +13,10 @@ from bot.handlers import (
     admin_url_message,
     draft_command,
     generate_command,
+    collect_command,
     moderation_callback,
     start_command,
+    topics_command,
 )
 from bot.publisher import run_scheduled_publishing
 
@@ -38,6 +40,8 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("draft", draft_command))
     application.add_handler(CommandHandler("generate", generate_command))
+    application.add_handler(CommandHandler("collect", collect_command))
+    application.add_handler(CommandHandler("topics", topics_command))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), admin_url_message))
     application.add_handler(CallbackQueryHandler(moderation_callback))
     application.job_queue.run_repeating(run_scheduled_publishing, interval=60, first=10)
