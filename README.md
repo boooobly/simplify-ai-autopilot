@@ -6,12 +6,14 @@ Beginner-friendly MVP moderation bot for an AI Telegram channel.
 
 - Admin-only `/start`
 - `/draft` creates a test draft and sends it for moderation
+- `/generate [source_url]` creates an OpenAI-powered Telegram draft in Russian for `@simplify_ai`
+- Generated drafts use `prompts/post_style.md` style rules (human, short, non-corporate)
 - Inline moderation buttons:
   - Publish now
   - Reject
   - Rewrite
 - Publish approved content to a channel
-- Save draft content and status in SQLite
+- Save draft content, status, and `source_url` in SQLite
 - Runs with long polling (good for Railway worker service)
 
 ## Project structure
@@ -24,6 +26,9 @@ bot/
   handlers.py
   publisher.py
   drafts.py
+  writer.py
+prompts/
+  post_style.md
 data/
   .gitkeep
 requirements.txt
@@ -35,6 +40,7 @@ README.md
 
 - Python 3.11+
 - Telegram bot token from BotFather
+- OpenAI API key
 
 ## Setup
 
@@ -57,6 +63,16 @@ cp .env.example .env
 - `BOT_TOKEN` — your bot token
 - `ADMIN_ID` — your Telegram numeric user ID
 - `CHANNEL_ID` — channel username (example: `@my_channel`) or channel id
+- `OPENAI_API_KEY` — your OpenAI API key for `/generate`
+
+## Commands
+
+- `/start` — bot greeting (admin-only)
+- `/draft` — creates test draft (kept for testing)
+- `/generate` — creates AI draft
+- `/generate https://example.com/article` — creates AI draft and stores source URL in DB
+
+`source_url` is shown in moderation messages so the admin can validate context. It is not auto-appended to the channel post unless the generated text contains it.
 
 ## Run locally
 
@@ -78,6 +94,7 @@ Important:
   - `BOT_TOKEN`
   - `ADMIN_ID`
   - `CHANNEL_ID`
+  - `OPENAI_API_KEY`
 
 ## Security
 
