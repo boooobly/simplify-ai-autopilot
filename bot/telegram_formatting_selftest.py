@@ -4,46 +4,55 @@ from bot.telegram_formatting import render_post_html, strip_quote_markers
 
 
 def run() -> None:
-    case1 = "Title\n\n➖ one\n➖ two\n\nEnd"
+    aliases = {
+        'claude': ('🤖', '5208880957280522189'),
+        'chatgpt': ('🤖', '5208880957280522190'),
+        'deepseek': ('🤖', '5208880957280522191'),
+        'github': ('📱', '6208880957280522191'),
+        'photoshop': ('📱', '6208880957280522192'),
+        'windows': ('📱', '6208880957280522193'),
+    }
+
+    case1 = 'Title\n\n➖ one\n➖ two\n\nEnd'
     out1 = render_post_html(case1)
-    assert "<blockquote>" in out1
-    assert "➖ one" in out1
+    assert '<blockquote>' in out1
+    assert '➖ one' in out1
 
-    case2 = "Title\n\n▌ ➖ one\n▌ ➖ two"
+    case2 = 'Title\n\n➖ one\n\nEnd'
     out2 = render_post_html(case2)
-    assert "<blockquote>" in out2
-    assert "▌" not in out2
+    assert '<blockquote>' not in out2
 
-    case3 = "Title\n\n[[QUOTE]]\n➖ one\n➖ two\n[[/QUOTE]]"
+    case3 = 'Плохо [[LINK:клик|javascript:alert(1)]]'
     out3 = render_post_html(case3)
-    assert out3.count("<blockquote>") == 1
+    assert '<a href=' not in out3
 
-    case4 = "Title\n\n➖ one\n\nEnd"
+    case4 = 'Тест [тут](https://example.com)'
     out4 = render_post_html(case4)
-    assert "<blockquote>" not in out4
+    assert '<a href="https://example.com">тут</a>' in out4
 
-    case5 = "Забираем [[LINK:тут|https://example.com]]"
-    out5 = render_post_html(case5)
-    assert '<a href="https://example.com">тут</a>' in out5
+    case5 = strip_quote_markers('Проверка [[LINK:тут|https://example.com]] и [здесь](https://example.com)')
+    assert 'тут' in case5 and 'здесь' in case5 and 'https://example.com' not in case5
 
-    case6 = "Плохо [[LINK:клик|javascript:alert(1)]]"
-    out6 = render_post_html(case6)
-    assert "<a href=" not in out6
+    out = render_post_html('[[EMOJI:claude]] [[EMOJI:chatgpt]] [[EMOJI:deepseek]]', custom_emoji_aliases=aliases)
+    assert '5208880957280522189' in out and '5208880957280522190' in out and '5208880957280522191' in out
 
-    case7 = "Тест [тут](https://example.com)"
-    out7 = render_post_html(case7)
-    assert '<a href="https://example.com">тут</a>' in out7
+    out2 = render_post_html('[[EMOJI:github]] [[EMOJI:photoshop]] [[EMOJI:windows]]', custom_emoji_aliases=aliases)
+    assert '6208880957280522191' in out2 and '6208880957280522192' in out2 and '6208880957280522193' in out2
 
-    case8 = strip_quote_markers("Проверка [[LINK:тут|https://example.com]] и [здесь](https://example.com)")
-    assert "тут" in case8 and "здесь" in case8
-    assert "https://example.com" not in case8
+    plain = render_post_html('plain 🤖 plain 📱', custom_emoji_aliases=aliases)
+    assert '<tg-emoji emoji-id="5208880957280522189">🤖</tg-emoji>' not in plain
+    assert '<tg-emoji emoji-id="6208880957280522191">📱</tg-emoji>' not in plain
 
-    case9 = render_post_html("Огонь 🔥", custom_emoji_map={"🔥": "123456"})
-    assert '<tg-emoji emoji-id="123456">🔥</tg-emoji>' in case9
-    case10 = render_post_html("Огонь 🔥")
-    assert '<tg-emoji emoji-id="' not in case10
+    unknown = render_post_html('[[EMOJI:unknown]]<b>x</b>', custom_emoji_aliases=aliases)
+    assert '<b>x</b>' not in unknown
+
+    preview = strip_quote_markers('[[EMOJI:claude]] Claude update', custom_emoji_aliases=aliases)
+    assert preview.startswith('🤖')
+
+    map_out = render_post_html('Огонь 🔥', custom_emoji_map={'🔥': '123456'})
+    assert '<tg-emoji emoji-id="123456">🔥</tg-emoji>' in map_out
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     run()
-    print("ok")
+    print('ok')

@@ -536,6 +536,7 @@ def _build_moderation_text(
     source_url: str | None = None,
     media_type: str | None = None,
     media_url: str | None = None,
+    custom_emoji_aliases: dict[str, tuple[str, str]] | None = None,
 ) -> str:
     source = source_url or "не указан"
     count = media_count(media_url, media_type)
@@ -545,7 +546,7 @@ def _build_moderation_text(
         media = items[0]["type"] if items else "нет"
     elif count > 1:
         media = f"{count} файлов"
-    body = strip_quote_markers(content).strip() or "[пусто]"
+    body = strip_quote_markers(content, custom_emoji_aliases=custom_emoji_aliases).strip() or "[пусто]"
     return (
         f"📝 Черновик #{draft_id}\n"
         f"Источник: {source}\n"
@@ -598,10 +599,11 @@ def _build_media_preview_caption(
     content: str,
     source_url: str | None = None,
     media_type: str | None = None,
+    custom_emoji_aliases: dict[str, tuple[str, str]] | None = None,
 ) -> str:
     source = source_url or "не указан"
     media = media_type or "нет"
-    body = strip_quote_markers(content).strip() or "[пусто]"
+    body = strip_quote_markers(content, custom_emoji_aliases=custom_emoji_aliases).strip() or "[пусто]"
     snippet = body[:500]
     caption = (
         f"📝 Черновик #{draft_id}\n"
@@ -723,12 +725,12 @@ async def _send_moderation_preview(
     media_url: str | None = None,
     media_type: str | None = None,
 ) -> None:
-    text = _build_moderation_text(draft_id, content, source_url, media_type, media_url)
+    text = _build_moderation_text(draft_id, content, source_url, media_type, media_url, custom_emoji_aliases=settings.custom_emoji_aliases)
     has_media = media_count(media_url, media_type) > 0
     keyboard = _moderation_keyboard(draft_id, has_media=has_media)
     items = decode_media_items(media_url, media_type)
     if len(items) == 1:
-        short_caption = _build_media_preview_caption(draft_id, content, source_url, media_type)
+        short_caption = _build_media_preview_caption(draft_id, content, source_url, media_type, custom_emoji_aliases=settings.custom_emoji_aliases)
         if items[0]["type"] == "photo":
             await context.bot.send_photo(chat_id=admin_id, photo=items[0]["file_id"], caption=short_caption, reply_markup=keyboard)
             return
@@ -1946,7 +1948,7 @@ def _extract_custom_emoji_lines(message) -> list[str]:
             continue
         fragment = _extract_entity_text(message, entity)
         fallback = fragment or "?"
-        lines.append(f"emoji: {fallback}\ncustom_emoji_id: {emoji_id}")
+        lines.append(f"emoji: {fallback}\ncustom_emoji_id: {emoji_id}\nalias template:\nemoji_{len(lines) + 1}|{fallback}|{emoji_id}")
     return lines
 
 
@@ -2061,6 +2063,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     draft_to_publish.get("media_url"),
                     draft_to_publish.get("media_type"),
                     settings.custom_emoji_map,
+                    settings.custom_emoji_aliases,
                 )
             except Exception:
                 if was_scheduled:
@@ -2132,7 +2135,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
 
         elif action == "preview":
-            preview_text = strip_quote_markers(str(draft.get("content") or "")).strip() or "[пусто]"
+            preview_text = strip_quote_markers(str(draft.get("content") or ""), custom_emoji_aliases=settings.custom_emoji_aliases).strip() or "[пусто]"
             await _edit_callback_message(
                 query,
                 preview_text,
@@ -2149,6 +2152,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     refreshed.get("source_url"),
                     refreshed.get("media_type"),
                     refreshed.get("media_url"),
+                    custom_emoji_aliases=settings.custom_emoji_aliases,
                 ),
                 reply_markup=_moderation_keyboard(
                     draft_id,
@@ -2177,6 +2181,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     refreshed.get("source_url"),
                     refreshed.get("media_type"),
                     refreshed.get("media_url"),
+                    custom_emoji_aliases=settings.custom_emoji_aliases,
                 ),
                 reply_markup=_moderation_keyboard(
                     draft_id,
@@ -2194,7 +2199,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             db.update_status(draft_id, "draft")
             await _edit_callback_message(
                 query,
-                _build_moderation_text(draft_id, rewritten, draft.get("source_url")),
+                _build_moderation_text(draft_id, rewritten, draft.get("source_url"), custom_emoji_aliases=settings.custom_emoji_aliases),
                 reply_markup=_moderation_keyboard(draft_id, "draft"),
             )
 
@@ -2270,6 +2275,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     draft.get("source_url"),
                     draft.get("media_type"),
                     draft.get("media_url"),
+                    custom_emoji_aliases=settings.custom_emoji_aliases,
                 ),
                 reply_markup=_moderation_keyboard(draft_id, str(draft.get("status") or ""), has_media=media_count(draft.get("media_url"), draft.get("media_type")) > 0),
             )
@@ -2304,6 +2310,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     draft.get("source_url"),
                     draft.get("media_type"),
                     draft.get("media_url"),
+                    custom_emoji_aliases=settings.custom_emoji_aliases,
                 ),
                 reply_markup=_moderation_keyboard(draft_id, str(draft.get("status") or "")),
             )
@@ -2347,6 +2354,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     draft.get("source_url"),
                     draft.get("media_type"),
                     draft.get("media_url"),
+                    custom_emoji_aliases=settings.custom_emoji_aliases,
                 ),
                 reply_markup=_moderation_keyboard(draft_id, "draft"),
             )

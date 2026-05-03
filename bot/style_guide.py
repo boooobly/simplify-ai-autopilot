@@ -58,3 +58,41 @@ HUMANIZER_RULES_FOR_SIMPLIFY_AI = """
 - Проверь, что нет конструкции "не про..., а про...".
 - Проверь, что нет эм-даша "—".
 """.strip()
+
+
+SIMPLIFY_AI_EMOJI_ALIAS_GUIDE = """
+Custom emoji aliases for @simplify_ai:
+
+[[EMOJI:screen_card]] - blue screen/card/interface icon. Use for UI, apps, product interfaces, tool screens, dashboards, service overviews.
+[[EMOJI:lock]] - lock icon. Use for privacy, security, VPN, data protection, leaks, local/private mode.
+[[EMOJI:web]] - globe icon. Use for websites, web services, browsers, online tools.
+[[EMOJI:check]] - green check icon. Use for working result, verified feature, free access, ready-to-use tool.
+[[EMOJI:claude]] - Claude / Anthropic icon. Use only for Claude, Anthropic, Claude Code, Claude Sonnet, Claude Opus.
+[[EMOJI:chatgpt]] - OpenAI / ChatGPT icon. Use only for ChatGPT, OpenAI, GPT models, GPT Image.
+[[EMOJI:deepseek]] - DeepSeek icon. Use only for DeepSeek, DeepSeek models, DeepSeek news.
+[[EMOJI:edit_tool]] - pencil/edit icon. Use for editing, prompts, text/image corrections, rewriting, prompt engineering.
+[[EMOJI:fire]] - fire icon. Use for hot trends, viral news, hype, strong updates.
+[[EMOJI:idea]] - lightbulb icon. Use for ideas, lifehacks, useful finds, practical tricks.
+[[EMOJI:link]] - blue link/paperclip icon. Use for CTA lines: Забираем тут, Тестим здесь, ТЫК.
+[[EMOJI:alert]] - red exclamation icon. Use for warnings, risks, limitations, important caveats.
+[[EMOJI:bullet]] - blue dash icon. Use only as a branded list marker if needed.
+[[EMOJI:thought]] - thought cloud icon. Use for final thought or short ending.
+[[EMOJI:wow]] - surprised face icon. Use for surprising results, wow effect, strange cases.
+[[EMOJI:google]] - Google icon. Use for Google, Gemini, DeepMind, Google Search, Google products.
+[[EMOJI:github]] - GitHub icon. Use for GitHub, open-source repositories, code, developers.
+[[EMOJI:photoshop]] - Photoshop icon. Use for Photoshop, Adobe, design, image editing.
+[[EMOJI:windows]] - Windows icon. Use for Windows, PC software, desktop programs, local installation on Windows.
+[[EMOJI:telegram]] - Telegram icon. Use for Telegram, bots, channels, messengers, autoposting.
+
+Rules:
+- Use only aliases from this list.
+- Never invent new [[EMOJI:...]] names.
+- Choose custom emoji by visual meaning and topic, not by fallback emoji.
+- Use custom emoji sparingly: title, CTA line, or final thought.
+- Do not place custom emoji in every sentence.
+- If topic does not match any alias, use a normal emoji or no emoji.
+- Do not auto-replace fallback emoji by meaning.
+- Plain 🤖 must stay plain unless the model explicitly writes [[EMOJI:claude]], [[EMOJI:chatgpt]] or [[EMOJI:deepseek]].
+- Plain 📱 must stay plain unless the model explicitly writes [[EMOJI:github]], [[EMOJI:photoshop]] or [[EMOJI:windows]].
+- CTA links should use [[LINK:text|url]] markers.
+""".strip()
