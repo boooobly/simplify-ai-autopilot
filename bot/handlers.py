@@ -12,6 +12,7 @@ from telegram.ext import ContextTypes
 
 from bot.database import DraftDatabase
 from bot.drafts import create_test_draft, rewrite_test_draft
+from bot.media_utils import decode_media_items, encode_media_group, media_count
 from bot.publisher import publish_to_channel
 from bot.telegram_formatting import strip_quote_markers
 from bot.sources import collect_topics
@@ -94,7 +95,7 @@ def _resolve_ai_provider(settings) -> tuple[str, str, str | None, dict[str, str]
     return settings.openai_api_key, "openai", None, None
 
 
-def _moderation_keyboard(draft_id: int, status: str | None = None) -> InlineKeyboardMarkup:
+def _moderation_keyboard(draft_id: int, status: str | None = None, has_media: bool = False) -> InlineKeyboardMarkup:
     if status == "scheduled":
         rows = [
             [InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")],
@@ -111,6 +112,7 @@ def _moderation_keyboard(draft_id: int, status: str | None = None) -> InlineKeyb
             [InlineKeyboardButton("✨ Улучшить Claude", callback_data=f"polish:{draft_id}")],
             [InlineKeyboardButton("✏️ Редактировать текст", callback_data=f"edit_text:{draft_id}")],
             [InlineKeyboardButton("📎 Прикрепить медиа", callback_data=f"attach_media_flow:{draft_id}")],
+            *([[InlineKeyboardButton("🗑 Убрать медиа", callback_data=f"remove_media:{draft_id}")]] if has_media else []),
             [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")],
         ]
     return InlineKeyboardMarkup(rows)
@@ -131,6 +133,7 @@ def _clear_pending_edit(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def _set_pending_media(context: ContextTypes.DEFAULT_TYPE, draft_id: int) -> None:
     context.user_data["pending_media_draft_id"] = draft_id
+    context.user_data["pending_media_items"] = []
 
 
 def _get_pending_media(context: ContextTypes.DEFAULT_TYPE) -> int | None:
@@ -140,6 +143,7 @@ def _get_pending_media(context: ContextTypes.DEFAULT_TYPE) -> int | None:
 
 def _clear_pending_media(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("pending_media_draft_id", None)
+    context.user_data.pop("pending_media_items", None)
 
 
 def _can_publish(status: str | None) -> bool:
@@ -195,7 +199,13 @@ def _build_moderation_text(
     media_url: str | None = None,
 ) -> str:
     source = source_url or "не указан"
-    media = media_type if media_type and media_url else "нет"
+    count = media_count(media_url, media_type)
+    media = "нет"
+    if count == 1:
+        items = decode_media_items(media_url, media_type)
+        media = items[0]["type"] if items else "нет"
+    elif count > 1:
+        media = f"{count} файлов"
     body = strip_quote_markers(content).strip() or "[пусто]"
     return (
         f"📝 Черновик #{draft_id}\n"
@@ -375,17 +385,19 @@ async def _send_moderation_preview(
     media_type: str | None = None,
 ) -> None:
     text = _build_moderation_text(draft_id, content, source_url, media_type, media_url)
-    keyboard = _moderation_keyboard(draft_id)
-    if media_url and media_type in {"photo", "video", "animation"}:
+    has_media = media_count(media_url, media_type) > 0
+    keyboard = _moderation_keyboard(draft_id, has_media=has_media)
+    items = decode_media_items(media_url, media_type)
+    if len(items) == 1:
         short_caption = _build_media_preview_caption(draft_id, content, source_url, media_type)
-        if media_type == "photo":
-            await context.bot.send_photo(chat_id=admin_id, photo=media_url, caption=short_caption, reply_markup=keyboard)
+        if items[0]["type"] == "photo":
+            await context.bot.send_photo(chat_id=admin_id, photo=items[0]["file_id"], caption=short_caption, reply_markup=keyboard)
             return
-        if media_type == "video":
-            await context.bot.send_video(chat_id=admin_id, video=media_url, caption=short_caption, reply_markup=keyboard)
+        if items[0]["type"] == "video":
+            await context.bot.send_video(chat_id=admin_id, video=items[0]["file_id"], caption=short_caption, reply_markup=keyboard)
             return
-        if media_type == "animation":
-            await context.bot.send_animation(chat_id=admin_id, animation=media_url, caption=short_caption, reply_markup=keyboard)
+        if items[0]["type"] == "animation":
+            await context.bot.send_animation(chat_id=admin_id, animation=items[0]["file_id"], caption=short_caption, reply_markup=keyboard)
             return
     await context.bot.send_message(
         chat_id=admin_id,
@@ -393,6 +405,8 @@ async def _send_moderation_preview(
         reply_markup=keyboard,
         link_preview_options=_disabled_link_preview_options(),
     )
+    if len(items) > 1:
+        await context.bot.send_message(chat_id=admin_id, text=f"Прикреплено медиа: {len(items)}")
 
 
 async def _handle_pending_text_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -466,6 +480,7 @@ async def _handle_pending_media_attach(update: Update, context: ContextTypes.DEF
         await update.message.reply_text(_status_guard_message("edit", status))
         return True
 
+    pending_items = context.user_data.setdefault("pending_media_items", [])
     media_type = None
     media_url = None
     if update.message.photo:
@@ -484,21 +499,14 @@ async def _handle_pending_media_attach(update: Update, context: ContextTypes.DEF
         return True
 
     if not media_type or not media_url:
-        await update.message.reply_text("Пришли фото, видео или GIF/анимацию. Текст сюда не подойдёт.")
+        await update.message.reply_text("Сейчас я жду медиа. Пришли фото/видео/GIF или нажми «✅ Готово».")
         return True
-
-    db.attach_media(pending_draft_id, media_url, media_type)
-    db.update_status(pending_draft_id, "draft")
-    _clear_pending_media(context)
-    await update.message.reply_text(f"Готово. Медиа прикреплено к черновику #{pending_draft_id}.")
-    await _send_moderation_preview(
-        context,
-        settings.admin_id,
-        pending_draft_id,
-        draft["content"],
-        source_url=draft.get("source_url"),
-        media_url=media_url,
-        media_type=media_type,
+    if len(pending_items) >= 10:
+        await update.message.reply_text("Достигнут лимит: 10/10. Нажми «✅ Готово» или «❌ Отменить прикрепление».")
+        return True
+    pending_items.append({"type": media_type, "file_id": media_url})
+    await update.message.reply_text(
+        f"Добавлено медиа: {len(pending_items)}/10. Можешь прислать ещё или нажать «✅ Готово»."
     )
     return True
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -995,7 +1003,11 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     refreshed.get("media_type"),
                     refreshed.get("media_url"),
                 ),
-                reply_markup=_moderation_keyboard(draft_id, str(refreshed.get("status") or "")),
+                reply_markup=_moderation_keyboard(
+                    draft_id,
+                    str(refreshed.get("status") or ""),
+                    has_media=media_count(refreshed.get("media_url"), refreshed.get("media_type")) > 0,
+                ),
             )
 
         elif action == "reject":
@@ -1043,12 +1055,34 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await _edit_callback_message(
                 query,
                 f"📎 Прикрепление медиа к черновику #{draft_id}\n\n"
-                "Пришли фото, видео или GIF/анимацию одним сообщением.\n\n"
-                "Чтобы отменить, нажми кнопку ниже.",
+                "Пришли одно или несколько фото/видео/GIF.\n"
+                "Можно отправлять по одному сообщению.\n"
+                "Когда закончишь, нажми «✅ Готово».\n\n"
+                "Лимит: до 10 файлов.",
                 reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("❌ Отменить прикрепление", callback_data=f"attach_media_cancel:{draft_id}")]]
+                    [
+                        [InlineKeyboardButton("✅ Готово", callback_data=f"attach_media_done:{draft_id}")],
+                        [InlineKeyboardButton("❌ Отменить прикрепление", callback_data=f"attach_media_cancel:{draft_id}")],
+                    ]
                 ),
             )
+        elif action == "attach_media_done":
+            if _get_pending_media(context) != draft_id:
+                await _edit_callback_message(query, "Нет активного режима прикрепления для этого черновика.")
+                return
+            items = context.user_data.get("pending_media_items") or []
+            if not items:
+                await query.answer("Медиа ещё не добавлено. Пришли фото, видео или GIF/анимацию.", show_alert=True)
+                return
+            if len(items) == 1:
+                db.attach_media(draft_id, items[0]["file_id"], items[0]["type"])
+            else:
+                db.attach_media(draft_id, encode_media_group(items[:10]), "media_group")
+            db.update_status(draft_id, "draft")
+            _clear_pending_media(context)
+            await _edit_callback_message(query, f"Готово. Медиа прикреплено к черновику #{draft_id}: {len(items)} файл(ов).")
+            refreshed = db.get_draft(draft_id) or draft
+            await _send_moderation_preview(context, settings.admin_id, draft_id, str(refreshed.get('content') or ''), source_url=refreshed.get("source_url"), media_url=refreshed.get("media_url"), media_type=refreshed.get("media_type"))
 
         elif action == "attach_media_cancel":
             _clear_pending_media(context)
@@ -1064,10 +1098,25 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     draft.get("media_type"),
                     draft.get("media_url"),
                 ),
-                reply_markup=_moderation_keyboard(draft_id, str(draft.get("status") or "")),
+                reply_markup=_moderation_keyboard(draft_id, str(draft.get("status") or ""), has_media=media_count(draft.get("media_url"), draft.get("media_type")) > 0),
             )
             if query.message:
                 await query.message.reply_text("Прикрепление медиа отменено.")
+        elif action == "remove_media":
+            if not _can_edit(draft.get("status")):
+                await _edit_callback_message(query, _status_guard_message("edit", draft.get("status")))
+                return
+            db.clear_media(draft_id)
+            db.update_status(draft_id, "draft")
+            await _edit_callback_message(query, f"Медиа удалено из черновика #{draft_id}.")
+            refreshed = db.get_draft(draft_id) or draft
+            await _send_moderation_preview(
+                context,
+                settings.admin_id,
+                draft_id,
+                str(refreshed.get("content") or ""),
+                source_url=refreshed.get("source_url"),
+            )
 
         elif action == "edit_cancel":
             _clear_pending_edit(context)
@@ -1262,7 +1311,8 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             "/draft_info <id> - открыть черновик\n"
             "/delete_draft <id> - удалить черновик\n"
             "/attach_media <id> <photo|video|animation> <url> - прикрепить медиа\n\n"
-            "Кнопка «📎 Прикрепить медиа» доступна в модерации черновика.\n"
+            "Кнопка «📎 Прикрепить медиа» поддерживает до 10 фото/видео/GIF.\n"
+            "Кнопка «🗑 Убрать медиа» появляется, когда у черновика есть медиа.\n"
             "Можно отправить фото, видео или GIF/анимацию прямо боту.\n"
             "Команда /attach_media остаётся для URL/ручного режима.\n\n"
             "В меню «✍️ Создать черновик» сначала выбери способ создания.\n"
