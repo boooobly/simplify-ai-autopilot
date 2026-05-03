@@ -41,6 +41,14 @@ def _is_admin(user_id: int | None, admin_id: int) -> bool:
     return user_id is not None and user_id == admin_id
 
 
+def _parse_callback_data(data: str) -> tuple[str, int, str | None]:
+    if data.startswith("schedule_slot:"):
+        action, draft_id_raw, slot = data.split(":", 2)
+        return action, int(draft_id_raw), slot
+    action, draft_id_raw = data.split(":", 1)
+    return action, int(draft_id_raw), None
+
+
 def _main_menu_text() -> str:
     return "🤖 Simplify AI Autopilot\n\nВыбери действие:"
 
@@ -659,15 +667,8 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     try:
-        parts = data.split(":")
-        action = parts[0]
-        if action == "schedule_slot":
-            draft_id = int(parts[1])
-            slot = parts[2]
-        else:
-            draft_id = int(parts[1])
-            slot = None
-    except (AttributeError, ValueError, IndexError):
+        action, draft_id, slot = _parse_callback_data(data)
+    except (AttributeError, ValueError):
         await _edit_callback_message(query, "Некорректное действие.")
         return
 
@@ -736,7 +737,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 logger.warning("Failed to answer schedule callback for draft #%s: %s", draft_id, answer_exc)
 
         elif action == "schedule_slot":
-            if slot is None:
+            if not slot:
                 await _edit_callback_message(query, "Некорректный слот времени.")
                 return
             draft_for_slot = db.get_draft(draft_id)
