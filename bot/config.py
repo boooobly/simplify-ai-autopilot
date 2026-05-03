@@ -26,10 +26,22 @@ class Settings:
     openrouter_app_name: str = "Simplify AI Autopilot"
     db_path: str = "data/drafts.db"
     schedule_timezone: str = "Europe/Moscow"
+    post_max_chars: int = 1400
+    post_soft_chars: int = 1100
 
     @property
     def has_ai_provider(self) -> bool:
         return bool(self.openrouter_api_key or self.openai_api_key)
+
+
+def _parse_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
 
 
 def load_settings() -> Settings:
@@ -49,6 +61,15 @@ def load_settings() -> Settings:
     openrouter_app_name = os.getenv("OPENROUTER_APP_NAME", "Simplify AI Autopilot").strip() or "Simplify AI Autopilot"
     schedule_timezone = os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow").strip() or "Europe/Moscow"
     db_path = os.getenv("DB_PATH", "data/drafts.db").strip() or "data/drafts.db"
+
+    post_max_chars = _parse_int_env("POST_MAX_CHARS", 1400)
+    post_soft_chars = _parse_int_env("POST_SOFT_CHARS", 1100)
+    if post_max_chars < 500:
+        post_max_chars = 1400
+    if post_soft_chars < 400:
+        post_soft_chars = 1100
+    if post_soft_chars > post_max_chars:
+        post_soft_chars = post_max_chars
 
     missing = []
     if not token:
@@ -80,4 +101,6 @@ def load_settings() -> Settings:
         openrouter_app_name=openrouter_app_name,
         db_path=db_path,
         schedule_timezone=schedule_timezone,
+        post_max_chars=post_max_chars,
+        post_soft_chars=post_soft_chars,
     )

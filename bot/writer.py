@@ -25,14 +25,22 @@ class EmptyAIResponseError(RuntimeError):
     pass
 
 
+def _strip_source_lines(text: str) -> str:
+    filtered = [
+        line
+        for line in text.splitlines()
+        if not line.strip().startswith("Источник:") and not line.strip().startswith("Source:")
+    ]
+    cleaned = "\n".join(filtered).strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned
+
+
 def _has_meaningful_body(text: str, source_url: str | None = None) -> bool:
-    cleaned = text.strip()
+    cleaned = _strip_source_lines(text).strip()
     if source_url:
-        cleaned = cleaned.replace(f"Источник: {source_url}", "")
-    cleaned = "\n".join(
-        line for line in cleaned.splitlines() if not line.strip().startswith("Источник:")
-    ).strip()
-    return len(cleaned) >= 40
+        cleaned = cleaned.replace(source_url, "")
+    return len(cleaned.strip()) >= 40
 
 
 def _load_style_prompt() -> str:
@@ -92,40 +100,54 @@ def _generate_with_chat_completion(
     return stripped
 
 
-def _limit_text_preserving_source(text: str, source_url: str | None = None, limit: int = 900) -> str:
-    if len(text) <= limit:
-        return text
-    if not source_url:
-        return text[: limit - 3].rstrip() + "..."
-    source_line = f"Источник: {source_url}"
-    if len(source_line) >= limit:
-        return source_line[:limit]
-    suffix = f"\n\n{source_line}"
-    body_limit = limit - len(suffix) - 3
-    if body_limit <= 0:
-        return source_line
-    body = text.replace(source_line, "").strip()
-    return body[:body_limit].rstrip() + "..." + suffix
+def _limit_text_safely(text: str, limit: int) -> str:
+    prepared = text.rstrip()
+    if len(prepared) <= limit:
+        return prepared
+
+    cut_zone = prepared[:limit].rstrip()
+
+    paragraph_idx = cut_zone.rfind("\n\n")
+    if paragraph_idx >= max(0, int(limit * 0.55)):
+        candidate = cut_zone[:paragraph_idx].rstrip()
+    else:
+        sentence_points = [cut_zone.rfind(mark) for mark in (". ", "! ", "? ", ".\n", "!\n", "?\n")]
+        sentence_idx = max(sentence_points)
+        if sentence_idx >= max(0, int(limit * 0.45)):
+            candidate = cut_zone[: sentence_idx + 1].rstrip()
+        else:
+            word_idx = cut_zone.rfind(" ")
+            if word_idx >= max(0, int(limit * 0.35)):
+                candidate = cut_zone[:word_idx].rstrip()
+            else:
+                candidate = cut_zone.rstrip()
+
+    if not candidate:
+        candidate = cut_zone.rstrip()
+    return candidate + "..."
 
 
 def generate_post_draft(
     api_key: str,
     model: str,
     source_url: str | None = None,
+    max_chars: int = 1400,
+    soft_chars: int = 1100,
     base_url: str | None = None,
     extra_headers: dict[str, str] | None = None,
 ) -> str:
     style = _load_style_prompt()
-    source_line = f"Источник: {source_url}" if source_url else "Источник: не указан"
+    source_context = source_url or "не указан"
     user_prompt = (
         "Создай один черновик поста для Telegram-канала @simplify_ai. "
         "Верни только готовый текст поста, без пояснений, без markdown-блока и без служебных комментариев. "
-        "Длина — до 900 символов. "
-        f"{source_line}"
+        f"Желательная длина до {soft_chars} символов. Жёсткий максимум {max_chars} символов. Не обрывай мысль. "
+        "Не добавляй строку Источник в сам пост. Ссылка хранится отдельно в модерации. "
+        f"Источник (контекст модерации): {source_context}."
     )
     logger.info("Генерация черновика: model=%s", model)
     text = _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
-    final_text = _limit_text_preserving_source(text, source_url=source_url)
+    final_text = _limit_text_safely(_strip_source_lines(text), limit=max_chars)
     if not _has_meaningful_body(final_text, source_url=source_url):
         raise EmptyAIResponseError("AI model returned empty content")
     return final_text
@@ -136,24 +158,28 @@ def polish_post_draft(
     model: str,
     draft_text: str,
     source_url: str | None = None,
+    max_chars: int = 1400,
+    soft_chars: int = 1100,
     base_url: str | None = None,
     extra_headers: dict[str, str] | None = None,
 ) -> str:
     style = _load_style_prompt()
-    source_line = f"Источник: {source_url}" if source_url else "Источник: не указан"
     user_prompt = (
         "Улучши черновик для @simplify_ai. Сохрани простой человеческий тон, как у реального автора Telegram-канала. "
         "Сделай текст яснее и живее, но не делай его стерильным или корпоративным. "
         "Не меняй факты и не добавляй новые факты. Не перегружай объяснениями. "
-        "Сохрани строку с источником в тексте. Верни только финальный текст до 900 символов. "
+        "Не добавляй строку Источник в сам пост. Ссылка хранится отдельно в модерации. Верни только финальный текст. "
+        "Сохрани полезные quote-like строки формата ▌ ➖ текст, если они уместны. "
+        "Пост должен быть цельным, без обрыва мысли посередине. "
         "Без AI-клише, без эм-даша, без кавычек-ёлочек. "
         "Избегай штампов: 'не про..., а про...', 'главный вывод простой', 'важно отметить', 'давайте разберем', 'в заключение'.\n\n"
-        f"{source_line}\n\n"
-        f"Текущий черновик:\n{draft_text}"
+        f"Источник (контекст модерации): {source_url or 'не указан'}\n\n"
+        f"Желательная длина до {soft_chars} символов. Жёсткий максимум {max_chars} символов. Не обрывай мысль.\n\n"
+        f"Текущий черновик:\n{_strip_source_lines(draft_text)}"
     )
     logger.info("Полировка черновика: model=%s", model)
     text = _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
-    final_text = _limit_text_preserving_source(text, source_url=source_url)
+    final_text = _limit_text_safely(_strip_source_lines(text), limit=max_chars)
     if not _has_meaningful_body(final_text, source_url=source_url):
         raise EmptyAIResponseError("AI model returned empty content")
     return final_text
@@ -219,24 +245,26 @@ def fetch_page_content(source_url: str, timeout_seconds: int = 12) -> tuple[str,
     return title, text
 
 
-def generate_post_draft_from_page(api_key: str, model: str, source_url: str, title: str, page_text: str, base_url: str | None = None, extra_headers: dict[str, str] | None = None) -> str:
+def generate_post_draft_from_page(api_key: str, model: str, source_url: str, title: str, page_text: str, max_chars: int = 1400, soft_chars: int = 1100, base_url: str | None = None, extra_headers: dict[str, str] | None = None) -> str:
     style = _load_style_prompt()
     user_prompt = (
         "Ниже ссылка и извлечённый текст страницы. Опирайся только на этот текст страницы. "
         "Не выдумывай факты, если их нет в тексте. "
-        "Сделай один готовый пост в стиле @simplify_ai до 900 символов. "
-        "Структура: короткий заголовок с emoji, 1-2 простых вводных предложения, 2-4 коротких пункта с символом ➖ (если уместно), практический смысл простыми словами, короткая финальная мысль с 💭 (когда уместно). "
+        "Сделай один готовый пост в стиле @simplify_ai. "
+        "Структура: короткий заголовок с emoji, 1-2 простых вводных предложения, практический смысл простыми словами, короткая финальная мысль с 💭 (когда уместно). Для ключевых пунктов используй 2-4 quote-like строки формата: ▌ ➖ текст, только когда это уместно; не перегружай список. "
         "Пиши живо и по-человечески: без сухого пресс-релизного стиля, без корпоративного тона, без AI-клише. "
         "Не используй фразы: 'не про..., а про...', 'главный вывод простой', 'важно отметить', 'давайте разберем', 'в заключение'. "
         "Не используй эм-даш и кавычки-ёлочки. "
         "Не оставляй ответ пустым: даже если статья слабая, сделай осторожный короткий пост только по подтверждённым фактам. "
-        "В конце обязательно добавь строку: Источник: <source_url>. "
+        "Не добавляй строку Источник в сам пост. Ссылка хранится отдельно в модерации. "
+        f"Желательная длина до {soft_chars} символов. Жёсткий максимум {max_chars} символов. Не обрывай мысль. "
+        "Не используй markdown blockquote и не используй HTML. "
         "Верни только финальный текст поста без комментариев и без markdown-блоков.\n\n"
-        f"Источник: {source_url}\nЗаголовок: {title}\n\nТекст страницы:\n{page_text}"
+        f"Источник (контекст модерации): {source_url}\nЗаголовок: {title}\n\nТекст страницы:\n{page_text}"
     )
     logger.info("Генерация по URL: model=%s", model)
     text = _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
-    final_text = _limit_text_preserving_source(text, source_url=source_url)
+    final_text = _limit_text_safely(_strip_source_lines(text), limit=max_chars)
     if not _has_meaningful_body(final_text, source_url=source_url):
         raise EmptyAIResponseError("AI model returned empty content")
     return final_text
