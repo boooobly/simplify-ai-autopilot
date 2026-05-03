@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -23,6 +24,15 @@ ARTICLE_SELECTORS = ["article", "main", '[role="main"]', ".post", ".article", ".
 
 class EmptyAIResponseError(RuntimeError):
     pass
+
+
+@dataclass
+class GenerationResult:
+    content: str
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    model: str = ""
 
 
 def _strip_source_lines(text: str) -> str:
@@ -58,7 +68,7 @@ def _generate_with_chat_completion(
     system_prompt: str,
     base_url: str | None = None,
     extra_headers: dict[str, str] | None = None,
-) -> str:
+) -> GenerationResult:
     client = _build_client(api_key=api_key, base_url=base_url)
     response = client.chat.completions.create(
         model=model,
@@ -88,6 +98,10 @@ def _generate_with_chat_completion(
         content = "\n".join(text_parts)
     elif message_content is not None:
         content = str(message_content)
+    usage = getattr(response, "usage", None)
+    prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+    completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+    total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
     stripped = content.strip()
     logger.info(
         "AI completion received: model=%s finish_reason=%s text_length=%s",
@@ -97,7 +111,13 @@ def _generate_with_chat_completion(
     )
     if not stripped:
         raise EmptyAIResponseError("AI model returned empty content")
-    return stripped
+    return GenerationResult(
+        content=stripped,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        model=model,
+    )
 
 
 def _limit_text_safely(text: str, limit: int) -> str:
@@ -159,7 +179,7 @@ def generate_post_draft(
     soft_chars: int = 1100,
     base_url: str | None = None,
     extra_headers: dict[str, str] | None = None,
-) -> str:
+) -> GenerationResult:
     style = _load_style_prompt()
     source_context = source_url or "не указан"
     user_prompt = (
@@ -170,11 +190,12 @@ def generate_post_draft(
         f"Источник (контекст модерации): {source_context}."
     )
     logger.info("Генерация черновика: model=%s", model)
-    text = _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
-    final_text = _limit_text_safely(_strip_source_lines(text), limit=max_chars)
+    result = _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
+    final_text = _limit_text_safely(_strip_source_lines(result.content), limit=max_chars)
     if not _has_meaningful_body(final_text, source_url=source_url):
         raise EmptyAIResponseError("AI model returned empty content")
-    return final_text
+    result.content = final_text
+    return result
 
 
 def polish_post_draft(
@@ -186,7 +207,7 @@ def polish_post_draft(
     soft_chars: int = 1100,
     base_url: str | None = None,
     extra_headers: dict[str, str] | None = None,
-) -> str:
+) -> GenerationResult:
     style = _load_style_prompt()
     user_prompt = (
         "Улучши черновик для @simplify_ai. Сохрани простой человеческий тон, как у реального автора Telegram-канала. "
@@ -204,11 +225,12 @@ def polish_post_draft(
         f"Текущий черновик:\n{_strip_source_lines(draft_text)}"
     )
     logger.info("Полировка черновика: model=%s", model)
-    text = _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
-    final_text = _limit_text_safely(_strip_source_lines(text), limit=max_chars)
+    result = _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
+    final_text = _limit_text_safely(_strip_source_lines(result.content), limit=max_chars)
     if not _has_meaningful_body(final_text, source_url=source_url):
         raise EmptyAIResponseError("AI model returned empty content")
-    return final_text
+    result.content = final_text
+    return result
 
 
 def find_first_url(text: str) -> str | None:
@@ -271,7 +293,7 @@ def fetch_page_content(source_url: str, timeout_seconds: int = 12) -> tuple[str,
     return title, text
 
 
-def generate_post_draft_from_page(api_key: str, model: str, source_url: str, title: str, page_text: str, max_chars: int = 1400, soft_chars: int = 1100, base_url: str | None = None, extra_headers: dict[str, str] | None = None) -> str:
+def generate_post_draft_from_page(api_key: str, model: str, source_url: str, title: str, page_text: str, max_chars: int = 1400, soft_chars: int = 1100, base_url: str | None = None, extra_headers: dict[str, str] | None = None) -> GenerationResult:
     style = _load_style_prompt()
     user_prompt = (
         "Ниже ссылка и извлечённый текст страницы. Опирайся только на этот текст страницы. "
@@ -292,8 +314,9 @@ def generate_post_draft_from_page(api_key: str, model: str, source_url: str, tit
         f"Источник (контекст модерации): {source_url}\nЗаголовок: {title}\n\nТекст страницы:\n{page_text}"
     )
     logger.info("Генерация по URL: model=%s", model)
-    text = _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
-    final_text = _limit_text_safely(_strip_source_lines(text), limit=max_chars)
+    result = _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
+    final_text = _limit_text_safely(_strip_source_lines(result.content), limit=max_chars)
     if not _has_meaningful_body(final_text, source_url=source_url):
         raise EmptyAIResponseError("AI model returned empty content")
-    return final_text
+    result.content = final_text
+    return result
