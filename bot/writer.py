@@ -173,6 +173,61 @@ def _repair_quote_markers(text: str) -> str:
         close_count -= 1
     return text
 
+
+def _select_title_alias(text: str, source_url: str | None = None, title: str | None = None) -> str | None:
+    haystack = " ".join(part for part in [title or "", text, source_url or ""]).lower()
+    keyword_aliases: list[tuple[tuple[str, ...], str]] = [
+        (("claude", "anthropic"), "claude"),
+        (("chatgpt", "openai", "gpt"), "chatgpt"),
+        (("deepseek",), "deepseek"),
+        (("google", "gemini", "deepmind"), "google"),
+        (("github", "repo", "repository", "open-source repo"), "github"),
+        (("photoshop", "adobe"), "photoshop"),
+        (("windows", "microsoft windows"), "windows"),
+        (("telegram", "bot", "bots", "channel", "channels"), "telegram"),
+        (("vpn", "privacy", "security", "leak", "leaks", "приватность", "безопасность", "утечка"), "lock"),
+        (("model", "llm", "tokens", "context", "open-source model", "weights", "hugging face", "minimax", "qwen", "llama", "mistral", "модель", "токен", "контекст", "веса"), "screen_card"),
+        (("website", "web", "browser", "site", "сайт", "веб", "браузер"), "web"),
+        (("trend", "viral", "hot", "сильное обновление", "тренд"), "fire"),
+    ]
+    for keywords, alias in keyword_aliases:
+        if any(keyword in haystack for keyword in keywords):
+            return alias
+    return None
+
+
+def _ensure_custom_emoji_markers(text: str, source_url: str | None = None, title: str | None = None) -> str:
+    lines = text.splitlines()
+    alias = _select_title_alias(text=text, source_url=source_url, title=title)
+    first_non_empty_idx = next((idx for idx, line in enumerate(lines) if line.strip()), None)
+    if (
+        first_non_empty_idx is not None
+        and alias
+        and "[[EMOJI:" not in lines[first_non_empty_idx]
+        and "[[LINK:" not in lines[first_non_empty_idx]
+    ):
+        lines[first_non_empty_idx] = re.sub(r"^\s*[^\w\s]\s*", "", lines[first_non_empty_idx], count=1).strip()
+        lines[first_non_empty_idx] = f"[[EMOJI:{alias}]] {lines[first_non_empty_idx]}".strip()
+
+    thought_like = ("💭", "🤔", "🧠")
+    link_like = ("🔗", "🧾", "🌐", "📎")
+    warn_like = ("❗️", "❗")
+    for idx, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith(thought_like):
+            lines[idx] = re.sub(r"^(\s*)(💭|🤔|🧠)\s*", r"\1[[EMOJI:thought]] ", line, count=1)
+        if "[[LINK:" in line and "[[EMOJI:" not in line:
+            if stripped.startswith(link_like):
+                lines[idx] = re.sub(r"^(\s*)(🔗|🧾|🌐|📎)\s*", r"\1[[EMOJI:link]] ", line, count=1)
+            else:
+                indent = line[: len(line) - len(stripped)]
+                lines[idx] = f"{indent}[[EMOJI:link]] {stripped}"
+        if stripped.startswith(warn_like):
+            lowered = stripped.lower()
+            if any(token in lowered for token in ("warning", "risk", "limitation", "огранич", "риск", "предупреж")):
+                lines[idx] = re.sub(r"^(\s*)(❗️|❗)\s*", r"\1[[EMOJI:alert]] ", line, count=1)
+    return "\n".join(lines).strip()
+
 def generate_post_draft(
     api_key: str,
     model: str,
@@ -190,6 +245,12 @@ def generate_post_draft(
         "Верни только готовый текст поста, без пояснений, без markdown-блока и без служебных комментариев. "
         f"Желательная длина до {soft_chars} символов. Жёсткий максимум {max_chars} символов. Не обрывай мысль. "
         "Не добавляй строку Источник в сам пост. Ссылка хранится отдельно в модерации. "
+        "Для заголовка, CTA и финальной мысли используй custom emoji aliases через [[EMOJI:alias]], а не raw emoji. "
+        "Если есть подходящий alias, не используй обычные emoji. Для финальной мысли используй [[EMOJI:thought]], для CTA-строки [[EMOJI:link]]. "
+        "Для generic AI/tool/model news используй [[EMOJI:screen_card]] или [[EMOJI:fire]]; для MiniMax/Mistral/Qwen/Llama без отдельного alias используй [[EMOJI:screen_card]]. "
+        "Используй [[EMOJI:claude]] для Claude/Anthropic, [[EMOJI:chatgpt]] для ChatGPT/OpenAI/GPT, [[EMOJI:deepseek]] для DeepSeek, [[EMOJI:google]] для Google/Gemini/DeepMind. "
+        "Для GitHub используй [[EMOJI:github]], для Photoshop/Adobe [[EMOJI:photoshop]], для Windows [[EMOJI:windows]], для Telegram [[EMOJI:telegram]], для privacy/security/VPN [[EMOJI:lock]], для web/services [[EMOJI:web]]. "
+        "Если alias явно не подходит, можно использовать обычный emoji или не использовать emoji. "
         f"Источник (контекст модерации): {source_context}."
     )
     logger.info("Генерация черновика: model=%s", model)
@@ -197,7 +258,7 @@ def generate_post_draft(
     final_text = _limit_text_safely(_strip_source_lines(result.content), limit=max_chars)
     if not _has_meaningful_body(final_text, source_url=source_url):
         raise EmptyAIResponseError("AI model returned empty content")
-    result.content = final_text
+    result.content = _ensure_custom_emoji_markers(final_text, source_url=source_url, title=None)
     return result
 
 
@@ -229,6 +290,12 @@ def polish_post_draft(
         "Это финальный humanizer-pass: убери AI-клише, сделай текст естественным, сохрани факты, "
         "сохрани Telegram-формат, сохрани маркеры списка ➖ и короткую человеческую концовку. "
         "Не добавляй строку Источник внутрь поста.\n\n"
+        "Используй [[EMOJI:alias]] для заголовка/CTA/финальной мысли, а не raw emoji. "
+        "Для финальной мысли - [[EMOJI:thought]], для CTA/link-строки - [[EMOJI:link]]. "
+        "Для generic AI/tool/model news - [[EMOJI:screen_card]] (или [[EMOJI:fire]]), для MiniMax/Mistral/Qwen/Llama - [[EMOJI:screen_card]], если нет более точного alias. "
+        "Используй [[EMOJI:claude]] для Claude/Anthropic, [[EMOJI:chatgpt]] для ChatGPT/OpenAI/GPT, [[EMOJI:deepseek]] для DeepSeek, [[EMOJI:google]] для Google/Gemini/DeepMind. "
+        "Для GitHub используй [[EMOJI:github]], для Photoshop/Adobe [[EMOJI:photoshop]], для Windows [[EMOJI:windows]], для Telegram [[EMOJI:telegram]], для privacy/security/VPN [[EMOJI:lock]], для web/services [[EMOJI:web]]. "
+        "Если alias явно не подходит, можно использовать обычный emoji или не использовать emoji.\n\n"
         "Перед возвратом финального текста молча проверь: "
         "похоже ли это на обычного автора Telegram, нет ли AI-клише, нет ли конструкции 'не про..., а про...', "
         "нет ли стерильного маркетингового тона, не слишком ли длинно, нет ли неподтверждённых фактов. "
@@ -243,7 +310,7 @@ def polish_post_draft(
     final_text = _limit_text_safely(_strip_source_lines(result.content), limit=max_chars)
     if not _has_meaningful_body(final_text, source_url=source_url):
         raise EmptyAIResponseError("AI model returned empty content")
-    result.content = final_text
+    result.content = _ensure_custom_emoji_markers(final_text, source_url=source_url, title=None)
     return result
 
 
@@ -314,7 +381,13 @@ def generate_post_draft_from_page(api_key: str, model: str, source_url: str, tit
         "Соблюдай стиль-гайд ниже как основные правила. "
         "Не выдумывай факты, если их нет в тексте. "
         "Сделай один готовый пост в стиле @simplify_ai. "
-        "Структура: короткий заголовок с emoji, 1-2 простых вводных предложения, практический смысл простыми словами, короткая финальная мысль с 💭 (когда уместно). "
+        "Структура: короткий заголовок, 1-2 простых вводных предложения, практический смысл простыми словами, короткая финальная мысль (когда уместно). "
+        "Для заголовка, CTA и финальной мысли используй custom emoji aliases через маркеры [[EMOJI:alias]], а не raw emoji. "
+        "Если есть подходящий alias, не используй обычные emoji. Для финальной мысли используй [[EMOJI:thought]], для CTA-строки используй [[EMOJI:link]]. "
+        "Для generic AI/tool/model news используй [[EMOJI:screen_card]] или [[EMOJI:fire]]. Для MiniMax, Mistral, Qwen, Llama и других без отдельного alias используй [[EMOJI:screen_card]]. "
+        "Используй [[EMOJI:claude]] для Claude/Anthropic, [[EMOJI:chatgpt]] для ChatGPT/OpenAI/GPT, [[EMOJI:deepseek]] для DeepSeek, [[EMOJI:google]] для Google/Gemini/DeepMind. "
+        "Для GitHub используй [[EMOJI:github]], для Photoshop/Adobe [[EMOJI:photoshop]], для Windows [[EMOJI:windows]], для Telegram [[EMOJI:telegram]], для privacy/security/VPN [[EMOJI:lock]], для web/services [[EMOJI:web]]. "
+        "Если alias явно не подходит, можно использовать обычный emoji или не использовать emoji. "
         "Для перечислений используй обычные строки с ➖. Бот сам превратит подряд идущие пункты в цитату Telegram. "
         "Можно использовать [[QUOTE]]...[[/QUOTE]], но не делай это обязательным и не завязывай на этом структуру. "
         "Не используй \"▌\", markdown blockquote или HTML. Не используй больше одного quote block, если только тексту действительно это не нужно. "
@@ -336,5 +409,5 @@ def generate_post_draft_from_page(api_key: str, model: str, source_url: str, tit
     final_text = _limit_text_safely(_strip_source_lines(result.content), limit=max_chars)
     if not _has_meaningful_body(final_text, source_url=source_url):
         raise EmptyAIResponseError("AI model returned empty content")
-    result.content = final_text
+    result.content = _ensure_custom_emoji_markers(final_text, source_url=source_url, title=title)
     return result
