@@ -289,9 +289,14 @@ def _main_menu_text() -> str:
 
 
 
+def _clear_pending_plan_schedule(context) -> None:
+    context.user_data.pop("pending_plan_schedule_day", None)
+    context.user_data.pop("pending_plan_schedule_items", None)
+
+
 def _generated_plan_keyboard(day_offset: int, has_created: bool) -> InlineKeyboardMarkup | None:
     queue_callback = "queue_today:0" if day_offset == 0 else "queue_tomorrow:0"
-    schedule_callback = "schedule_generated_plan_day" if day_offset == 0 else "schedule_generated_plan_tomorrow"
+    schedule_callback = "menu_schedule_generated_plan_day" if day_offset == 0 else "menu_schedule_generated_plan_tomorrow"
     rows: list[list[InlineKeyboardButton]] = []
     if has_created:
         rows.append([InlineKeyboardButton("📅 Поставить созданные в очередь", callback_data=schedule_callback)])
@@ -463,6 +468,7 @@ def _queue_keyboard(day_offset: int, draft_ids: list[int]) -> InlineKeyboardMark
 
 
 def _render_queue_text(db: DraftDatabase, settings, day_offset: int) -> str:
+    _clear_pending_plan_schedule(context)
     day_name = "сегодня" if day_offset == 0 else "завтра"
     start_local, end_local = _get_day_range(day_offset, settings.schedule_timezone)
     start_utc = start_local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
@@ -1104,6 +1110,7 @@ async def _generate_drafts_from_plan(
     db: DraftDatabase,
     day_offset: int,
 ) -> str:
+    _clear_pending_plan_schedule(context)
     day_name = "сегодня" if day_offset == 0 else "завтра"
     queue_hint = "/queue_today" if day_offset == 0 else "/queue_tomorrow"
     empty_slots = _empty_slots_for_day(db, settings, day_offset)
@@ -1159,7 +1166,8 @@ async def _schedule_generated_plan(*, context, settings, db, day_offset: int) ->
     pending_day = context.user_data.get("pending_plan_schedule_day")
     pending_items = context.user_data.get("pending_plan_schedule_items")
     if pending_day != day_offset or not pending_items:
-        return "Нет свежего плана для постановки в очередь. Сначала запусти /generate_plan_day"
+        generate_hint = "/generate_plan_day" if day_offset == 0 else "/generate_plan_tomorrow"
+        return f"Нет свежего плана для постановки в очередь. Сначала запусти {generate_hint}"
 
     day_name = "сегодня" if day_offset == 0 else "завтра"
     queue_hint = "/queue_today" if day_offset == 0 else "/queue_tomorrow"
@@ -2335,11 +2343,11 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
         summary = await _generate_drafts_from_plan(context=context, settings=settings, db=db, day_offset=1)
         has_created = bool(context.user_data.get("pending_plan_schedule_items")) and context.user_data.get("pending_plan_schedule_day") == 1
         await context.bot.send_message(chat_id=settings.admin_id, text=summary, reply_markup=_generated_plan_keyboard(1, has_created))
-    elif data == "schedule_generated_plan_day":
+    elif data == "menu_schedule_generated_plan_day":
         await _edit_callback_message(query, "Ставлю черновики в очередь...")
         summary = await _schedule_generated_plan(context=context, settings=settings, db=db, day_offset=0)
         await context.bot.send_message(chat_id=settings.admin_id, text=summary)
-    elif data == "schedule_generated_plan_tomorrow":
+    elif data == "menu_schedule_generated_plan_tomorrow":
         await _edit_callback_message(query, "Ставлю черновики в очередь...")
         summary = await _schedule_generated_plan(context=context, settings=settings, db=db, day_offset=1)
         await context.bot.send_message(chat_id=settings.admin_id, text=summary)
