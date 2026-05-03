@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Update
+from telegram import KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, ReplyKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
@@ -36,6 +36,18 @@ TELEGRAM_CAPTION_LIMIT = 1024
 SHORT_MEDIA_PREVIEW_LIMIT = 850
 EMPTY_AI_REPLY_TEXT = "Модель вернула пустой ответ. Черновик не создан. Попробуй ещё раз или смени MODEL_DRAFT."
 
+
+
+NAV_PLAN_DAY = "🗓 План на день"
+NAV_GENERATE_PLAN = "🧩 Создать черновики"
+NAV_QUEUE = "📅 Очередь"
+NAV_DRAFTS = "📝 Черновики"
+NAV_TOPICS = "🧠 Темы"
+NAV_SOURCES = "📡 Источники"
+NAV_USAGE = "📊 Расходы"
+NAV_STYLE = "✍️ Стиль"
+NAV_SETTINGS = "⚙️ Настройки"
+NAV_HELP = "❓ Помощь"
 
 CATEGORY_LABELS = {
     "news": "Новости",
@@ -836,6 +848,71 @@ async def _handle_pending_media_attach(update: Update, context: ContextTypes.DEF
         f"Добавлено медиа: {len(pending_items)}/10. Можешь прислать ещё или нажать «✅ Готово»."
     )
     return True
+
+
+def _admin_reply_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(NAV_PLAN_DAY), KeyboardButton(NAV_GENERATE_PLAN)],
+            [KeyboardButton(NAV_QUEUE), KeyboardButton(NAV_DRAFTS)],
+            [KeyboardButton(NAV_TOPICS), KeyboardButton(NAV_SOURCES)],
+            [KeyboardButton(NAV_USAGE), KeyboardButton(NAV_STYLE)],
+            [KeyboardButton(NAV_SETTINGS), KeyboardButton(NAV_HELP)],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Выбери действие или пришли ссылку",
+    )
+
+
+async def _reply_admin_text(update: Update, text: str, **kwargs) -> None:
+    if update.message:
+        await update.message.reply_text(text, reply_markup=_admin_reply_keyboard(), **kwargs)
+
+
+async def _handle_navigation_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    if not _is_admin(update.effective_user.id if update.effective_user else None, settings.admin_id):
+        return True
+    if not update.message:
+        return True
+
+    if text == NAV_PLAN_DAY:
+        await _send_daily_plan(context=context, settings=settings, db=db, day_offset=0)
+        return True
+    if text == NAV_GENERATE_PLAN:
+        await update.message.reply_text("Создаю черновики из плана...", reply_markup=_admin_reply_keyboard())
+        summary = await _generate_drafts_from_plan(context=context, settings=settings, db=db, day_offset=0)
+        has_created = bool(context.user_data.get("pending_plan_schedule_items")) and context.user_data.get("pending_plan_schedule_day") == 0
+        await update.message.reply_text(summary, reply_markup=_generated_plan_keyboard(0, has_created))
+        return True
+    if text == NAV_QUEUE:
+        await update.message.reply_text(_render_queue_text(db, settings, day_offset=0), reply_markup=_queue_keyboard(0, _queue_draft_ids_for_day(db, settings, 0)))
+        return True
+    if text == NAV_DRAFTS:
+        await drafts_command(update, context)
+        return True
+    if text == NAV_TOPICS:
+        await topics_hot_command(update, context)
+        return True
+    if text == NAV_SOURCES:
+        await sources_status_command(update, context)
+        return True
+    if text == NAV_USAGE:
+        await usage_today_command(update, context)
+        return True
+    if text == NAV_STYLE:
+        await style_guide_command(update, context)
+        return True
+    if text == NAV_SETTINGS:
+        await _reply_admin_text(update, _settings_text(settings), link_preview_options=_disabled_link_preview_options())
+        return True
+    if text == NAV_HELP:
+        await _reply_admin_text(update, "Открой /menu для полного списка действий.\nМожешь прислать ссылку, чтобы сразу создать черновик.")
+        return True
+    return False
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Allow /start only for admin user."""
 
@@ -848,8 +925,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     if update.message:
+        await _reply_admin_text(update, "Привет 👋\nБот работает.")
+        await _reply_admin_text(update, "Открываю главное меню.")
         await update.message.reply_text(
-            "Привет 👋\nБот работает.",
+            _main_menu_text(),
             reply_markup=_main_menu_keyboard(),
             link_preview_options=_disabled_link_preview_options(),
         )
@@ -1239,7 +1318,7 @@ async def schedule_generated_plan_day_command(update: Update, context: ContextTy
         return
     if update.message:
         summary = await _schedule_generated_plan(context=context, settings=settings, db=db, day_offset=0)
-        await update.message.reply_text(summary)
+        await update.message.reply_text(summary, reply_markup=_admin_reply_keyboard())
 
 
 async def schedule_generated_plan_tomorrow_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1249,7 +1328,7 @@ async def schedule_generated_plan_tomorrow_command(update: Update, context: Cont
         return
     if update.message:
         summary = await _schedule_generated_plan(context=context, settings=settings, db=db, day_offset=1)
-        await update.message.reply_text(summary)
+        await update.message.reply_text(summary, reply_markup=_admin_reply_keyboard())
 
 
 async def unschedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1624,7 +1703,7 @@ async def sources_status_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("Проверяю источники...")
     _items, reports = collect_topics_with_diagnostics()
     if update.message:
-        await update.message.reply_text(_render_sources_status(reports))
+        await update.message.reply_text(_render_sources_status(reports), reply_markup=_admin_reply_keyboard())
 
 
 async def collect_debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1652,7 +1731,7 @@ async def collect_debug_command(update: Update, context: ContextTypes.DEFAULT_TY
     if len([r for r in reports if r.status in {'error', 'empty'}]) > 12:
         combined += "\nПоказаны первые 12 проблем."
     if update.message:
-        await update.message.reply_text(combined[:3900])
+        await update.message.reply_text(combined[:3900], reply_markup=_admin_reply_keyboard())
 
 
 async def topics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1816,7 +1895,7 @@ async def _usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE, day
         settings.openai_input_cost_per_1m, settings.openai_output_cost_per_1m,
     ])
     if update.message:
-        await update.message.reply_text(_render_usage_text(summary, period_title, costs_enabled))
+        await update.message.reply_text(_render_usage_text(summary, period_title, costs_enabled), reply_markup=_admin_reply_keyboard())
 
 
 async def usage_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1844,7 +1923,7 @@ async def style_guide_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         "- без 'не про..., а про...', без эм-даша и без выдуманных фактов"
     )
     if update.message:
-        await update.message.reply_text(summary)
+        await update.message.reply_text(summary, reply_markup=_admin_reply_keyboard())
 
 
 async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2468,6 +2547,9 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 return
 
     if not message_text:
+        return
+
+    if await _handle_navigation_text(update, context, message_text):
         return
 
     source_url_raw = find_first_url(message_text)

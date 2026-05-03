@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 
+from telegram import BotCommand
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from bot.config import load_settings
@@ -54,13 +55,33 @@ def setup_logging() -> None:
     )
 
 
+
+
+async def _post_init(application: Application) -> None:
+    await application.bot.set_my_commands(
+        [
+            BotCommand("start", "Запустить бота"),
+            BotCommand("menu", "Главное меню"),
+            BotCommand("plan_day", "План тем на сегодня"),
+            BotCommand("generate_plan_day", "Создать черновики из плана"),
+            BotCommand("schedule_generated_plan_day", "Поставить черновики в очередь"),
+            BotCommand("queue_today", "Очередь на сегодня"),
+            BotCommand("drafts", "Последние черновики"),
+            BotCommand("collect_debug", "Сбор тем с диагностикой"),
+            BotCommand("topics_hot", "Горячие темы"),
+            BotCommand("sources_status", "Статус источников"),
+            BotCommand("usage_today", "Расходы ИИ сегодня"),
+            BotCommand("style_guide", "Сводка по стилю"),
+        ]
+    )
+
 def main() -> None:
     setup_logging()
 
     settings = load_settings()
     db = DraftDatabase(settings.db_path)
 
-    application = Application.builder().token(settings.bot_token).build()
+    application = Application.builder().token(settings.bot_token).post_init(_post_init).build()
     application.bot_data["settings"] = settings
     application.bot_data["db"] = db
 
