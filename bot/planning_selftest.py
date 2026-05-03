@@ -35,6 +35,27 @@ def run() -> None:
     assert len(same_group_selected) == 4
     assert len(same_group_ids) == len(set(same_group_ids))
 
+    duplicate_topics = [
+        {"id": 21, "score": 99, "category": "tool", "source_group": "tools", "title": "a", "source": "s", "url": "ua"},
+        {"id": 21, "score": 98, "category": "news", "source_group": "tech_media", "title": "b", "source": "s", "url": "ub"},
+        {"id": 22, "score": 97, "category": "model", "source_group": "official_ai", "title": "c", "source": "s", "url": "uc"},
+        {"id": 23, "score": 96, "category": "meme", "source_group": "community", "title": "d", "source": "s", "url": "ud"},
+    ]
+    duplicate_selected = _select_daily_plan_topics(FakeDB(duplicate_topics), limit=3)
+    duplicate_ids = [int(t["id"]) for t in duplicate_selected]
+    assert len(duplicate_selected) == 3
+    assert len(duplicate_ids) == len(set(duplicate_ids))
+
+    relaxed_fill_topics = [
+        {"id": 31, "score": 99, "category": "tool", "source_group": "tools", "title": "a", "source": "s", "url": "u1"},
+        {"id": 32, "score": 98, "category": "tool", "source_group": "tools", "title": "b", "source": "s", "url": "u2"},
+        {"id": 33, "score": 97, "category": "tool", "source_group": "tools", "title": "c", "source": "s", "url": "u3"},
+        {"id": 34, "score": 96, "category": "tool", "source_group": "tools", "title": "d", "source": "s", "url": "u4"},
+        {"id": 35, "score": 95, "category": "tool", "source_group": "tools", "title": "e", "source": "s", "url": "u5"},
+    ]
+    relaxed_selected = _select_daily_plan_topics(FakeDB(relaxed_fill_topics), limit=5)
+    assert len(relaxed_selected) == 5
+
 
 if __name__ == "__main__":
     run()
