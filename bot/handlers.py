@@ -85,9 +85,18 @@ def _topic_card_text(topic: dict) -> str:
     return (
         f"🧠 Тема #{topic['id']} - {topic.get('score', 0)} - {topic.get('category') or 'other'}\n"
         f"{topic['title']}\n"
-        f"Источник: {topic['source']}\n"
+        f"Источник: {topic['source']} / {topic.get('source_group') or 'other'}\n"
         f"Почему: {topic.get('reason') or 'без пояснения'}\n"
         f"URL: {topic['url']}"
+    )
+
+
+def _topic_actions_keyboard(topic_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✍️ Создать черновик", callback_data=f"topic_generate:{topic_id}")],
+            [InlineKeyboardButton("❌ Отклонить тему", callback_data=f"reject_topic:{topic_id}")],
+        ]
     )
 
 
@@ -1073,9 +1082,19 @@ async def collect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     items = collect_topics()
     added = 0
     skipped = 0
+    spam_words = ["casino", "porn", "xxx", "bet", "viagra"]
     for item in items:
+        if len(item.title.strip()) < 8 or not item.url.strip() or not item.normalized_title.strip():
+            skipped += 1
+            continue
+        if any(w in item.title.lower() for w in spam_words):
+            skipped += 1
+            continue
+        if item.score < 20 and item.source_group != "custom":
+            skipped += 1
+            continue
         if db.upsert_topic_candidate(
-            item.title, item.url, item.source, item.published_at, item.category, item.score, item.reason, item.normalized_title
+            item.title, item.url, item.source, item.published_at, item.category, item.score, item.reason, item.normalized_title, item.source_group
         ):
             added += 1
         else:
@@ -1085,6 +1104,9 @@ async def collect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         top = sorted(items, key=lambda i: i.score, reverse=True)[:5]
         lines = ["🧠 Темы собраны", "", f"Новых: {added}", f"Обновлено/пропущено: {skipped}", "", "Лучшие:"]
         lines.extend([f"- {it.score} - {it.category} - {it.title[:70]}" for it in top])
+        lively = [i for i in sorted(items, key=lambda i: i.score, reverse=True) if i.source_group in {"community","github","tools","custom"} or i.category in {"drama","meme","guide","creator"}][:5]
+        lines.extend(["", "Живые темы:"])
+        lines.extend([f"- {it.score} - {it.source_group} - {it.title[:70]}" for it in lively])
         await update.message.reply_text("\n".join(lines))
 
 
@@ -1105,12 +1127,7 @@ async def topics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     for topic in topics:
         text = _topic_card_text(topic)
-        keyboard = InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("✍️ Создать черновик", callback_data=f"topic_generate:{topic['id']}")],
-                [InlineKeyboardButton("❌ Отклонить тему", callback_data=f"reject_topic:{topic['id']}")],
-            ]
-        )
+        keyboard = _topic_actions_keyboard(int(topic["id"]))
         await context.bot.send_message(
             chat_id=settings.admin_id,
             text=text,
@@ -1141,6 +1158,72 @@ async def topics_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
 
 
+
+
+async def topics_tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _topics_filtered_command(update, context, categories=["tool", "creator", "guide", "dev", "mobile"])
+
+
+async def topics_news_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _topics_filtered_command(update, context, categories=["news", "model", "agent", "research", "business", "privacy"])
+
+
+async def topics_fun_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _topics_fun_command(update, context)
+
+
+async def _topics_fun_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_admin(user_id, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+
+    topics_by_category = db.list_topic_candidates_filtered(limit=20, status="new", categories=["drama", "meme"])
+    topics_by_group = db.list_topic_candidates_filtered(limit=20, status="new", source_groups=["community", "github", "custom"])
+
+    merged: dict[int, dict] = {}
+    for topic in topics_by_category + topics_by_group:
+        topic_id = int(topic["id"])
+        merged[topic_id] = topic
+
+    topics = sorted(merged.values(), key=lambda t: (int(t.get("score") or 0), str(t.get("created_at") or "")), reverse=True)[:10]
+    if not topics:
+        if update.message:
+            await update.message.reply_text("По фильтру пока нет тем. Запусти /collect")
+        return
+
+    for topic in topics:
+        await context.bot.send_message(
+            chat_id=settings.admin_id,
+            text=_topic_card_text(topic),
+            reply_markup=_topic_actions_keyboard(int(topic["id"])),
+            link_preview_options=_disabled_link_preview_options(),
+        )
+
+
+async def _topics_filtered_command(update: Update, context: ContextTypes.DEFAULT_TYPE, categories=None, source_groups=None) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_admin(user_id, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+    topics = db.list_topic_candidates_filtered(limit=10, status="new", categories=categories, source_groups=source_groups)
+    if not topics:
+        if update.message:
+            await update.message.reply_text("По фильтру пока нет тем. Запусти /collect")
+        return
+    for topic in topics:
+        await context.bot.send_message(
+            chat_id=settings.admin_id,
+            text=_topic_card_text(topic),
+            reply_markup=_topic_actions_keyboard(int(topic["id"])),
+            link_preview_options=_disabled_link_preview_options(),
+        )
 async def _usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE, days: int, period_title: str) -> None:
     settings = context.bot_data["settings"]
     db: DraftDatabase = context.bot_data["db"]
@@ -1679,7 +1762,7 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
         skipped = 0
         for item in items:
             if db.upsert_topic_candidate(
-                item.title, item.url, item.source, item.published_at, item.category, item.score, item.reason, item.normalized_title
+                item.title, item.url, item.source, item.published_at, item.category, item.score, item.reason, item.normalized_title, item.source_group
             ):
                 added += 1
             else:
@@ -1697,12 +1780,7 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await _edit_callback_message(query, "Найденные темы:", reply_markup=_back_to_menu_keyboard())
         for topic in topics:
             text = _topic_card_text(topic)
-            keyboard = InlineKeyboardMarkup(
-                [
-                    [InlineKeyboardButton("✍️ Создать черновик", callback_data=f"topic_generate:{topic['id']}")],
-                    [InlineKeyboardButton("❌ Отклонить тему", callback_data=f"reject_topic:{topic['id']}")],
-                ]
-            )
+            keyboard = _topic_actions_keyboard(int(topic["id"]))
             await context.bot.send_message(chat_id=settings.admin_id, text=text, reply_markup=keyboard, link_preview_options=_disabled_link_preview_options())
     elif data == "menu_queue":
         await _edit_callback_message(

@@ -59,6 +59,7 @@ class DraftDatabase:
             self._ensure_column(conn, "topic_candidates", "reason", "TEXT")
             self._ensure_column(conn, "topic_candidates", "normalized_title", "TEXT")
             self._ensure_column(conn, "topic_candidates", "last_seen_at", "TIMESTAMP")
+            self._ensure_column(conn, "topic_candidates", "source_group", "TEXT")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ai_usage (
@@ -308,6 +309,7 @@ class DraftDatabase:
         score: int,
         reason: str,
         normalized_title: str,
+        source_group: str = "other",
     ) -> bool:
         with self._connect() as conn:
             existing = conn.execute(
@@ -322,10 +324,11 @@ class DraftDatabase:
                         category = ?,
                         score = ?,
                         reason = ?,
-                        normalized_title = COALESCE(normalized_title, ?)
+                        normalized_title = COALESCE(normalized_title, ?),
+                        source_group = COALESCE(source_group, ?)
                     WHERE id = ?
                     """,
-                    (category, score, reason, normalized_title, int(existing["id"])),
+                    (category, score, reason, normalized_title, source_group, int(existing["id"])),
                 )
                 conn.commit()
                 return False
@@ -343,16 +346,16 @@ class DraftDatabase:
             cursor = conn.execute(
                 """
                 INSERT INTO topic_candidates (
-                    title, url, source, published_at, status, category, score, reason, normalized_title, created_at, last_seen_at
+                    title, url, source, published_at, status, category, score, reason, normalized_title, source_group, created_at, last_seen_at
                 )
-                VALUES (?, ?, ?, ?, 'new', ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """,
-                (title, url, source, published_at, category, score, reason, normalized_title),
+                (title, url, source, published_at, category, score, reason, normalized_title, source_group),
             )
             conn.commit()
             return cursor.rowcount > 0
 
-    def create_topic_candidate(self, title: str, url: str, source: str, published_at: str | None) -> bool:
+    def create_topic_candidate(self, title: str, url: str, source: str, published_at: str | None, source_group: str = "other") -> bool:
         return self.upsert_topic_candidate(
             title=title,
             url=url,
@@ -362,6 +365,7 @@ class DraftDatabase:
             score=0,
             reason="Без оценки",
             normalized_title=title.strip().lower(),
+            source_group=source_group,
         )
 
     def list_topic_candidates(
@@ -387,6 +391,36 @@ class DraftDatabase:
             ).fetchall()
             return [dict(row) for row in rows]
 
+
+
+    def list_topic_candidates_filtered(
+        self,
+        limit: int = 10,
+        status: str | None = "new",
+        categories: list[str] | None = None,
+        source_groups: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            clauses = []
+            params: list[Any] = []
+            if status is not None:
+                clauses.append("status = ?")
+                params.append(status)
+            if categories:
+                placeholders = ",".join(["?"] * len(categories))
+                clauses.append(f"category IN ({placeholders})")
+                params.extend(categories)
+            if source_groups:
+                placeholders = ",".join(["?"] * len(source_groups))
+                clauses.append(f"source_group IN ({placeholders})")
+                params.extend(source_groups)
+            where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            params.append(limit)
+            rows = conn.execute(
+                "SELECT * FROM topic_candidates " + where_clause + " ORDER BY score DESC, created_at DESC LIMIT ?",
+                tuple(params),
+            ).fetchall()
+            return [dict(row) for row in rows]
     def get_topic_candidate(self, topic_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM topic_candidates WHERE id = ?", (topic_id,)).fetchone()
