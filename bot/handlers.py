@@ -268,9 +268,20 @@ def _render_plan_text(day_name: str, slots: list[str], topics: list[dict]) -> st
         [
             "Что дальше:",
             'нажми "✍️ Создать черновик" под нужной темой, потом проверь текст и поставь в очередь.',
+            "Можно создать черновики по одному под карточками или нажать кнопку создания черновиков из всего плана.",
         ]
     )
     return "\n".join(lines).rstrip()
+
+
+def _plan_summary_keyboard(day_offset: int) -> InlineKeyboardMarkup:
+    callback = "menu_generate_plan_day" if day_offset == 0 else "menu_generate_plan_tomorrow"
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🧩 Создать черновики из плана", callback_data=callback)],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")],
+        ]
+    )
 
 
 def _main_menu_text() -> str:
@@ -977,9 +988,11 @@ async def _send_daily_plan(
     topics = _select_daily_plan_topics(db, len(slots))
     summary_text = _render_plan_text(day_name, slots, topics)
     if summary_query is not None:
-        await _edit_callback_message(summary_query, summary_text, reply_markup=_back_to_menu_keyboard())
+        await _edit_callback_message(summary_query, summary_text, reply_markup=_plan_summary_keyboard(day_offset))
     else:
-        await context.bot.send_message(chat_id=settings.admin_id, text=summary_text)
+        await context.bot.send_message(
+            chat_id=settings.admin_id, text=summary_text, reply_markup=_plan_summary_keyboard(day_offset)
+        )
     for slot, topic in zip(slots, topics):
         await context.bot.send_message(
             chat_id=settings.admin_id,
@@ -1003,6 +1016,137 @@ async def plan_tomorrow_command(update: Update, context: ContextTypes.DEFAULT_TY
     if not _is_admin(update.effective_user.id if update.effective_user else None, settings.admin_id):
         return
     await _send_daily_plan(context=context, settings=settings, db=db, day_offset=1)
+
+
+async def _create_draft_from_topic(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    settings,
+    db: DraftDatabase,
+    topic_id: int,
+) -> tuple[int | None, str | None]:
+    try:
+        topic = db.get_topic_candidate(topic_id)
+        if not topic:
+            return None, f"Тема #{topic_id} не найдена."
+        if str(topic.get("status") or "") != "new":
+            return None, f"Тема #{topic_id} уже не новая."
+        if not settings.has_ai_provider:
+            return None, "ИИ-провайдер не настроен."
+        api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
+        logger.info("topic_generate provider=%s model=%s", provider, settings.model_draft)
+        title, page_text = fetch_page_content(topic["url"])
+        generation_result, used_fallback, _operation = await _generate_url_draft_with_fallback(
+            api_key=api_key,
+            settings=settings,
+            source_url=topic["url"],
+            title=title,
+            page_text=page_text,
+            base_url=base_url,
+            extra_headers=extra_headers,
+        )
+        if not generation_result.content.strip():
+            return None, EMPTY_AI_REPLY_TEXT
+        new_draft_id = db.create_draft(generation_result.content, source_url=topic["url"])
+        estimated_cost = estimate_ai_cost(provider, generation_result.prompt_tokens, generation_result.completion_tokens, settings)
+        db.record_ai_usage(
+            provider=provider,
+            model=generation_result.model or settings.model_draft,
+            operation="topic_generate",
+            prompt_tokens=generation_result.prompt_tokens,
+            completion_tokens=generation_result.completion_tokens,
+            total_tokens=generation_result.total_tokens,
+            estimated_cost_usd=estimated_cost,
+            source_url=topic["url"],
+            draft_id=new_draft_id,
+        )
+        logger.info(
+            "AI usage provider=%s model=%s operation=%s prompt=%s completion=%s total=%s cost=%s",
+            provider,
+            generation_result.model or settings.model_draft,
+            "topic_generate",
+            generation_result.prompt_tokens,
+            generation_result.completion_tokens,
+            generation_result.total_tokens,
+            estimated_cost,
+        )
+        db.update_topic_status(topic_id, "used")
+        await _send_moderation_preview(context, settings.admin_id, new_draft_id, generation_result.content, topic["url"])
+        if used_fallback:
+            logger.info(
+                "Topic draft created with fallback model: topic_id=%s draft_id=%s source_url=%s",
+                topic_id,
+                new_draft_id,
+                topic["url"],
+            )
+        return new_draft_id, None
+    except Exception as exc:
+        logger.exception("Failed to create topic draft: topic_id=%s", topic_id)
+        return None, f"Не удалось создать черновик из темы #{topic_id}: {exc}"
+
+
+async def _generate_drafts_from_plan(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    settings,
+    db: DraftDatabase,
+    day_offset: int,
+) -> str:
+    day_name = "сегодня" if day_offset == 0 else "завтра"
+    queue_hint = "/queue_today" if day_offset == 0 else "/queue_tomorrow"
+    empty_slots = _empty_slots_for_day(db, settings, day_offset)
+    if not empty_slots:
+        return f"На {day_name} все слоты уже заняты. Проверь {queue_hint}"
+    topics = _select_daily_plan_topics(db, len(empty_slots))
+    if not topics:
+        return "Нет подходящих тем. Запусти /collect_debug или /topics_hot"
+    seen_topic_ids: set[int] = set()
+    ok_lines: list[str] = []
+    error_lines: list[str] = []
+    created_count = 0
+    for slot, topic in zip(empty_slots, topics):
+        topic_id = int(topic["id"])
+        if topic_id in seen_topic_ids:
+            error_lines.append(f"{slot} - тема #{topic_id}: дубликат темы в плане")
+            continue
+        seen_topic_ids.add(topic_id)
+        new_draft_id, error = await _create_draft_from_topic(
+            context=context, settings=settings, db=db, topic_id=topic_id
+        )
+        if new_draft_id is not None:
+            created_count += 1
+            ok_lines.append(f"{slot} - черновик #{new_draft_id} из темы #{topic_id}")
+        else:
+            error_lines.append(f"{slot} - тема #{topic_id}: {error or 'неизвестная ошибка'}")
+    lines = ["🧩 Черновики из плана созданы", "", f"День: {day_name}", f"Создано: {created_count}", f"Ошибок: {len(error_lines)}", ""]
+    if ok_lines:
+        lines.extend(["Готово:", *ok_lines, ""])
+    if error_lines:
+        lines.extend(["Ошибки:", *error_lines, ""])
+    lines.extend(["Дальше:", 'проверь черновики и поставь их в очередь через кнопки "🗓️ Запланировать".'])
+    return "\n".join(lines).rstrip()
+
+
+async def generate_plan_day_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    if not _is_admin(update.effective_user.id if update.effective_user else None, settings.admin_id):
+        return
+    if update.message:
+        await update.message.reply_text("Создаю черновики из плана...")
+        summary = await _generate_drafts_from_plan(context=context, settings=settings, db=db, day_offset=0)
+        await update.message.reply_text(summary)
+
+
+async def generate_plan_tomorrow_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    if not _is_admin(update.effective_user.id if update.effective_user else None, settings.admin_id):
+        return
+    if update.message:
+        await update.message.reply_text("Создаю черновики из плана...")
+        summary = await _generate_drafts_from_plan(context=context, settings=settings, db=db, day_offset=1)
+        await update.message.reply_text(summary)
 
 
 async def unschedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1614,47 +1758,13 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         if action == "topic_generate":
             topic_id = draft_id
-            topic = db.get_topic_candidate(topic_id)
-            if not topic:
-                await _edit_callback_message(query, f"Тема #{topic_id} не найдена.")
-                return
-            if not settings.has_ai_provider:
-                await _edit_callback_message(query, "AI-провайдер не настроен.")
-                return
-
-            api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
-            logger.info("topic_generate provider=%s model=%s", provider, settings.model_draft)
-            title, page_text = fetch_page_content(topic["url"])
-            generation_result, used_fallback, operation = await _generate_url_draft_with_fallback(
-                api_key=api_key,
-                settings=settings,
-                source_url=topic["url"],
-                title=title,
-                page_text=page_text,
-                base_url=base_url,
-                extra_headers=extra_headers,
+            new_draft_id, error = await _create_draft_from_topic(
+                context=context, settings=settings, db=db, topic_id=topic_id
             )
-            if not generation_result.content.strip():
-                await _edit_callback_message(query, EMPTY_AI_REPLY_TEXT)
+            if new_draft_id is None:
+                await _edit_callback_message(query, error or "Не удалось создать черновик.")
                 return
-            new_draft_id = db.create_draft(generation_result.content, source_url=topic["url"])
-            estimated_cost = estimate_ai_cost(provider, generation_result.prompt_tokens, generation_result.completion_tokens, settings)
-            db.record_ai_usage(
-                provider=provider, model=generation_result.model or settings.model_draft, operation="topic_generate",
-                prompt_tokens=generation_result.prompt_tokens, completion_tokens=generation_result.completion_tokens,
-                total_tokens=generation_result.total_tokens, estimated_cost_usd=estimated_cost, source_url=topic["url"], draft_id=new_draft_id
-            )
-            logger.info("AI usage provider=%s model=%s operation=%s prompt=%s completion=%s total=%s cost=%s", provider, generation_result.model or settings.model_draft, "topic_generate", generation_result.prompt_tokens, generation_result.completion_tokens, generation_result.total_tokens, estimated_cost)
-            db.update_topic_status(topic_id, "used")
-            await _send_moderation_preview(context, settings.admin_id, new_draft_id, generation_result.content, topic["url"])
             await _edit_callback_message(query, f"Создан черновик #{new_draft_id} из темы #{topic_id}.")
-            if used_fallback:
-                logger.info(
-                    "Topic draft created with fallback model: topic_id=%s draft_id=%s source_url=%s",
-                    topic_id,
-                    new_draft_id,
-                    topic["url"],
-                )
             return
 
         if action == "queue_today":
@@ -2119,6 +2229,14 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await _send_daily_plan(context=context, settings=settings, db=db, day_offset=0, summary_query=query)
     elif data == "menu_plan_tomorrow":
         await _send_daily_plan(context=context, settings=settings, db=db, day_offset=1, summary_query=query)
+    elif data == "menu_generate_plan_day":
+        await _edit_callback_message(query, "Создаю черновики...")
+        summary = await _generate_drafts_from_plan(context=context, settings=settings, db=db, day_offset=0)
+        await context.bot.send_message(chat_id=settings.admin_id, text=summary)
+    elif data == "menu_generate_plan_tomorrow":
+        await _edit_callback_message(query, "Создаю черновики...")
+        summary = await _generate_drafts_from_plan(context=context, settings=settings, db=db, day_offset=1)
+        await context.bot.send_message(chat_id=settings.admin_id, text=summary)
     elif data == "menu_settings":
         await _edit_callback_message(query, _settings_text(settings), reply_markup=_back_to_menu_keyboard())
     elif data == "menu_usage":
@@ -2148,6 +2266,8 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             "/topics_all - последние темы (все статусы)\n"
             "/plan_day - подобрать темы под пустые слоты сегодня\n"
             "/plan_tomorrow - подобрать темы на завтра\n"
+            "/generate_plan_day - создать черновики из плана на сегодня\n"
+            "/generate_plan_tomorrow - создать черновики из плана на завтра\n"
             "/queue_today - план публикаций на сегодня\n"
             "/queue_tomorrow - план публикаций на завтра\n"
             "/failed_drafts - последние неудачные публикации\n"
