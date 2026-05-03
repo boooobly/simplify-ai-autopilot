@@ -6,6 +6,7 @@ from telegram import Bot, LinkPreviewOptions
 from telegram.ext import ContextTypes
 
 from bot.database import DraftDatabase
+from bot.telegram_formatting import render_post_html, strip_quote_markers
 
 
 MEDIA_CAPTION_LIMIT = 1024
@@ -13,6 +14,13 @@ MEDIA_CAPTION_LIMIT = 1024
 
 def _fit_caption(text: str) -> str:
     return text if len(text) <= MEDIA_CAPTION_LIMIT else text[: MEDIA_CAPTION_LIMIT - 1].rstrip() + "…"
+
+
+def _render_or_plain(text: str) -> tuple[str, str | None]:
+    try:
+        return render_post_html(text), "HTML"
+    except Exception:
+        return strip_quote_markers(text), None
 
 
 def _short_media_caption(text: str) -> str:
@@ -30,45 +38,34 @@ async def publish_to_channel(
 ) -> None:
     """Publish text or media post to the configured Telegram channel."""
 
+    rendered_text, parse_mode = _render_or_plain(content)
+
     if media_url and media_type == "photo":
         if len(content) <= MEDIA_CAPTION_LIMIT:
-            await bot.send_photo(chat_id=channel_id, photo=media_url, caption=content)
+            await bot.send_photo(chat_id=channel_id, photo=media_url, caption=_fit_caption(rendered_text), parse_mode=parse_mode)
         else:
-            await bot.send_photo(chat_id=channel_id, photo=media_url, caption=_short_media_caption(content))
-            await bot.send_message(
-                chat_id=channel_id,
-                text=content,
-                link_preview_options=LinkPreviewOptions(is_disabled=True),
-            )
+            short_caption, short_mode = _render_or_plain(_short_media_caption(content))
+            await bot.send_photo(chat_id=channel_id, photo=media_url, caption=_fit_caption(short_caption), parse_mode=short_mode)
+            await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))
         return
     if media_url and media_type == "video":
         if len(content) <= MEDIA_CAPTION_LIMIT:
-            await bot.send_video(chat_id=channel_id, video=media_url, caption=content)
+            await bot.send_video(chat_id=channel_id, video=media_url, caption=_fit_caption(rendered_text), parse_mode=parse_mode)
         else:
-            await bot.send_video(chat_id=channel_id, video=media_url, caption=_short_media_caption(content))
-            await bot.send_message(
-                chat_id=channel_id,
-                text=content,
-                link_preview_options=LinkPreviewOptions(is_disabled=True),
-            )
+            short_caption, short_mode = _render_or_plain(_short_media_caption(content))
+            await bot.send_video(chat_id=channel_id, video=media_url, caption=_fit_caption(short_caption), parse_mode=short_mode)
+            await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))
         return
     if media_url and media_type == "animation":
         if len(content) <= MEDIA_CAPTION_LIMIT:
-            await bot.send_animation(chat_id=channel_id, animation=media_url, caption=content)
+            await bot.send_animation(chat_id=channel_id, animation=media_url, caption=_fit_caption(rendered_text), parse_mode=parse_mode)
         else:
-            await bot.send_animation(chat_id=channel_id, animation=media_url, caption=_short_media_caption(content))
-            await bot.send_message(
-                chat_id=channel_id,
-                text=content,
-                link_preview_options=LinkPreviewOptions(is_disabled=True),
-            )
+            short_caption, short_mode = _render_or_plain(_short_media_caption(content))
+            await bot.send_animation(chat_id=channel_id, animation=media_url, caption=_fit_caption(short_caption), parse_mode=short_mode)
+            await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))
         return
 
-    await bot.send_message(
-        chat_id=channel_id,
-        text=content,
-        link_preview_options=LinkPreviewOptions(is_disabled=True),
-    )
+    await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))
 
 
 async def run_scheduled_publishing(context: ContextTypes.DEFAULT_TYPE) -> None:

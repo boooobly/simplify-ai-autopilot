@@ -124,8 +124,32 @@ def _limit_text_safely(text: str, limit: int) -> str:
 
     if not candidate:
         candidate = cut_zone.rstrip()
+    candidate = _repair_quote_markers(candidate)
     return candidate + "..."
 
+
+
+
+def _repair_quote_markers(text: str) -> str:
+    open_marker = "[[QUOTE]]"
+    close_marker = "[[/QUOTE]]"
+    open_count = text.count(open_marker)
+    close_count = text.count(close_marker)
+    if open_count == close_count:
+        return text
+    if open_count > close_count:
+        last_open = text.rfind(open_marker)
+        last_close = text.rfind(close_marker)
+        if last_open > last_close:
+            return text[:last_open].rstrip()
+        return text + close_marker
+    while close_count > open_count:
+        idx = text.find(close_marker)
+        if idx < 0:
+            break
+        text = (text[:idx] + text[idx + len(close_marker):]).strip()
+        close_count -= 1
+    return text
 
 def generate_post_draft(
     api_key: str,
@@ -169,7 +193,7 @@ def polish_post_draft(
         "Сделай текст яснее и живее, но не делай его стерильным или корпоративным. "
         "Не меняй факты и не добавляй новые факты. Не перегружай объяснениями. "
         "Не добавляй строку Источник в сам пост. Ссылка хранится отдельно в модерации. Верни только финальный текст. "
-        "Сохрани полезные quote-like строки формата ▌ ➖ текст, если они уместны. "
+        "Сохрани полезные блоки [[QUOTE]]...[[/QUOTE]], если они уместны. Если есть список без маркеров, можно объединить его в один блок [[QUOTE]] с 2-4 короткими пунктами. Не выводи raw HTML. Не используй \"▌\". Не используй markdown blockquote. "
         "Пост должен быть цельным, без обрыва мысли посередине. "
         "Без AI-клише, без эм-даша, без кавычек-ёлочек. "
         "Избегай штампов: 'не про..., а про...', 'главный вывод простой', 'важно отметить', 'давайте разберем', 'в заключение'.\n\n"
@@ -251,7 +275,7 @@ def generate_post_draft_from_page(api_key: str, model: str, source_url: str, tit
         "Ниже ссылка и извлечённый текст страницы. Опирайся только на этот текст страницы. "
         "Не выдумывай факты, если их нет в тексте. "
         "Сделай один готовый пост в стиле @simplify_ai. "
-        "Структура: короткий заголовок с emoji, 1-2 простых вводных предложения, практический смысл простыми словами, короткая финальная мысль с 💭 (когда уместно). Для ключевых пунктов используй 2-4 quote-like строки формата: ▌ ➖ текст, только когда это уместно; не перегружай список. "
+        "Структура: короткий заголовок с emoji, 1-2 простых вводных предложения, практический смысл простыми словами, короткая финальная мысль с 💭 (когда уместно). Для ключевых пунктов используй один quote block, когда это уместно. Формат блока строго: [[QUOTE]]\n➖ point one\n➖ point two\n[[/QUOTE]]. Внутри 2-4 коротких пункта. Не используй \"▌\", markdown blockquote или HTML. Не используй больше одного quote block, если только тексту действительно это не нужно. "
         "Пиши живо и по-человечески: без сухого пресс-релизного стиля, без корпоративного тона, без AI-клише. "
         "Не используй фразы: 'не про..., а про...', 'главный вывод простой', 'важно отметить', 'давайте разберем', 'в заключение'. "
         "Не используй эм-даш и кавычки-ёлочки. "
