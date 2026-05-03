@@ -19,6 +19,7 @@ from bot.writer import (
     generate_post_draft,
     generate_post_draft_from_page,
     normalize_url,
+    polish_post_draft,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,15 @@ def _is_admin(user_id: int | None, admin_id: int) -> bool:
     return user_id is not None and user_id == admin_id
 
 
+def _resolve_ai_provider(settings) -> tuple[str, str, str | None, dict[str, str] | None]:
+    if settings.openrouter_api_key:
+        headers = {"X-Title": settings.openrouter_app_name}
+        if settings.openrouter_site_url:
+            headers["HTTP-Referer"] = settings.openrouter_site_url
+        return settings.openrouter_api_key, "openrouter", "https://openrouter.ai/api/v1", headers
+    return settings.openai_api_key, "openai", None, None
+
+
 def _moderation_keyboard(draft_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -40,6 +50,7 @@ def _moderation_keyboard(draft_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🗓️ Запланировать", callback_data=f"schedule:{draft_id}")],
             [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")],
             [InlineKeyboardButton("✍️ Переписать", callback_data=f"rewrite:{draft_id}")],
+            [InlineKeyboardButton("✨ Улучшить Claude", callback_data=f"polish:{draft_id}")],
         ]
     )
 
@@ -207,8 +218,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "Бот работает.\n\n"
             "Команды:\n"
             "/draft - создать тестовый черновик\n"
-            "/generate - создать черновик через ИИ\n"
+            "/generate - создать черновик через draft-модель\n"
             "/generate <ссылка> - создать черновик по ссылке\n"
+            "После генерации можно нажать кнопку «✨ Улучшить Claude» для полировки текста.\n"
             "/collect - собрать свежие темы\n"
             "/topics - показать найденные темы\n"
             "/attach_media <id> <photo|video|animation> <url> - прикрепить медиа\n"
@@ -382,16 +394,18 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     source_url = " ".join(context.args).strip() if context.args else None
 
-    if not settings.openai_api_key:
+    if not settings.has_ai_provider:
         if update.message:
-            await update.message.reply_text("OpenAI API ключ не настроен. Добавь OPENAI_API_KEY в переменные окружения и перезапусти бота.")
+            await update.message.reply_text("AI-провайдер не настроен. Добавь OPENROUTER_API_KEY или OPENAI_API_KEY и перезапусти бота.")
         return
 
     if update.message:
         await update.message.reply_text("Генерирую черновик...")
 
     try:
-        content = generate_post_draft(settings.openai_api_key, source_url=source_url)
+        api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
+        logger.info("/generate provider=%s model=%s", provider, settings.model_draft)
+        content = generate_post_draft(api_key, model=settings.model_draft, source_url=source_url, base_url=base_url, extra_headers=extra_headers)
     except Exception as exc:
         logger.exception("Error during generation: %s", exc)
         if update.message:
@@ -542,6 +556,25 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 reply_markup=_moderation_keyboard(draft_id),
             )
 
+        elif action == "polish":
+            if not settings.has_ai_provider:
+                await _edit_callback_message(query, "AI-провайдер не настроен.")
+                return
+            await _edit_callback_message(query, "Улучшаю текст через Claude...")
+            api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
+            logger.info("polish provider=%s model=%s", provider, settings.model_polish)
+            polished = polish_post_draft(
+                api_key,
+                model=settings.model_polish,
+                draft_text=draft["content"],
+                source_url=draft.get("source_url"),
+                base_url=base_url,
+                extra_headers=extra_headers,
+            )
+            db.update_draft_content(draft_id, polished)
+            db.update_status(draft_id, "draft")
+            await _edit_callback_message(query, _build_moderation_text(draft_id, polished, draft.get("source_url")), reply_markup=_moderation_keyboard(draft_id))
+
         elif action == "draft_info":
             reply_markup = _moderation_keyboard(draft_id) if draft.get("status") in ACTIONABLE_DRAFT_STATUSES else None
             await _edit_callback_message(
@@ -555,16 +588,21 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             if not topic:
                 await _edit_callback_message(query, "Тема не найдена.")
                 return
-            if not settings.openai_api_key:
-                await _edit_callback_message(query, "OPENAI_API_KEY не настроен.")
+            if not settings.has_ai_provider:
+                await _edit_callback_message(query, "AI-провайдер не настроен.")
                 return
 
+            api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
+            logger.info("topic_generate provider=%s model=%s", provider, settings.model_draft)
             title, page_text = fetch_page_content(topic["url"])
             content = generate_post_draft_from_page(
-                settings.openai_api_key,
+                api_key,
+                model=settings.model_draft,
                 source_url=topic["url"],
                 title=title,
                 page_text=page_text,
+                base_url=base_url,
+                extra_headers=extra_headers,
             )
             new_draft_id = db.create_draft(content, source_url=topic["url"])
             await _send_moderation_preview(context, settings.admin_id, new_draft_id, content, topic["url"])
@@ -634,16 +672,18 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
 
-    if not settings.openai_api_key:
-        await update.message.reply_text("OPENAI_API_KEY не настроен. Добавь ключ и перезапусти бота.")
+    if not settings.has_ai_provider:
+        await update.message.reply_text("AI-провайдер не настроен. Добавь OPENROUTER_API_KEY или OPENAI_API_KEY и перезапусти бота.")
         return
 
     await update.message.reply_text("Нашёл ссылку. Читаю страницу и готовлю черновик...")
 
     try:
         title, page_text = fetch_page_content(source_url)
+        api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
+        logger.info("url_generate provider=%s model=%s", provider, settings.model_draft)
         content = generate_post_draft_from_page(
-            settings.openai_api_key, source_url=source_url, title=title, page_text=page_text
+            api_key, model=settings.model_draft, source_url=source_url, title=title, page_text=page_text, base_url=base_url, extra_headers=extra_headers
         )
     except Exception as exc:
         logger.exception("Failed to process URL %s: %s", source_url, exc)
