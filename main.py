@@ -45,6 +45,7 @@ from bot.handlers import (
     unschedule_command,
     restore_draft_command,
     failed_drafts_command,
+    emoji_ids_command,
 )
 from bot.publisher import run_scheduled_publishing
 
@@ -72,6 +73,7 @@ async def _post_init(application: Application) -> None:
             BotCommand("sources_status", "Статус источников"),
             BotCommand("usage_today", "Расходы ИИ сегодня"),
             BotCommand("style_guide", "Сводка по стилю"),
+            BotCommand("emoji_ids", "ID кастомных emoji"),
         ]
     )
 
@@ -117,6 +119,7 @@ def main() -> None:
     application.add_handler(CommandHandler("unschedule", unschedule_command))
     application.add_handler(CommandHandler("restore_draft", restore_draft_command))
     application.add_handler(CommandHandler("failed_drafts", failed_drafts_command))
+    application.add_handler(CommandHandler("emoji_ids", emoji_ids_command))
     application.add_handler(MessageHandler(~filters.COMMAND, admin_url_message))
     application.add_handler(CallbackQueryHandler(moderation_callback))
 

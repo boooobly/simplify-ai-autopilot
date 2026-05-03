@@ -1922,6 +1922,43 @@ async def style_guide_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(summary, reply_markup=_admin_reply_keyboard())
 
 
+def _extract_custom_emoji_lines(message) -> list[str]:
+    lines: list[str] = []
+    if not message:
+        return lines
+    text = message.text or message.caption or ""
+    entities = list(message.entities or []) + list(message.caption_entities or [])
+    for entity in entities:
+        if getattr(entity, "type", "") != "custom_emoji":
+            continue
+        emoji_id = getattr(entity, "custom_emoji_id", "") or ""
+        if not str(emoji_id).isdigit():
+            continue
+        fragment = text[entity.offset: entity.offset + entity.length] if text else ""
+        fallback = fragment or "?"
+        lines.append(f"emoji: {fallback}\ncustom_emoji_id: {emoji_id}")
+    return lines
+
+
+async def emoji_ids_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_admin(user_id, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+    if not update.message:
+        return
+    target = update.message.reply_to_message or update.message
+    lines = _extract_custom_emoji_lines(target)
+    if not lines:
+        await update.message.reply_text(
+            "Кастомные emoji не найдены. Пришли сообщение с нужным кастомным emoji или ответь на него командой /emoji_ids."
+        )
+        return
+    await update.message.reply_text("\n\n".join(lines))
+
+
 async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle Publish/Reject/Rewrite button clicks."""
 
@@ -2012,6 +2049,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     draft_to_publish["content"],
                     draft_to_publish.get("media_url"),
                     draft_to_publish.get("media_type"),
+                    settings.custom_emoji_map,
                 )
             except Exception:
                 if was_scheduled:
@@ -2483,6 +2521,7 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             "/usage_7d - расходы ИИ за 7 дней\n"
             "/usage_month - расходы ИИ за 30 дней\n"
             "/style_guide - краткая сводка текущего стиля генерации\n"
+            "/emoji_ids - показать custom_emoji_id из сообщения/реплая\n"
             "/collect - собрать темы\n"
             "/sources_status - проверить источники тем\n"
             "/collect_debug - собрать темы с диагностикой\n"
