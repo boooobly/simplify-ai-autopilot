@@ -67,12 +67,12 @@ def _settings_text(settings) -> str:
     ai_provider = "OpenRouter" if settings.openrouter_api_key else ("OpenAI" if settings.openai_api_key else "не настроен")
     return (
         "⚙️ Настройки\n\n"
-        f"AI provider: {ai_provider}\n"
-        f"Draft model: {settings.model_draft}\n"
-        f"Polish model: {settings.model_polish}\n"
-        f"Timezone: {settings.schedule_timezone}\n"
-        f"Post soft/max chars: {settings.post_soft_chars} / {settings.post_max_chars}\n"
-        f"DB path: {settings.db_path}"
+        f"Провайдер ИИ: {ai_provider}\n"
+        f"Модель черновика: {settings.model_draft}\n"
+        f"Модель улучшения: {settings.model_polish}\n"
+        f"Часовой пояс: {settings.schedule_timezone}\n"
+        f"Длина поста: до {settings.post_soft_chars} / максимум {settings.post_max_chars} символов\n"
+        f"База данных: {settings.db_path}"
     )
 
 
@@ -671,12 +671,46 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await _edit_callback_message(query, "Некорректное действие.")
         return
 
-    draft = db.get_draft(draft_id)
-    if not draft:
-        await _edit_callback_message(query, f"Черновик #{draft_id} не найден.")
-        return
-
     try:
+        if action == "topic_generate":
+            topic_id = draft_id
+            topic = db.get_topic_candidate(topic_id)
+            if not topic:
+                await _edit_callback_message(query, f"Тема #{topic_id} не найдена.")
+                return
+            if not settings.has_ai_provider:
+                await _edit_callback_message(query, "AI-провайдер не настроен.")
+                return
+
+            api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
+            logger.info("topic_generate provider=%s model=%s", provider, settings.model_draft)
+            title, page_text = fetch_page_content(topic["url"])
+            content, used_fallback = await _generate_url_draft_with_fallback(
+                api_key=api_key,
+                settings=settings,
+                source_url=topic["url"],
+                title=title,
+                page_text=page_text,
+                base_url=base_url,
+                extra_headers=extra_headers,
+            )
+            if not content.strip():
+                await _edit_callback_message(query, EMPTY_AI_REPLY_TEXT)
+                return
+            new_draft_id = db.create_draft(content, source_url=topic["url"])
+            await _send_moderation_preview(context, settings.admin_id, new_draft_id, content, topic["url"])
+            await _edit_callback_message(query, f"Создан черновик #{new_draft_id} из темы #{topic_id}.")
+            if used_fallback and query.message:
+                await query.message.reply_text(
+                    "Черновик создан через fallback-модель, потому что draft-модель вернула пустой ответ."
+                )
+            return
+
+        draft = db.get_draft(draft_id)
+        if not draft:
+            await _edit_callback_message(query, f"Черновик #{draft_id} не найден.")
+            return
+
         if action == "publish":
             await publish_to_channel(
                 context.bot,
@@ -690,19 +724,32 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         elif action == "schedule":
             db.update_status(draft_id, "approved")
-            await _edit_callback_message(
-                query,
-                f"Выбери слот публикации для черновика #{draft_id} (часовой пояс: {settings.schedule_timezone}):",
+            schedule_text = f"Выбери слот публикации для черновика #{draft_id} (часовой пояс: {settings.schedule_timezone}):"
+            await context.bot.send_message(
+                chat_id=settings.admin_id,
+                text=schedule_text,
                 reply_markup=_schedule_keyboard(draft_id),
             )
+            try:
+                await query.answer("Меню слотов отправлено отдельным сообщением.")
+            except Exception as answer_exc:
+                logger.warning("Failed to answer schedule callback for draft #%s: %s", draft_id, answer_exc)
 
         elif action == "schedule_slot":
             if slot is None:
                 await _edit_callback_message(query, "Некорректный слот времени.")
                 return
+            draft_for_slot = db.get_draft(draft_id)
+            if not draft_for_slot:
+                await _edit_callback_message(query, f"Черновик #{draft_id} не найден.")
+                return
             tz = ZoneInfo(settings.schedule_timezone)
             now_local = datetime.now(tz)
-            hour, minute = map(int, slot.split(":"))
+            try:
+                hour, minute = map(int, slot.split(":"))
+            except (TypeError, ValueError):
+                await _edit_callback_message(query, "Некорректный слот времени.")
+                return
             scheduled_local = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
             if scheduled_local <= now_local:
                 scheduled_local += timedelta(days=1)
@@ -775,38 +822,6 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 reply_markup=reply_markup,
             )
 
-        elif action == "topic_generate":
-            topic = db.get_topic_candidate(draft_id)
-            if not topic:
-                await _edit_callback_message(query, "Тема не найдена.")
-                return
-            if not settings.has_ai_provider:
-                await _edit_callback_message(query, "AI-провайдер не настроен.")
-                return
-
-            api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
-            logger.info("topic_generate provider=%s model=%s", provider, settings.model_draft)
-            title, page_text = fetch_page_content(topic["url"])
-            content, used_fallback = await _generate_url_draft_with_fallback(
-                api_key=api_key,
-                settings=settings,
-                source_url=topic["url"],
-                title=title,
-                page_text=page_text,
-                base_url=base_url,
-                extra_headers=extra_headers,
-            )
-            if not content.strip():
-                await _edit_callback_message(query, EMPTY_AI_REPLY_TEXT)
-                return
-            new_draft_id = db.create_draft(content, source_url=topic["url"])
-            await _send_moderation_preview(context, settings.admin_id, new_draft_id, content, topic["url"])
-            await _edit_callback_message(query, f"Создан черновик #{new_draft_id} из темы #{topic['id']}.")
-            if used_fallback and query.message:
-                await query.message.reply_text(
-                    "Черновик создан через fallback-модель, потому что draft-модель вернула пустой ответ."
-                )
-
         else:
             await _edit_callback_message(query, "Неизвестное действие.")
 
@@ -830,15 +845,27 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
     if data == "menu_back":
         await _edit_callback_message(query, _main_menu_text(), reply_markup=_main_menu_keyboard())
     elif data == "menu_generate":
-        await _edit_callback_message(query, "Генерирую черновик...")
-        before = db.list_drafts(limit=1)
-        before_id = int(before[0]["id"]) if before else 0
-        await _generate_from_command(context, settings, db, None, query.message)
-        after = db.list_drafts(limit=1)
-        if after and int(after[0]["id"]) > before_id:
-            await _edit_callback_message(query, "Черновик создан и отправлен на модерацию.", reply_markup=_back_to_menu_keyboard())
-        else:
-            await _edit_callback_message(query, "Черновик не создан.", reply_markup=_back_to_menu_keyboard())
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("🔗 Из ссылки", callback_data="menu_url_help")],
+                [InlineKeyboardButton("🧪 Тестовый черновик", callback_data="menu_test_draft")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")],
+            ]
+        )
+        await _edit_callback_message(
+            query,
+            "✍️ Создание черновика\n\nВыбери способ:",
+            reply_markup=keyboard,
+        )
+    elif data == "menu_test_draft":
+        content = create_test_draft()
+        draft_id = db.create_draft(content)
+        await _send_moderation_preview(context, settings.admin_id, draft_id, content)
+        await _edit_callback_message(
+            query,
+            f"Тестовый черновик #{draft_id} создан и отправлен на модерацию.",
+            reply_markup=_back_to_menu_keyboard(),
+        )
     elif data == "menu_url_help":
         await _edit_callback_message(
             query,
@@ -917,7 +944,9 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             "/collect - собрать темы\n"
             "/draft_info <id> - открыть черновик\n"
             "/delete_draft <id> - удалить черновик\n"
-            "/attach_media <id> <photo|video|animation> <url> - прикрепить медиа",
+            "/attach_media <id> <photo|video|animation> <url> - прикрепить медиа\n\n"
+            "В меню «✍️ Создать черновик» сначала выбери способ создания.\n"
+            "Для реального поста самый быстрый путь — прислать ссылку одним сообщением.",
             reply_markup=_back_to_menu_keyboard(),
         )
 
