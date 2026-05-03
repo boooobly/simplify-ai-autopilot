@@ -190,6 +190,85 @@ def _queue_draft_ids_for_day(db: DraftDatabase, settings, day_offset: int) -> li
     return [int(d["id"]) for d in db.list_scheduled_drafts_between(start_utc, end_utc)]
 
 
+def _empty_slots_for_day(db: DraftDatabase, settings, day_offset: int) -> list[str]:
+    start_local, end_local = _get_day_range(day_offset, settings.schedule_timezone)
+    start_utc = start_local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
+    end_utc = end_local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
+    drafts = db.list_scheduled_drafts_between(start_utc, end_utc)
+    busy_slots: set[str] = set()
+    for draft in drafts:
+        scheduled_raw = str(draft.get("scheduled_at") or "")
+        scheduled_utc = datetime.strptime(scheduled_raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
+        busy_slots.add(scheduled_utc.astimezone(ZoneInfo(settings.schedule_timezone)).strftime("%H:%M"))
+    return [slot for slot in settings.daily_post_slots if slot not in busy_slots]
+
+
+def _select_daily_plan_topics(db: DraftDatabase, limit: int) -> list[dict]:
+    if limit <= 0:
+        return []
+    candidates = db.list_topic_candidates(limit=max(50, limit * 5), status="new", order_by_score=True)
+    if not candidates:
+        return []
+    selected: list[dict] = []
+    selected_ids: set[int] = set()
+    category_counts: dict[str, int] = {}
+    source_group_counts: dict[str, int] = {}
+
+    def _pick_from(predicate) -> None:
+        if len(selected) >= limit:
+            return
+        for topic in candidates:
+            topic_id = int(topic["id"])
+            category = str(topic.get("category") or "other").strip().lower()
+            source_group = str(topic.get("source_group") or "other").strip().lower()
+            if topic_id in selected_ids or not predicate(topic, category, source_group):
+                continue
+            if category_counts.get(category, 0) >= 2 or source_group_counts.get(source_group, 0) >= 2:
+                continue
+            selected.append(topic)
+            selected_ids.add(topic_id)
+            category_counts[category] = category_counts.get(category, 0) + 1
+            source_group_counts[source_group] = source_group_counts.get(source_group, 0) + 1
+            return
+
+    _pick_from(lambda _t, c, _g: c in {"tool", "guide", "creator", "dev", "mobile"})
+    _pick_from(lambda _t, c, _g: c in {"news", "model", "agent", "research", "privacy"})
+    _pick_from(lambda _t, c, g: c in {"drama", "meme"} or g in {"community", "github", "custom"})
+    _pick_from(lambda _t, _c, _g: True)
+    while len(selected) < limit:
+        previous = len(selected)
+        _pick_from(lambda _t, _c, _g: True)
+        if len(selected) == previous:
+            break
+    return selected[:limit]
+
+
+def _render_plan_text(day_name: str, slots: list[str], topics: list[dict]) -> str:
+    title = f"🗓️ План тем на {day_name}"
+    if not slots:
+        queue_hint = "/queue_today" if day_name == "сегодня" else "/queue_tomorrow"
+        return f"{title}\n\nНа {day_name} все слоты уже заняты. Проверь {queue_hint}"
+    if not topics:
+        return f"{title}\n\nПустые слоты: {len(slots)}\nНет подходящих тем. Запусти /collect_debug или /topics_hot"
+    lines = [title, "", f"Пустые слоты: {len(slots)}"]
+    for slot, topic in zip(slots, topics):
+        score = int(topic.get("score") or 0)
+        lines.extend(
+            [
+                f"{slot} - тема #{topic['id']} - {_category_label(topic.get('category'))} - вес {score}",
+                str(topic.get("title") or "Без названия"),
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "Что дальше:",
+            'нажми "✍️ Создать черновик" под нужной темой, потом проверь текст и поставь в очередь.',
+        ]
+    )
+    return "\n".join(lines).rstrip()
+
+
 def _main_menu_text() -> str:
     return "🤖 Simplify AI Autopilot\n\nВыбери действие:"
 
@@ -201,6 +280,7 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🔗 Пост из ссылки", callback_data="menu_url_help")],
             [InlineKeyboardButton("📝 Черновики", callback_data="menu_drafts")],
             [InlineKeyboardButton("🧠 Темы", callback_data="menu_topics")],
+            [InlineKeyboardButton("🗓️ План на день", callback_data="menu_plan_day")],
             [InlineKeyboardButton("📅 Очередь", callback_data="menu_queue")],
             [InlineKeyboardButton("📊 Расходы ИИ", callback_data="menu_usage")],
             [InlineKeyboardButton("⚙️ Настройки", callback_data="menu_settings")],
@@ -878,6 +958,47 @@ async def queue_tomorrow_command(update: Update, context: ContextTypes.DEFAULT_T
             _render_queue_text(db, settings, day_offset=1),
             reply_markup=_queue_keyboard(1, _queue_draft_ids_for_day(db, settings, 1)),
         )
+
+
+async def _send_daily_plan(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    settings,
+    db: DraftDatabase,
+    day_offset: int,
+    summary_query=None,
+) -> None:
+    day_name = "сегодня" if day_offset == 0 else "завтра"
+    slots = _empty_slots_for_day(db, settings, day_offset)
+    topics = _select_daily_plan_topics(db, len(slots))
+    summary_text = _render_plan_text(day_name, slots, topics)
+    if summary_query is not None:
+        await _edit_callback_message(summary_query, summary_text, reply_markup=_back_to_menu_keyboard())
+    else:
+        await context.bot.send_message(chat_id=settings.admin_id, text=summary_text)
+    for slot, topic in zip(slots, topics):
+        await context.bot.send_message(
+            chat_id=settings.admin_id,
+            text=f"🕒 Слот: {slot}\n\n{_topic_card_text(topic)}",
+            reply_markup=_topic_actions_keyboard(int(topic["id"])),
+            link_preview_options=_disabled_link_preview_options(),
+        )
+
+
+async def plan_day_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    if not _is_admin(update.effective_user.id if update.effective_user else None, settings.admin_id):
+        return
+    await _send_daily_plan(context=context, settings=settings, db=db, day_offset=0)
+
+
+async def plan_tomorrow_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    if not _is_admin(update.effective_user.id if update.effective_user else None, settings.admin_id):
+        return
+    await _send_daily_plan(context=context, settings=settings, db=db, day_offset=1)
 
 
 async def unschedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1990,6 +2111,10 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             _render_queue_text(db, settings, day_offset=0),
             reply_markup=_queue_keyboard(0, _queue_draft_ids_for_day(db, settings, 0)),
         )
+    elif data == "menu_plan_day":
+        await _send_daily_plan(context=context, settings=settings, db=db, day_offset=0, summary_query=query)
+    elif data == "menu_plan_tomorrow":
+        await _send_daily_plan(context=context, settings=settings, db=db, day_offset=1, summary_query=query)
     elif data == "menu_settings":
         await _edit_callback_message(query, _settings_text(settings), reply_markup=_back_to_menu_keyboard())
     elif data == "menu_usage":
@@ -2017,6 +2142,8 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             "/topics_fun - живые/мемные темы\n"
             "/topics_hot - самые сильные темы\n"
             "/topics_all - последние темы (все статусы)\n"
+            "/plan_day - подобрать темы под пустые слоты сегодня\n"
+            "/plan_tomorrow - подобрать темы на завтра\n"
             "/queue_today - план публикаций на сегодня\n"
             "/queue_tomorrow - план публикаций на завтра\n"
             "/failed_drafts - последние неудачные публикации\n"
