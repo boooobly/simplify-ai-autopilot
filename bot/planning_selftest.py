@@ -1,4 +1,4 @@
-from bot.handlers import _select_daily_plan_topics
+from bot.handlers import _scheduled_at_for_slot, _select_daily_plan_topics
 
 
 class FakeDB:
@@ -57,6 +57,15 @@ def run() -> None:
     assert len(relaxed_selected) == 5
 
 
+def test_scheduled_at_for_slot() -> None:
+    scheduled = _scheduled_at_for_slot(0, "10:30", "UTC")
+    assert len(scheduled) == 19
+    assert scheduled[4] == "-"
+    assert scheduled[13] == ":"
+
+
 if __name__ == "__main__":
     run()
+    test_scheduled_at_for_slot()
     print("OK")
+
