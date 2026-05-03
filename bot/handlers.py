@@ -274,14 +274,13 @@ def _render_plan_text(day_name: str, slots: list[str], topics: list[dict]) -> st
     return "\n".join(lines).rstrip()
 
 
-def _plan_summary_keyboard(day_offset: int) -> InlineKeyboardMarkup:
-    callback = "menu_generate_plan_day" if day_offset == 0 else "menu_generate_plan_tomorrow"
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🧩 Создать черновики из плана", callback_data=callback)],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")],
-        ]
-    )
+def _plan_summary_keyboard(day_offset: int, can_generate: bool = True) -> InlineKeyboardMarkup:
+    rows = []
+    if can_generate:
+        callback = "menu_generate_plan_day" if day_offset == 0 else "menu_generate_plan_tomorrow"
+        rows.append([InlineKeyboardButton("🧩 Создать черновики из плана", callback_data=callback)])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")])
+    return InlineKeyboardMarkup(rows)
 
 
 def _main_menu_text() -> str:
@@ -986,12 +985,14 @@ async def _send_daily_plan(
     day_name = "сегодня" if day_offset == 0 else "завтра"
     slots = _empty_slots_for_day(db, settings, day_offset)
     topics = _select_daily_plan_topics(db, len(slots))
+    can_generate = bool(slots and topics)
+    keyboard = _plan_summary_keyboard(day_offset, can_generate=can_generate)
     summary_text = _render_plan_text(day_name, slots, topics)
     if summary_query is not None:
-        await _edit_callback_message(summary_query, summary_text, reply_markup=_plan_summary_keyboard(day_offset))
+        await _edit_callback_message(summary_query, summary_text, reply_markup=keyboard)
     else:
         await context.bot.send_message(
-            chat_id=settings.admin_id, text=summary_text, reply_markup=_plan_summary_keyboard(day_offset)
+            chat_id=settings.admin_id, text=summary_text, reply_markup=keyboard
         )
     for slot, topic in zip(slots, topics):
         await context.bot.send_message(
