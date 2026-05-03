@@ -110,6 +110,7 @@ def _moderation_keyboard(draft_id: int, status: str | None = None) -> InlineKeyb
             [InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")],
             [InlineKeyboardButton("✨ Улучшить Claude", callback_data=f"polish:{draft_id}")],
             [InlineKeyboardButton("✏️ Редактировать текст", callback_data=f"edit_text:{draft_id}")],
+            [InlineKeyboardButton("📎 Прикрепить медиа", callback_data=f"attach_media_flow:{draft_id}")],
             [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")],
         ]
     return InlineKeyboardMarkup(rows)
@@ -126,6 +127,19 @@ def _get_pending_edit(context: ContextTypes.DEFAULT_TYPE) -> int | None:
 
 def _clear_pending_edit(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("pending_edit_draft_id", None)
+
+
+def _set_pending_media(context: ContextTypes.DEFAULT_TYPE, draft_id: int) -> None:
+    context.user_data["pending_media_draft_id"] = draft_id
+
+
+def _get_pending_media(context: ContextTypes.DEFAULT_TYPE) -> int | None:
+    draft_id = context.user_data.get("pending_media_draft_id")
+    return int(draft_id) if isinstance(draft_id, int) else None
+
+
+def _clear_pending_media(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("pending_media_draft_id", None)
 
 
 def _can_publish(status: str | None) -> bool:
@@ -429,6 +443,62 @@ async def _handle_pending_text_edit(update: Update, context: ContextTypes.DEFAUL
         source_url=draft.get("source_url"),
         media_url=draft.get("media_url"),
         media_type=draft.get("media_type"),
+    )
+    return True
+
+
+async def _handle_pending_media_attach(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    pending_draft_id = _get_pending_media(context)
+    if pending_draft_id is None or not update.message:
+        return False
+
+    db: DraftDatabase = context.bot_data["db"]
+    settings = context.bot_data["settings"]
+    draft = db.get_draft(pending_draft_id)
+    if not draft:
+        _clear_pending_media(context)
+        await update.message.reply_text(f"Черновик #{pending_draft_id} не найден. Прикрепление медиа отменено.")
+        return True
+
+    status = str(draft.get("status") or "")
+    if not _can_edit(status):
+        _clear_pending_media(context)
+        await update.message.reply_text(_status_guard_message("edit", status))
+        return True
+
+    media_type = None
+    media_url = None
+    if update.message.photo:
+        media_type = "photo"
+        media_url = update.message.photo[-1].file_id
+    elif update.message.video:
+        media_type = "video"
+        media_url = update.message.video.file_id
+    elif update.message.animation:
+        media_type = "animation"
+        media_url = update.message.animation.file_id
+    elif update.message.document:
+        await update.message.reply_text(
+            "Пока поддерживаются только фото, видео и GIF/анимации, отправленные обычным сообщением."
+        )
+        return True
+
+    if not media_type or not media_url:
+        await update.message.reply_text("Пришли фото, видео или GIF/анимацию. Текст сюда не подойдёт.")
+        return True
+
+    db.attach_media(pending_draft_id, media_url, media_type)
+    db.update_status(pending_draft_id, "draft")
+    _clear_pending_media(context)
+    await update.message.reply_text(f"Готово. Медиа прикреплено к черновику #{pending_draft_id}.")
+    await _send_moderation_preview(
+        context,
+        settings.admin_id,
+        pending_draft_id,
+        draft["content"],
+        source_url=draft.get("source_url"),
+        media_url=media_url,
+        media_type=media_type,
     )
     return True
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -839,7 +909,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
 
         draft = db.get_draft(draft_id)
-        if not draft and action != "edit_cancel":
+        if not draft and action not in {"edit_cancel", "attach_media_cancel"}:
             await _edit_callback_message(query, f"Черновик #{draft_id} не найден.")
             return
 
@@ -952,6 +1022,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             if not _can_edit(draft.get("status")):
                 await _edit_callback_message(query, _status_guard_message("edit", draft.get("status")))
                 return
+            _clear_pending_media(context)
             _set_pending_edit(context, draft_id)
             await _edit_callback_message(
                 query,
@@ -962,6 +1033,41 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     [[InlineKeyboardButton("❌ Отменить редактирование", callback_data=f"edit_cancel:{draft_id}")]]
                 ),
             )
+
+        elif action == "attach_media_flow":
+            if not _can_edit(draft.get("status")):
+                await _edit_callback_message(query, _status_guard_message("edit", draft.get("status")))
+                return
+            _clear_pending_edit(context)
+            _set_pending_media(context, draft_id)
+            await _edit_callback_message(
+                query,
+                f"📎 Прикрепление медиа к черновику #{draft_id}\n\n"
+                "Пришли фото, видео или GIF/анимацию одним сообщением.\n\n"
+                "Чтобы отменить, нажми кнопку ниже.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("❌ Отменить прикрепление", callback_data=f"attach_media_cancel:{draft_id}")]]
+                ),
+            )
+
+        elif action == "attach_media_cancel":
+            _clear_pending_media(context)
+            if not draft:
+                await _edit_callback_message(query, "Прикрепление медиа отменено.")
+                return
+            await _edit_callback_message(
+                query,
+                _build_moderation_text(
+                    draft_id,
+                    draft["content"],
+                    draft.get("source_url"),
+                    draft.get("media_type"),
+                    draft.get("media_url"),
+                ),
+                reply_markup=_moderation_keyboard(draft_id, str(draft.get("status") or "")),
+            )
+            if query.message:
+                await query.message.reply_text("Прикрепление медиа отменено.")
 
         elif action == "edit_cancel":
             _clear_pending_edit(context)
@@ -1156,6 +1262,9 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             "/draft_info <id> - открыть черновик\n"
             "/delete_draft <id> - удалить черновик\n"
             "/attach_media <id> <photo|video|animation> <url> - прикрепить медиа\n\n"
+            "Кнопка «📎 Прикрепить медиа» доступна в модерации черновика.\n"
+            "Можно отправить фото, видео или GIF/анимацию прямо боту.\n"
+            "Команда /attach_media остаётся для URL/ручного режима.\n\n"
             "В меню «✍️ Создать черновик» сначала выбери способ создания.\n"
             "Для реального поста самый быстрый путь — прислать ссылку одним сообщением.",
             reply_markup=_back_to_menu_keyboard(),
@@ -1175,6 +1284,9 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     handled_pending_edit = await _handle_pending_text_edit(update, context)
     if handled_pending_edit:
+        return
+    handled_pending_media = await _handle_pending_media_attach(update, context)
+    if handled_pending_media:
         return
 
     if update.message and update.message.reply_to_message:
