@@ -20,9 +20,9 @@ def _fit_caption(text: str) -> str:
     return text if len(text) <= MEDIA_CAPTION_LIMIT else text[: MEDIA_CAPTION_LIMIT - 1].rstrip() + "…"
 
 
-def _render_or_plain(text: str) -> tuple[str, str | None]:
+def _render_or_plain(text: str, custom_emoji_map: dict[str, str] | None = None) -> tuple[str, str | None]:
     try:
-        return render_post_html(text), "HTML"
+        return render_post_html(text, custom_emoji_map=custom_emoji_map), "HTML"
     except Exception:
         return strip_quote_markers(text), None
 
@@ -39,10 +39,11 @@ async def publish_to_channel(
     content: str,
     media_url: str | None = None,
     media_type: str | None = None,
+    custom_emoji_map: dict[str, str] | None = None,
 ) -> None:
     """Publish text or media post to the configured Telegram channel."""
 
-    rendered_text, parse_mode = _render_or_plain(content)
+    rendered_text, parse_mode = _render_or_plain(content, custom_emoji_map=custom_emoji_map)
     media_items = decode_media_items(media_url, media_type)
 
     if len(media_items) > 10:
@@ -68,7 +69,7 @@ async def publish_to_channel(
             caption = _fit_caption(rendered_text)
             caption_mode = parse_mode
         else:
-            short_caption, short_mode = _render_or_plain(_short_media_caption(content))
+            short_caption, short_mode = _render_or_plain(_short_media_caption(content), custom_emoji_map=custom_emoji_map)
             caption = _fit_caption(short_caption)
             caption_mode = short_mode
             send_full_text_after = True
@@ -89,7 +90,7 @@ async def publish_to_channel(
         if len(content) <= MEDIA_CAPTION_LIMIT:
             await bot.send_photo(chat_id=channel_id, photo=media_url, caption=_fit_caption(rendered_text), parse_mode=parse_mode)
         else:
-            short_caption, short_mode = _render_or_plain(_short_media_caption(content))
+            short_caption, short_mode = _render_or_plain(_short_media_caption(content), custom_emoji_map=custom_emoji_map)
             await bot.send_photo(chat_id=channel_id, photo=media_url, caption=_fit_caption(short_caption), parse_mode=short_mode)
             await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))
         return
@@ -98,7 +99,7 @@ async def publish_to_channel(
         if len(content) <= MEDIA_CAPTION_LIMIT:
             await bot.send_video(chat_id=channel_id, video=media_url, caption=_fit_caption(rendered_text), parse_mode=parse_mode)
         else:
-            short_caption, short_mode = _render_or_plain(_short_media_caption(content))
+            short_caption, short_mode = _render_or_plain(_short_media_caption(content), custom_emoji_map=custom_emoji_map)
             await bot.send_video(chat_id=channel_id, video=media_url, caption=_fit_caption(short_caption), parse_mode=short_mode)
             await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))
         return
@@ -107,7 +108,7 @@ async def publish_to_channel(
         if len(content) <= MEDIA_CAPTION_LIMIT:
             await bot.send_animation(chat_id=channel_id, animation=media_url, caption=_fit_caption(rendered_text), parse_mode=parse_mode)
         else:
-            short_caption, short_mode = _render_or_plain(_short_media_caption(content))
+            short_caption, short_mode = _render_or_plain(_short_media_caption(content), custom_emoji_map=custom_emoji_map)
             await bot.send_animation(chat_id=channel_id, animation=media_url, caption=_fit_caption(short_caption), parse_mode=short_mode)
             await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))
         return
@@ -138,6 +139,7 @@ async def run_scheduled_publishing(context: ContextTypes.DEFAULT_TYPE) -> None:
                 refreshed["content"],
                 refreshed.get("media_url"),
                 refreshed.get("media_type"),
+                settings.custom_emoji_map,
             )
         except Exception:
             logger.exception("Scheduled publishing failed for draft %s", draft_id)

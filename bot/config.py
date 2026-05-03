@@ -34,6 +34,7 @@ class Settings:
     openai_input_cost_per_1m: float = 0.0
     openai_output_cost_per_1m: float = 0.0
     daily_post_slots: list[str] = field(default_factory=lambda: ["10:00", "14:00", "18:00", "21:00"])
+    custom_emoji_map: dict[str, str] = field(default_factory=dict)
 
     @property
     def has_ai_provider(self) -> bool:
@@ -71,6 +72,21 @@ def _parse_daily_post_slots(raw: str) -> list[str]:
             slots.append(value)
     return slots or default_slots
 
+
+def _parse_custom_emoji_map(raw: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for part in raw.split(";"):
+        item = part.strip()
+        if not item or "|" not in item:
+            continue
+        fallback_emoji, custom_emoji_id = item.split("|", 1)
+        fallback_emoji = fallback_emoji.strip()
+        custom_emoji_id = custom_emoji_id.strip()
+        if not fallback_emoji or not custom_emoji_id.isdigit():
+            continue
+        result[fallback_emoji] = custom_emoji_id
+    return result
+
 def load_settings() -> Settings:
     """Load and validate all required environment variables."""
 
@@ -94,6 +110,7 @@ def load_settings() -> Settings:
     openai_output_cost_per_1m = _parse_float_env("OPENAI_OUTPUT_COST_PER_1M", 0.0)
     daily_post_slots_raw = os.getenv("DAILY_POST_SLOTS", "10:00,14:00,18:00,21:00")
     daily_post_slots = _parse_daily_post_slots(daily_post_slots_raw)
+    custom_emoji_map = _parse_custom_emoji_map(os.getenv("CUSTOM_EMOJI_MAP", ""))
 
     post_max_chars = _parse_int_env("POST_MAX_CHARS", 1400)
     post_soft_chars = _parse_int_env("POST_SOFT_CHARS", 1100)
@@ -141,4 +158,5 @@ def load_settings() -> Settings:
         openai_input_cost_per_1m=openai_input_cost_per_1m,
         openai_output_cost_per_1m=openai_output_cost_per_1m,
         daily_post_slots=daily_post_slots,
+        custom_emoji_map=custom_emoji_map,
     )

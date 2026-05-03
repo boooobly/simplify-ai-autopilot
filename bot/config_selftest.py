@@ -1,10 +1,11 @@
-from bot.config import _parse_daily_post_slots
+from bot.config import _parse_custom_emoji_map, _parse_daily_post_slots
 
 
 def run() -> None:
     assert _parse_daily_post_slots('10:00,14:30') == ['10:00', '14:30']
     assert _parse_daily_post_slots('foo, 25:99') == ['10:00', '14:00', '18:00', '21:00']
     assert _parse_daily_post_slots(' 10:00 , 14:00 ') == ['10:00', '14:00']
+    assert _parse_custom_emoji_map("🔥|123;bad;💭|456a;🧠|789") == {"🔥": "123", "🧠": "789"}
     print('OK: DAILY_POST_SLOTS parser')
 
 
