@@ -1144,6 +1144,22 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 )
             return
 
+        if action == "queue_today":
+            await _edit_callback_message(
+                query,
+                _render_queue_text(db, settings, day_offset=0),
+                reply_markup=_queue_keyboard(0, _queue_draft_ids_for_day(db, settings, 0)),
+            )
+            return
+
+        if action == "queue_tomorrow":
+            await _edit_callback_message(
+                query,
+                _render_queue_text(db, settings, day_offset=1),
+                reply_markup=_queue_keyboard(1, _queue_draft_ids_for_day(db, settings, 1)),
+            )
+            return
+
         draft = db.get_draft(draft_id)
         if not draft and action not in {"edit_cancel", "attach_media_cancel"}:
             await _edit_callback_message(query, f"Черновик #{draft_id} не найден.")
@@ -1210,18 +1226,6 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await _edit_callback_message(
                 query,
                 f"🗓️ Черновик #{draft_id} запланирован на {scheduled_local.strftime('%Y-%m-%d %H:%M')}.\nОчередь: /queue_today"
-            )
-        elif action == "queue_today":
-            await _edit_callback_message(
-                query,
-                _render_queue_text(db, settings, day_offset=0),
-                reply_markup=_queue_keyboard(0, _queue_draft_ids_for_day(db, settings, 0)),
-            )
-        elif action == "queue_tomorrow":
-            await _edit_callback_message(
-                query,
-                _render_queue_text(db, settings, day_offset=1),
-                reply_markup=_queue_keyboard(1, _queue_draft_ids_for_day(db, settings, 1)),
             )
         elif action == "unschedule":
             if not draft:
