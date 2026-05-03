@@ -1265,11 +1265,11 @@ async def topics_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def topics_tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _topics_filtered_command(update, context, categories=["tool", "creator", "guide", "dev", "mobile"])
+    await _topics_filtered_command(update, context, categories=["tool", "creator", "guide", "dev", "mobile"], command_name="topics_tools")
 
 
 async def topics_news_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _topics_filtered_command(update, context, categories=["news", "model", "agent", "research", "business", "privacy"])
+    await _topics_filtered_command(update, context, categories=["news", "model", "agent", "research", "business", "privacy"], command_name="topics_news")
 
 
 async def topics_fun_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1307,9 +1307,12 @@ async def _topics_fun_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=_topic_actions_keyboard(int(topic["id"])),
             link_preview_options=_disabled_link_preview_options(),
         )
+    if update.message:
+        next_limit = min(30, max(limit + 10, 20))
+        await update.message.reply_text(f"Показал {len(topics)} тем. Можно открыть больше: /topics_fun {next_limit}")
 
 
-async def _topics_filtered_command(update: Update, context: ContextTypes.DEFAULT_TYPE, categories=None, source_groups=None) -> None:
+async def _topics_filtered_command(update: Update, context: ContextTypes.DEFAULT_TYPE, categories=None, source_groups=None, command_name: str = "topics") -> None:
     settings = context.bot_data["settings"]
     db: DraftDatabase = context.bot_data["db"]
     user_id = update.effective_user.id if update.effective_user else None
@@ -1331,7 +1334,8 @@ async def _topics_filtered_command(update: Update, context: ContextTypes.DEFAULT
             link_preview_options=_disabled_link_preview_options(),
         )
     if update.message:
-        await update.message.reply_text(f"Показал {len(topics)} тем. Можно открыть больше: /topics 20")
+        next_limit = min(30, max(limit + 10, 20))
+        await update.message.reply_text(f"Показал {len(topics)} тем. Можно открыть больше: /{command_name} {next_limit}")
 
 
 async def topics_hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1931,6 +1935,10 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             "/generate <ссылка> - пост из ссылки\n"
             "/drafts - последние черновики\n"
             "/topics - найденные темы\n"
+            "/topics_tools - инструменты и гайды\n"
+            "/topics_news - новости и модели\n"
+            "/topics_fun - живые/мемные темы\n"
+            "/topics_hot - самые сильные темы\n"
             "/topics_all - последние темы (все статусы)\n"
             "/queue_today - план публикаций на сегодня\n"
             "/queue_tomorrow - план публикаций на завтра\n"

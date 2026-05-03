@@ -69,6 +69,14 @@ def score_topic(title: str, source: str, url: str, source_group: str = "other") 
         score += 18
         category = "model"
         reason_parts.append("модель")
+    elif any(k in text for k in ["benchmark", "reasoning", "coding", "developer", "repo", "github", "open source", "open-source", "sdk", "api"]):
+        score += 18
+        category = "dev"
+        reason_parts.append("разработка/GitHub")
+    elif any(k in text for k in ["paper", "research", "arxiv", "study", "dataset", "eval"]):
+        score += 12
+        category = "research"
+        reason_parts.append("исследование")
 
     if any(k in text for k in ["free", "бесплатн"]):
         score += 20

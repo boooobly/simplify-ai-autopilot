@@ -15,6 +15,12 @@ def run() -> None:
     s3, c3, _ = score_topic("AI tool website for removing background", "Tool Hunt", "https://example.com", "tools")
     assert c3 == "tool"
 
+    s4, c4, r4 = score_topic("GitHub repo for AI coding agent", "GitHub", "https://github.com/example/repo", "github")
+    assert c4 in {"dev", "agent", "tool"} or (s4 >= 70 and "разработка/GitHub" in r4)
+
+    s5, c5, _ = score_topic("New AI research paper on alignment", "arXiv", "https://arxiv.org/abs/123", "tech_media")
+    assert c5 == "research"
+
     assert normalize_topic_title("The new GPT-5 release!!!") == "gpt 5 release"
 
 
