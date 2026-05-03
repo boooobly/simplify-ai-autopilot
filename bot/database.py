@@ -54,6 +54,23 @@ class DraftDatabase:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ai_usage (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    prompt_tokens INTEGER DEFAULT 0,
+                    completion_tokens INTEGER DEFAULT 0,
+                    total_tokens INTEGER DEFAULT 0,
+                    estimated_cost_usd REAL DEFAULT 0,
+                    source_url TEXT,
+                    draft_id INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
             conn.commit()
 
     def _ensure_column(
@@ -228,3 +245,76 @@ class DraftDatabase:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM topic_candidates WHERE id = ?", (topic_id,)).fetchone()
             return dict(row) if row else None
+
+    def record_ai_usage(
+        self,
+        *,
+        provider: str,
+        model: str,
+        operation: str,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        total_tokens: int = 0,
+        estimated_cost_usd: float = 0.0,
+        source_url: str | None = None,
+        draft_id: int | None = None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO ai_usage (
+                    provider, model, operation, prompt_tokens, completion_tokens, total_tokens,
+                    estimated_cost_usd, source_url, draft_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    provider,
+                    model,
+                    operation,
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                    estimated_cost_usd,
+                    source_url,
+                    draft_id,
+                ),
+            )
+            conn.commit()
+
+    def get_ai_usage_summary(self, days: int = 1) -> dict[str, Any]:
+        with self._connect() as conn:
+            total_row = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS requests,
+                    COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                    COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                    COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                    COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost_usd
+                FROM ai_usage
+                WHERE created_at >= datetime('now', ?)
+                """,
+                (f"-{max(1, int(days))} days",),
+            ).fetchone()
+            model_rows = conn.execute(
+                """
+                SELECT
+                    model,
+                    COUNT(*) AS requests,
+                    COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                    COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost_usd
+                FROM ai_usage
+                WHERE created_at >= datetime('now', ?)
+                GROUP BY model
+                ORDER BY total_tokens DESC
+                """,
+                (f"-{max(1, int(days))} days",),
+            ).fetchall()
+            return {
+                "requests": int(total_row["requests"] if total_row else 0),
+                "prompt_tokens": int(total_row["prompt_tokens"] if total_row else 0),
+                "completion_tokens": int(total_row["completion_tokens"] if total_row else 0),
+                "total_tokens": int(total_row["total_tokens"] if total_row else 0),
+                "estimated_cost_usd": float(total_row["estimated_cost_usd"] if total_row else 0.0),
+                "by_model": [dict(row) for row in model_rows],
+            }

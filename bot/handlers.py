@@ -18,6 +18,7 @@ from bot.telegram_formatting import strip_quote_markers
 from bot.sources import collect_topics
 from bot.writer import (
     EmptyAIResponseError,
+    GenerationResult,
     fetch_page_content,
     find_first_url,
     generate_post_draft,
@@ -33,6 +34,47 @@ ACTIONABLE_DRAFT_STATUSES = {"draft", "approved"}
 TELEGRAM_CAPTION_LIMIT = 1024
 SHORT_MEDIA_PREVIEW_LIMIT = 850
 EMPTY_AI_REPLY_TEXT = "Модель вернула пустой ответ. Черновик не создан. Попробуй ещё раз или смени MODEL_DRAFT."
+
+
+def estimate_ai_cost(provider: str, prompt_tokens: int, completion_tokens: int, settings) -> float:
+    if provider == "openrouter":
+        input_cost = settings.openrouter_input_cost_per_1m
+        output_cost = settings.openrouter_output_cost_per_1m
+    else:
+        input_cost = settings.openai_input_cost_per_1m
+        output_cost = settings.openai_output_cost_per_1m
+    return (prompt_tokens / 1_000_000) * input_cost + (completion_tokens / 1_000_000) * output_cost
+
+
+def _fmt_int(value: int) -> str:
+    return f"{value:,}".replace(",", " ")
+
+
+def _render_usage_text(summary: dict[str, object], period_title: str, costs_enabled: bool) -> str:
+    lines = [
+        f"📊 Расходы ИИ за {period_title}",
+        "",
+        f"Запросов: {_fmt_int(int(summary['requests']))}",
+        f"Input tokens: {_fmt_int(int(summary['prompt_tokens']))}",
+        f"Output tokens: {_fmt_int(int(summary['completion_tokens']))}",
+        f"Всего tokens: {_fmt_int(int(summary['total_tokens']))}",
+    ]
+    if costs_enabled:
+        lines.append(f"Примерная стоимость: ${float(summary['estimated_cost_usd']):.4f}")
+    else:
+        lines.append("Стоимость не считается: укажи цены в Railway Variables.")
+    lines.append("")
+    lines.append("По моделям:")
+    by_model = summary.get("by_model") or []
+    if not by_model:
+        lines.append("- пока нет данных")
+    else:
+        for row in by_model:
+            lines.append(
+                f"- {row['model']}: {int(row['requests'])} запросов, "
+                f"{_fmt_int(int(row['total_tokens']))} tokens, ${float(row['estimated_cost_usd']):.4f}"
+            )
+    return "\n".join(lines)
 
 
 def _disabled_link_preview_options() -> LinkPreviewOptions:
@@ -63,6 +105,7 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("📝 Черновики", callback_data="menu_drafts")],
             [InlineKeyboardButton("🧠 Темы", callback_data="menu_topics")],
             [InlineKeyboardButton("📅 Очередь", callback_data="menu_queue")],
+            [InlineKeyboardButton("📊 Расходы ИИ", callback_data="menu_usage")],
             [InlineKeyboardButton("⚙️ Настройки", callback_data="menu_settings")],
             [InlineKeyboardButton("❓ Помощь", callback_data="menu_help")],
         ]
@@ -341,9 +384,9 @@ async def _generate_url_draft_with_fallback(
     page_text: str,
     base_url: str | None = None,
     extra_headers: dict[str, str] | None = None,
-) -> tuple[str, bool]:
+) -> tuple[GenerationResult, bool, str]:
     try:
-        content = generate_post_draft_from_page(
+        result = generate_post_draft_from_page(
             api_key,
             model=settings.model_draft,
             source_url=source_url,
@@ -352,13 +395,13 @@ async def _generate_url_draft_with_fallback(
             base_url=base_url,
             extra_headers=extra_headers,
         )
-        return content, False
+        return result, False, "draft_from_url"
     except EmptyAIResponseError as exc:
         logger.warning("Draft model returned empty content for URL %s: %s", source_url, exc)
         fallback_model = (settings.model_polish or "").strip()
         if fallback_model and fallback_model != settings.model_draft:
             logger.warning("Trying fallback generation with MODEL_POLISH=%s", fallback_model)
-            content = generate_post_draft_from_page(
+            result = generate_post_draft_from_page(
                 api_key,
                 model=fallback_model,
                 source_url=source_url,
@@ -369,7 +412,7 @@ async def _generate_url_draft_with_fallback(
                 base_url=base_url,
                 extra_headers=extra_headers,
             )
-            return content, True
+            return result, True, "fallback_draft_from_url"
         raise
 
 
@@ -742,7 +785,7 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
             if message:
                 await message.reply_text("Нашёл ссылку. Читаю страницу и готовлю черновик...")
             title, page_text = fetch_page_content(source_url)
-            content, used_fallback = await _generate_url_draft_with_fallback(
+            generation_result, used_fallback, operation = await _generate_url_draft_with_fallback(
                 api_key=api_key,
                 settings=settings,
                 source_url=source_url,
@@ -754,7 +797,7 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
         else:
             if message:
                 await message.reply_text("Генерирую черновик...")
-            content = generate_post_draft(
+            generation_result = generate_post_draft(
                 api_key,
                 model=settings.model_draft,
                 source_url=None,
@@ -764,6 +807,7 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
                 extra_headers=extra_headers,
             )
             used_fallback = False
+            operation = "draft"
     except EmptyAIResponseError:
         if message:
             await message.reply_text(EMPTY_AI_REPLY_TEXT)
@@ -779,11 +823,39 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
                 await message.reply_text("Не удалось сгенерировать черновик. Попробуй ещё раз.")
         return
 
+    content = generation_result.content
     if not content.strip():
         if message:
             await message.reply_text(EMPTY_AI_REPLY_TEXT)
         return
     draft_id = db.create_draft(content, source_url=source_url)
+    estimated_cost = estimate_ai_cost(
+        provider,
+        generation_result.prompt_tokens,
+        generation_result.completion_tokens,
+        settings,
+    )
+    db.record_ai_usage(
+        provider=provider,
+        model=generation_result.model or settings.model_draft,
+        operation=operation,
+        prompt_tokens=generation_result.prompt_tokens,
+        completion_tokens=generation_result.completion_tokens,
+        total_tokens=generation_result.total_tokens,
+        estimated_cost_usd=estimated_cost,
+        source_url=source_url,
+        draft_id=draft_id,
+    )
+    logger.info(
+        "AI usage provider=%s model=%s operation=%s prompt=%s completion=%s total=%s cost=%s",
+        provider,
+        generation_result.model or settings.model_draft,
+        operation,
+        generation_result.prompt_tokens,
+        generation_result.completion_tokens,
+        generation_result.total_tokens,
+        estimated_cost,
+    )
     await _send_moderation_preview(context, settings.admin_id, draft_id, content, source_url)
 
     if message:
@@ -851,6 +923,35 @@ async def topics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
 
+async def _usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE, days: int, period_title: str) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_admin(user_id, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+    summary = db.get_ai_usage_summary(days=days)
+    costs_enabled = any([
+        settings.openrouter_input_cost_per_1m, settings.openrouter_output_cost_per_1m,
+        settings.openai_input_cost_per_1m, settings.openai_output_cost_per_1m,
+    ])
+    if update.message:
+        await update.message.reply_text(_render_usage_text(summary, period_title, costs_enabled))
+
+
+async def usage_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _usage_command(update, context, days=1, period_title="сегодня")
+
+
+async def usage_7d_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _usage_command(update, context, days=7, period_title="7 дней")
+
+
+async def usage_month_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _usage_command(update, context, days=30, period_title="30 дней")
+
+
 async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle Publish/Reject/Rewrite button clicks."""
 
@@ -892,7 +993,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
             logger.info("topic_generate provider=%s model=%s", provider, settings.model_draft)
             title, page_text = fetch_page_content(topic["url"])
-            content, used_fallback = await _generate_url_draft_with_fallback(
+            generation_result, used_fallback, operation = await _generate_url_draft_with_fallback(
                 api_key=api_key,
                 settings=settings,
                 source_url=topic["url"],
@@ -901,11 +1002,18 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 base_url=base_url,
                 extra_headers=extra_headers,
             )
-            if not content.strip():
+            if not generation_result.content.strip():
                 await _edit_callback_message(query, EMPTY_AI_REPLY_TEXT)
                 return
-            new_draft_id = db.create_draft(content, source_url=topic["url"])
-            await _send_moderation_preview(context, settings.admin_id, new_draft_id, content, topic["url"])
+            new_draft_id = db.create_draft(generation_result.content, source_url=topic["url"])
+            estimated_cost = estimate_ai_cost(provider, generation_result.prompt_tokens, generation_result.completion_tokens, settings)
+            db.record_ai_usage(
+                provider=provider, model=generation_result.model or settings.model_draft, operation="topic_generate",
+                prompt_tokens=generation_result.prompt_tokens, completion_tokens=generation_result.completion_tokens,
+                total_tokens=generation_result.total_tokens, estimated_cost_usd=estimated_cost, source_url=topic["url"], draft_id=new_draft_id
+            )
+            logger.info("AI usage provider=%s model=%s operation=%s prompt=%s completion=%s total=%s cost=%s", provider, generation_result.model or settings.model_draft, "topic_generate", generation_result.prompt_tokens, generation_result.completion_tokens, generation_result.total_tokens, estimated_cost)
+            await _send_moderation_preview(context, settings.admin_id, new_draft_id, generation_result.content, topic["url"])
             await _edit_callback_message(query, f"Создан черновик #{new_draft_id} из темы #{topic_id}.")
             if used_fallback:
                 logger.info(
@@ -1162,13 +1270,20 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 base_url=base_url,
                 extra_headers=extra_headers,
             )
-            db.update_draft_content(draft_id, polished)
+            estimated_cost = estimate_ai_cost(provider, polished.prompt_tokens, polished.completion_tokens, settings)
+            db.record_ai_usage(
+                provider=provider, model=polished.model or settings.model_polish, operation="polish",
+                prompt_tokens=polished.prompt_tokens, completion_tokens=polished.completion_tokens,
+                total_tokens=polished.total_tokens, estimated_cost_usd=estimated_cost, source_url=draft.get("source_url"), draft_id=draft_id
+            )
+            logger.info("AI usage provider=%s model=%s operation=%s prompt=%s completion=%s total=%s cost=%s", provider, polished.model or settings.model_polish, "polish", polished.prompt_tokens, polished.completion_tokens, polished.total_tokens, estimated_cost)
+            db.update_draft_content(draft_id, polished.content)
             db.update_status(draft_id, "draft")
             await _edit_callback_message(
                 query,
                 _build_moderation_text(
                     draft_id,
-                    polished,
+                    polished.content,
                     draft.get("source_url"),
                     draft.get("media_type"),
                     draft.get("media_url"),
@@ -1303,6 +1418,17 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             )
     elif data == "menu_settings":
         await _edit_callback_message(query, _settings_text(settings), reply_markup=_back_to_menu_keyboard())
+    elif data == "menu_usage":
+        summary = db.get_ai_usage_summary(days=1)
+        costs_enabled = any([
+            settings.openrouter_input_cost_per_1m, settings.openrouter_output_cost_per_1m,
+            settings.openai_input_cost_per_1m, settings.openai_output_cost_per_1m,
+        ])
+        await _edit_callback_message(
+            query,
+            _render_usage_text(summary, "сегодня", costs_enabled) + "\n\nДля других периодов: /usage_7d и /usage_month",
+            reply_markup=_back_to_menu_keyboard(),
+        )
     elif data == "menu_help":
         await _edit_callback_message(
             query,
@@ -1312,6 +1438,9 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             "/generate <ссылка> - пост из ссылки\n"
             "/drafts - последние черновики\n"
             "/topics - найденные темы\n"
+            "/usage_today - расходы ИИ за сегодня\n"
+            "/usage_7d - расходы ИИ за 7 дней\n"
+            "/usage_month - расходы ИИ за 30 дней\n"
             "/collect - собрать темы\n"
             "/draft_info <id> - открыть черновик\n"
             "/delete_draft <id> - удалить черновик\n"
@@ -1395,7 +1524,7 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         title, page_text = fetch_page_content(source_url)
         api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
         logger.info("url_generate provider=%s model=%s", provider, settings.model_draft)
-        content, used_fallback = await _generate_url_draft_with_fallback(
+        generation_result, used_fallback, operation = await _generate_url_draft_with_fallback(
             api_key=api_key,
             settings=settings,
             source_url=source_url,
@@ -1414,10 +1543,18 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
 
+    content = generation_result.content
     if not content.strip():
         await update.message.reply_text(EMPTY_AI_REPLY_TEXT)
         return
     draft_id = db.create_draft(content, source_url=source_url)
+    estimated_cost = estimate_ai_cost(provider, generation_result.prompt_tokens, generation_result.completion_tokens, settings)
+    db.record_ai_usage(
+        provider=provider, model=generation_result.model or settings.model_draft, operation=operation,
+        prompt_tokens=generation_result.prompt_tokens, completion_tokens=generation_result.completion_tokens,
+        total_tokens=generation_result.total_tokens, estimated_cost_usd=estimated_cost, source_url=source_url, draft_id=draft_id
+    )
+    logger.info("AI usage provider=%s model=%s operation=%s prompt=%s completion=%s total=%s cost=%s", provider, generation_result.model or settings.model_draft, operation, generation_result.prompt_tokens, generation_result.completion_tokens, generation_result.total_tokens, estimated_cost)
     await _send_moderation_preview(context, settings.admin_id, draft_id, content, source_url)
     await update.message.reply_text(f"Черновик #{draft_id} создан и отправлен на модерацию.")
     if used_fallback:

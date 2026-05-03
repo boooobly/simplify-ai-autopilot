@@ -18,6 +18,9 @@ from bot.handlers import (
     moderation_callback,
     start_command,
     topics_command,
+    usage_7d_command,
+    usage_month_command,
+    usage_today_command,
     drafts_command,
     draft_info_command,
     delete_draft_command,
@@ -49,6 +52,9 @@ def main() -> None:
     application.add_handler(CommandHandler("collect", collect_command))
     application.add_handler(CommandHandler("attach_media", attach_media_command))
     application.add_handler(CommandHandler("topics", topics_command))
+    application.add_handler(CommandHandler("usage_today", usage_today_command))
+    application.add_handler(CommandHandler("usage_7d", usage_7d_command))
+    application.add_handler(CommandHandler("usage_month", usage_month_command))
     application.add_handler(CommandHandler("drafts", drafts_command))
     application.add_handler(CommandHandler("draft_info", draft_info_command))
     application.add_handler(CommandHandler("delete_draft", delete_draft_command))

@@ -28,6 +28,10 @@ class Settings:
     schedule_timezone: str = "Europe/Moscow"
     post_max_chars: int = 1400
     post_soft_chars: int = 1100
+    openrouter_input_cost_per_1m: float = 0.0
+    openrouter_output_cost_per_1m: float = 0.0
+    openai_input_cost_per_1m: float = 0.0
+    openai_output_cost_per_1m: float = 0.0
 
     @property
     def has_ai_provider(self) -> bool:
@@ -40,6 +44,16 @@ def _parse_int_env(name: str, default: int) -> int:
         return default
     try:
         return int(raw)
+    except ValueError:
+        return default
+
+
+def _parse_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
     except ValueError:
         return default
 
@@ -61,6 +75,10 @@ def load_settings() -> Settings:
     openrouter_app_name = os.getenv("OPENROUTER_APP_NAME", "Simplify AI Autopilot").strip() or "Simplify AI Autopilot"
     schedule_timezone = os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow").strip() or "Europe/Moscow"
     db_path = os.getenv("DB_PATH", "data/drafts.db").strip() or "data/drafts.db"
+    openrouter_input_cost_per_1m = _parse_float_env("OPENROUTER_INPUT_COST_PER_1M", 0.0)
+    openrouter_output_cost_per_1m = _parse_float_env("OPENROUTER_OUTPUT_COST_PER_1M", 0.0)
+    openai_input_cost_per_1m = _parse_float_env("OPENAI_INPUT_COST_PER_1M", 0.0)
+    openai_output_cost_per_1m = _parse_float_env("OPENAI_OUTPUT_COST_PER_1M", 0.0)
 
     post_max_chars = _parse_int_env("POST_MAX_CHARS", 1400)
     post_soft_chars = _parse_int_env("POST_SOFT_CHARS", 1100)
@@ -103,4 +121,8 @@ def load_settings() -> Settings:
         schedule_timezone=schedule_timezone,
         post_max_chars=post_max_chars,
         post_soft_chars=post_soft_chars,
+        openrouter_input_cost_per_1m=openrouter_input_cost_per_1m,
+        openrouter_output_cost_per_1m=openrouter_output_cost_per_1m,
+        openai_input_cost_per_1m=openai_input_cost_per_1m,
+        openai_output_cost_per_1m=openai_output_cost_per_1m,
     )
