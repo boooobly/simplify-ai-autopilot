@@ -32,6 +32,11 @@ def run() -> None:
     ]
     assert len(labels) == len(set(labels))
     assert all(label.strip() for label in labels)
+    assert NAV_PLAN_DAY == "🗓 План"
+    assert NAV_GENERATE_PLAN == "🧩 Черновики из плана"
+    assert keyboard.resize_keyboard is True
+    assert keyboard.is_persistent is True
+    assert keyboard.input_field_placeholder == "Выбери действие или пришли ссылку"
 
     rows = keyboard.keyboard
     keyboard_labels = [btn.text for row in rows for btn in row]

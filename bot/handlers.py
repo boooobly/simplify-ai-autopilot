@@ -38,8 +38,8 @@ EMPTY_AI_REPLY_TEXT = "Модель вернула пустой ответ. Че
 
 
 
-NAV_PLAN_DAY = "🗓 План на день"
-NAV_GENERATE_PLAN = "🧩 Создать черновики"
+NAV_PLAN_DAY = "🗓 План"
+NAV_GENERATE_PLAN = "🧩 Черновики из плана"
 NAV_QUEUE = "📅 Очередь"
 NAV_DRAFTS = "📝 Черновики"
 NAV_TOPICS = "🧠 Темы"
@@ -909,7 +909,7 @@ async def _handle_navigation_text(update: Update, context: ContextTypes.DEFAULT_
         await _reply_admin_text(update, _settings_text(settings), link_preview_options=_disabled_link_preview_options())
         return True
     if text == NAV_HELP:
-        await _reply_admin_text(update, "Открой /menu для полного списка действий.\nМожешь прислать ссылку, чтобы сразу создать черновик.")
+        await _reply_admin_text(update, "Нажми кнопку ниже для навигации или используй /menu.\nТакже можешь прислать ссылку для черновика.")
         return True
     return False
 
@@ -925,12 +925,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     if update.message:
-        await _reply_admin_text(update, "Привет 👋\nБот работает.")
-        await _reply_admin_text(update, "Открываю главное меню.")
-        await update.message.reply_text(
-            _main_menu_text(),
-            reply_markup=_main_menu_keyboard(),
-            link_preview_options=_disabled_link_preview_options(),
+        await _reply_admin_text(
+            update,
+            "Привет 👋\nКлавиатура навигации включена.\n\nМожешь нажать кнопку ниже или просто прислать ссылку.",
         )
 
 
@@ -943,9 +940,8 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     if update.message:
         await update.message.reply_text(
-            _main_menu_text(),
-            reply_markup=_main_menu_keyboard(),
-            link_preview_options=_disabled_link_preview_options(),
+            "Меню навигации открыто.\nВыбери действие кнопкой ниже.",
+            reply_markup=_admin_reply_keyboard(),
         )
 
 
