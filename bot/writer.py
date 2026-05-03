@@ -25,6 +25,16 @@ class EmptyAIResponseError(RuntimeError):
     pass
 
 
+def _has_meaningful_body(text: str, source_url: str | None = None) -> bool:
+    cleaned = text.strip()
+    if source_url:
+        cleaned = cleaned.replace(f"Источник: {source_url}", "")
+    cleaned = "\n".join(
+        line for line in cleaned.splitlines() if not line.strip().startswith("Источник:")
+    ).strip()
+    return len(cleaned) >= 40
+
+
 def _load_style_prompt() -> str:
     return STYLE_PATH.read_text(encoding="utf-8").strip()
 
@@ -79,8 +89,6 @@ def _generate_with_chat_completion(
     )
     if not stripped:
         raise EmptyAIResponseError("AI model returned empty content")
-    if len(stripped) < 40:
-        raise EmptyAIResponseError("AI model returned empty content")
     return stripped
 
 
@@ -117,7 +125,10 @@ def generate_post_draft(
     )
     logger.info("Генерация черновика: model=%s", model)
     text = _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
-    return _limit_text_preserving_source(text, source_url=source_url)
+    final_text = _limit_text_preserving_source(text, source_url=source_url)
+    if not _has_meaningful_body(final_text, source_url=source_url):
+        raise EmptyAIResponseError("AI model returned empty content")
+    return final_text
 
 
 def polish_post_draft(
@@ -131,16 +142,21 @@ def polish_post_draft(
     style = _load_style_prompt()
     source_line = f"Источник: {source_url}" if source_url else "Источник: не указан"
     user_prompt = (
-        "Улучши черновик для @simplify_ai: сделай текст яснее, точнее и живее, но не меняй факты и не добавляй новые. "
-        "Если есть ссылка на источник, обязательно сохрани её в тексте. "
-        "Верни только финальный текст поста длиной до 900 символов. "
+        "Улучши черновик для @simplify_ai. Сохрани простой человеческий тон, как у реального автора Telegram-канала. "
+        "Сделай текст яснее и живее, но не делай его стерильным или корпоративным. "
+        "Не меняй факты и не добавляй новые факты. Не перегружай объяснениями. "
+        "Сохрани строку с источником в тексте. Верни только финальный текст до 900 символов. "
+        "Без AI-клише, без эм-даша, без кавычек-ёлочек. "
         "Избегай штампов: 'не про..., а про...', 'главный вывод простой', 'важно отметить', 'давайте разберем', 'в заключение'.\n\n"
         f"{source_line}\n\n"
         f"Текущий черновик:\n{draft_text}"
     )
     logger.info("Полировка черновика: model=%s", model)
     text = _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
-    return _limit_text_preserving_source(text, source_url=source_url)
+    final_text = _limit_text_preserving_source(text, source_url=source_url)
+    if not _has_meaningful_body(final_text, source_url=source_url):
+        raise EmptyAIResponseError("AI model returned empty content")
+    return final_text
 
 
 def find_first_url(text: str) -> str | None:
@@ -207,15 +223,20 @@ def generate_post_draft_from_page(api_key: str, model: str, source_url: str, tit
     style = _load_style_prompt()
     user_prompt = (
         "Ниже ссылка и извлечённый текст страницы. Опирайся только на этот текст страницы. "
-        "Если факт не подтверждается текстом, не выдумывай его. "
-        "Сделай один готовый пост в стиле @simplify_ai длиной до 900 символов. "
-        "Не оставляй ответ пустым. "
-        "Даже если новость кажется простой, напиши короткий пост на основе подтверждённых фактов. "
-        "Если данных мало, сделай осторожный короткий пост без домыслов. "
+        "Не выдумывай факты, если их нет в тексте. "
+        "Сделай один готовый пост в стиле @simplify_ai до 900 символов. "
+        "Структура: короткий заголовок с emoji, 1-2 простых вводных предложения, 2-4 коротких пункта с символом ➖ (если уместно), практический смысл простыми словами, короткая финальная мысль с 💭 (когда уместно). "
+        "Пиши живо и по-человечески: без сухого пресс-релизного стиля, без корпоративного тона, без AI-клише. "
+        "Не используй фразы: 'не про..., а про...', 'главный вывод простой', 'важно отметить', 'давайте разберем', 'в заключение'. "
+        "Не используй эм-даш и кавычки-ёлочки. "
+        "Не оставляй ответ пустым: даже если статья слабая, сделай осторожный короткий пост только по подтверждённым фактам. "
         "В конце обязательно добавь строку: Источник: <source_url>. "
         "Верни только финальный текст поста без комментариев и без markdown-блоков.\n\n"
         f"Источник: {source_url}\nЗаголовок: {title}\n\nТекст страницы:\n{page_text}"
     )
     logger.info("Генерация по URL: model=%s", model)
     text = _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
-    return _limit_text_preserving_source(text, source_url=source_url)
+    final_text = _limit_text_preserving_source(text, source_url=source_url)
+    if not _has_meaningful_body(final_text, source_url=source_url):
+        raise EmptyAIResponseError("AI model returned empty content")
+    return final_text

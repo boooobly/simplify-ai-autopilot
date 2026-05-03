@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from telegram import Bot
+from telegram import Bot, LinkPreviewOptions
 from telegram.ext import ContextTypes
 
 from bot.database import DraftDatabase
@@ -35,24 +35,40 @@ async def publish_to_channel(
             await bot.send_photo(chat_id=channel_id, photo=media_url, caption=content)
         else:
             await bot.send_photo(chat_id=channel_id, photo=media_url, caption=_short_media_caption(content))
-            await bot.send_message(chat_id=channel_id, text=content)
+            await bot.send_message(
+                chat_id=channel_id,
+                text=content,
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+            )
         return
     if media_url and media_type == "video":
         if len(content) <= MEDIA_CAPTION_LIMIT:
             await bot.send_video(chat_id=channel_id, video=media_url, caption=content)
         else:
             await bot.send_video(chat_id=channel_id, video=media_url, caption=_short_media_caption(content))
-            await bot.send_message(chat_id=channel_id, text=content)
+            await bot.send_message(
+                chat_id=channel_id,
+                text=content,
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+            )
         return
     if media_url and media_type == "animation":
         if len(content) <= MEDIA_CAPTION_LIMIT:
             await bot.send_animation(chat_id=channel_id, animation=media_url, caption=content)
         else:
             await bot.send_animation(chat_id=channel_id, animation=media_url, caption=_short_media_caption(content))
-            await bot.send_message(chat_id=channel_id, text=content)
+            await bot.send_message(
+                chat_id=channel_id,
+                text=content,
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+            )
         return
 
-    await bot.send_message(chat_id=channel_id, text=content)
+    await bot.send_message(
+        chat_id=channel_id,
+        text=content,
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
 
 
 async def run_scheduled_publishing(context: ContextTypes.DEFAULT_TYPE) -> None:

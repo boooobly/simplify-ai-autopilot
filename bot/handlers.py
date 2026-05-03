@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Update
 from telegram.ext import ContextTypes
 
 from bot.database import DraftDatabase
@@ -32,6 +32,10 @@ SHORT_MEDIA_PREVIEW_LIMIT = 850
 EMPTY_AI_REPLY_TEXT = "Модель вернула пустой ответ. Черновик не создан. Попробуй ещё раз или смени MODEL_DRAFT."
 
 
+def _disabled_link_preview_options() -> LinkPreviewOptions:
+    return LinkPreviewOptions(is_disabled=True)
+
+
 def _is_admin(user_id: int | None, admin_id: int) -> bool:
     return user_id is not None and user_id == admin_id
 
@@ -50,9 +54,10 @@ def _moderation_keyboard(draft_id: int) -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("✅ Опубликовать", callback_data=f"publish:{draft_id}")],
             [InlineKeyboardButton("🗓️ Запланировать", callback_data=f"schedule:{draft_id}")],
-            [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")],
-            [InlineKeyboardButton("✍️ Переписать", callback_data=f"rewrite:{draft_id}")],
+            [InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")],
             [InlineKeyboardButton("✨ Улучшить Claude", callback_data=f"polish:{draft_id}")],
+            [InlineKeyboardButton("✍️ Переписать", callback_data=f"rewrite:{draft_id}")],
+            [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")],
         ]
     )
 
@@ -72,8 +77,15 @@ def _build_moderation_text(
     media_url: str | None = None,
 ) -> str:
     source = source_url or "не указан"
-    media_line = f"\nМедиа: {media_type}" if media_type and media_url else "\nМедиа: нет"
-    return f"📝 Черновик #{draft_id}\nИсточник: {source}{media_line}\n\n{content}\n\nВыбери действие:"
+    media = media_type if media_type and media_url else "нет"
+    body = content.strip() or "[пусто]"
+    return (
+        f"📝 Черновик #{draft_id}\n"
+        f"Источник: {source}\n"
+        f"Медиа: {media}\n\n"
+        f"Пост:\n{body}\n\n"
+        "Выбери действие:"
+    )
 
 
 def _is_media_callback_message(query) -> bool:
@@ -95,9 +107,9 @@ async def _edit_callback_message(
             reply_markup=reply_markup,
         )
         if query.message:
-            await query.message.reply_text(text)
+            await query.message.reply_text(text, link_preview_options=_disabled_link_preview_options())
         return
-    await query.edit_message_text(text, reply_markup=reply_markup)
+    await query.edit_message_text(text, reply_markup=reply_markup, link_preview_options=_disabled_link_preview_options())
 
 
 def _build_media_preview_caption(
@@ -107,21 +119,21 @@ def _build_media_preview_caption(
     media_type: str | None = None,
 ) -> str:
     source = source_url or "не указан"
-    media = media_type or "неизвестно"
-    snippet = content[:500]
+    media = media_type or "нет"
+    body = content.strip() or "[пусто]"
+    snippet = body[:500]
     caption = (
         f"📝 Черновик #{draft_id}\n"
         f"Источник: {source}\n"
         f"Медиа: {media}\n\n"
-        f"{snippet}"
+        f"Пост:\n{snippet}"
     )
-    if len(content) > 500:
+    if len(body) > len(snippet):
         caption += f"\n...\nПолный текст можно открыть через /draft_info {draft_id}"
     caption += "\n\nВыбери действие:"
     if len(caption) > SHORT_MEDIA_PREVIEW_LIMIT:
         caption = caption[: SHORT_MEDIA_PREVIEW_LIMIT - 1].rstrip() + "…"
     return caption
-
 
 
 
@@ -241,7 +253,12 @@ async def _send_moderation_preview(
         if media_type == "animation":
             await context.bot.send_animation(chat_id=admin_id, animation=media_url, caption=short_caption, reply_markup=keyboard)
             return
-    await context.bot.send_message(chat_id=admin_id, text=text, reply_markup=keyboard)
+    await context.bot.send_message(
+        chat_id=admin_id,
+        text=text,
+        reply_markup=keyboard,
+        link_preview_options=_disabled_link_preview_options(),
+    )
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Allow /start only for admin user."""
 
@@ -300,6 +317,7 @@ async def drafts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             chat_id=settings.admin_id,
             text=_draft_snippet_text(draft),
             reply_markup=_draft_actions_keyboard(int(draft["id"]), str(draft.get("status") or "")),
+            link_preview_options=_disabled_link_preview_options(),
         )
 
 
@@ -327,7 +345,11 @@ async def draft_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     reply_markup = _moderation_keyboard(draft_id) if draft.get("status") in ACTIONABLE_DRAFT_STATUSES else None
-    await update.message.reply_text(_full_draft_text(draft), reply_markup=reply_markup)
+    await update.message.reply_text(
+        _full_draft_text(draft),
+        reply_markup=reply_markup,
+        link_preview_options=_disabled_link_preview_options(),
+    )
 
 
 async def delete_draft_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -456,7 +478,8 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             if duplicate:
                 if update.message:
                     await update.message.reply_text(
-                        f"Похоже, эта ссылка уже обрабатывалась: черновик #{duplicate['id']} (статус: {duplicate['status']})."
+                        f"Похоже, эта ссылка уже обрабатывалась: черновик #{duplicate['id']} (статус: {duplicate['status']}).",
+                        link_preview_options=_disabled_link_preview_options(),
                     )
                 return
             if update.message:
@@ -559,7 +582,12 @@ async def topics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         keyboard = InlineKeyboardMarkup(
             [[InlineKeyboardButton("✍️ Создать пост", callback_data=f"topic_generate:{topic['id']}")]]
         )
-        await context.bot.send_message(chat_id=settings.admin_id, text=text, reply_markup=keyboard)
+        await context.bot.send_message(
+            chat_id=settings.admin_id,
+            text=text,
+            reply_markup=keyboard,
+            link_preview_options=_disabled_link_preview_options(),
+        )
 
 
 async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -633,6 +661,14 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await _edit_callback_message(
                 query,
                 f"🗓️ Черновик #{draft_id} запланирован на {scheduled_local.strftime('%Y-%m-%d %H:%M')} ({settings.schedule_timezone})."
+            )
+
+        elif action == "preview":
+            preview_text = str(draft.get("content") or "").strip() or "[пусто]"
+            await _edit_callback_message(
+                query,
+                preview_text,
+                reply_markup=_moderation_keyboard(draft_id),
             )
 
         elif action == "reject":
@@ -778,7 +814,8 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     duplicate = db.find_by_source_url(source_url)
     if duplicate:
         await update.message.reply_text(
-            f"Похоже, эта ссылка уже обрабатывалась: черновик #{duplicate['id']} (статус: {duplicate['status']})."
+            f"Похоже, эта ссылка уже обрабатывалась: черновик #{duplicate['id']} (статус: {duplicate['status']}).",
+            link_preview_options=_disabled_link_preview_options(),
         )
         return
 
