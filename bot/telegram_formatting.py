@@ -157,6 +157,24 @@ def _strip_emoji_aliases_for_preview(text: str, custom_emoji_aliases: dict[str, 
     return EMOJI_ALIAS_PATTERN.sub(_replace, text)
 
 
+
+
+def _strip_quote_markers_render_only(text: str) -> str:
+    """Remove internal quote markers without touching emoji alias markers."""
+
+    prepared = _auto_quote_list_blocks(text)
+    cleaned_lines: list[str] = []
+    for line in prepared.splitlines():
+        stripped = line.strip()
+        if stripped in (QUOTE_OPEN, QUOTE_CLOSE):
+            continue
+        if _is_list_line(line):
+            cleaned_lines.append(_normalize_list_line(line))
+        else:
+            cleaned_lines.append(line)
+    return "\n".join(cleaned_lines)
+
+
 def strip_quote_markers(text: str, custom_emoji_aliases: dict[str, tuple[str, str]] | None = None) -> str:
     """Remove internal quote markers, preserving inner text as plain text."""
 
@@ -199,7 +217,7 @@ def render_post_html(
     if tail:
         rendered.append(_render_safe_links(tail))
 
-    # If there are unmatched markers, strip them and keep escaped plain text.
-    output = _apply_custom_emoji_aliases("".join(rendered), custom_emoji_aliases)
-    output = strip_quote_markers(output, custom_emoji_aliases=custom_emoji_aliases)
-    return _apply_custom_emoji(output, custom_emoji_map)
+    # If there are unmatched markers, strip only quote markers in render path.
+    output = _strip_quote_markers_render_only("".join(rendered))
+    output = _apply_custom_emoji(output, custom_emoji_map)
+    return _apply_custom_emoji_aliases(output, custom_emoji_aliases)

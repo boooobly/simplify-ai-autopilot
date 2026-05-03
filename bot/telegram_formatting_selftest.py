@@ -12,6 +12,27 @@ def run() -> None:
         'photoshop': ('📱', '6208880957280522192'),
         'windows': ('📱', '6208880957280522193'),
     }
+
+    case1 = 'Title\n\n➖ one\n➖ two\n\nEnd'
+    out1 = render_post_html(case1)
+    assert '<blockquote>' in out1
+    assert '➖ one' in out1
+
+    case2 = 'Title\n\n➖ one\n\nEnd'
+    out2 = render_post_html(case2)
+    assert '<blockquote>' not in out2
+
+    case3 = 'Плохо [[LINK:клик|javascript:alert(1)]]'
+    out3 = render_post_html(case3)
+    assert '<a href=' not in out3
+
+    case4 = 'Тест [тут](https://example.com)'
+    out4 = render_post_html(case4)
+    assert '<a href="https://example.com">тут</a>' in out4
+
+    case5 = strip_quote_markers('Проверка [[LINK:тут|https://example.com]] и [здесь](https://example.com)')
+    assert 'тут' in case5 and 'здесь' in case5 and 'https://example.com' not in case5
+
     out = render_post_html('[[EMOJI:claude]] [[EMOJI:chatgpt]] [[EMOJI:deepseek]]', custom_emoji_aliases=aliases)
     assert '5208880957280522189' in out and '5208880957280522190' in out and '5208880957280522191' in out
 
@@ -27,14 +48,6 @@ def run() -> None:
 
     preview = strip_quote_markers('[[EMOJI:claude]] Claude update', custom_emoji_aliases=aliases)
     assert preview.startswith('🤖')
-
-    case5 = 'Забираем [[LINK:тут|https://example.com]]'
-    out5 = render_post_html(case5)
-    assert '<a href="https://example.com">тут</a>' in out5
-
-    case3 = 'Title\n\n[[QUOTE]]\n➖ one\n➖ two\n[[/QUOTE]]'
-    out3 = render_post_html(case3)
-    assert out3.count('<blockquote>') == 1
 
     map_out = render_post_html('Огонь 🔥', custom_emoji_map={'🔥': '123456'})
     assert '<tg-emoji emoji-id="123456">🔥</tg-emoji>' in map_out
