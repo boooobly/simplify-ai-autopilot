@@ -1259,6 +1259,15 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
 
+        if action == "reject_topic":
+            topic = db.get_topic_candidate(draft_id)
+            if not topic:
+                await _edit_callback_message(query, f"Тема #{draft_id} не найдена.")
+                return
+            db.update_topic_status(draft_id, "rejected")
+            await _edit_callback_message(query, f"Тема #{draft_id} отклонена.")
+            return
+
         draft = db.get_draft(draft_id)
         if not draft and action not in {"edit_cancel", "attach_media_cancel"}:
             await _edit_callback_message(query, f"Черновик #{draft_id} не найден.")
@@ -1854,7 +1863,3 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             draft_id,
             source_url,
         )
-        if action == "reject_topic":
-            db.update_topic_status(draft_id, "rejected")
-            await _edit_callback_message(query, f"Тема #{draft_id} отклонена.")
-            return
