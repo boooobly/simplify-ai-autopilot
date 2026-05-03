@@ -123,11 +123,24 @@ async def run_scheduled_publishing(context: ContextTypes.DEFAULT_TYPE) -> None:
     due_drafts = db.get_due_scheduled_drafts()
 
     for draft in due_drafts:
-        await publish_to_channel(
-            context.bot,
-            settings.channel_id,
-            draft["content"],
-            draft.get("media_url"),
-            draft.get("media_type"),
-        )
-        db.update_status(int(draft["id"]), "published")
+        draft_id = int(draft["id"])
+        if not db.mark_draft_publishing(draft_id):
+            logger.info("Skipping draft %s because it is no longer scheduled", draft_id)
+            continue
+        refreshed = db.get_draft(draft_id)
+        if not refreshed:
+            logger.warning("Draft %s disappeared after publishing lock", draft_id)
+            continue
+        try:
+            await publish_to_channel(
+                context.bot,
+                settings.channel_id,
+                refreshed["content"],
+                refreshed.get("media_url"),
+                refreshed.get("media_type"),
+            )
+        except Exception:
+            logger.exception("Scheduled publishing failed for draft %s", draft_id)
+            db.mark_draft_failed(draft_id)
+            continue
+        db.mark_draft_published(draft_id)

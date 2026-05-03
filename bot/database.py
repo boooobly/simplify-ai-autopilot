@@ -213,6 +213,55 @@ class DraftDatabase:
             )
             conn.commit()
 
+    def mark_draft_publishing(self, draft_id: int) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE drafts
+                SET status = 'publishing', updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND status = 'scheduled'
+                """,
+                (draft_id,),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+
+    def mark_draft_published(self, draft_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE drafts
+                SET status = 'published', scheduled_at = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (draft_id,),
+            )
+            conn.commit()
+
+    def mark_draft_failed(self, draft_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE drafts
+                SET status = 'failed', updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (draft_id,),
+            )
+            conn.commit()
+
+    def restore_draft(self, draft_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE drafts
+                SET status = 'draft', scheduled_at = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (draft_id,),
+            )
+            conn.commit()
+
 
     def list_drafts(self, limit: int = 10, status: str | None = None) -> list[dict[str, Any]]:
         with self._connect() as conn:
