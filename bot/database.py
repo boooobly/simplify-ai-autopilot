@@ -118,6 +118,18 @@ class DraftDatabase:
             )
             conn.commit()
 
+    def clear_media(self, draft_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE drafts
+                SET media_url = NULL, media_type = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (draft_id,),
+            )
+            conn.commit()
+
     def update_status(self, draft_id: int, status: str) -> None:
         with self._connect() as conn:
             conn.execute(
