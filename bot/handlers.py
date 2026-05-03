@@ -219,8 +219,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "Команды:\n"
             "/draft - создать тестовый черновик\n"
             "/generate - создать черновик через draft-модель\n"
-            "/generate <ссылка> - создать черновик по ссылке\n"
+            "/generate <ссылка> - прочитать страницу и создать черновик по ссылке\n"
             "После генерации можно нажать кнопку «✨ Улучшить Claude» для полировки текста.\n"
+            "Также можно просто отправить ссылку обычным сообщением — бот тоже создаст черновик.\n"
             "/collect - собрать свежие темы\n"
             "/topics - показать найденные темы\n"
             "/attach_media <id> <photo|video|animation> <url> - прикрепить медиа\n"
@@ -392,24 +393,62 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await update.message.reply_text("Нет доступа.")
         return
 
-    source_url = " ".join(context.args).strip() if context.args else None
+    source_url_arg = " ".join(context.args).strip() if context.args else None
 
     if not settings.has_ai_provider:
         if update.message:
             await update.message.reply_text("AI-провайдер не настроен. Добавь OPENROUTER_API_KEY или OPENAI_API_KEY и перезапусти бота.")
         return
 
-    if update.message:
-        await update.message.reply_text("Генерирую черновик...")
-
     try:
         api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
         logger.info("/generate provider=%s model=%s", provider, settings.model_draft)
-        content = generate_post_draft(api_key, model=settings.model_draft, source_url=source_url, base_url=base_url, extra_headers=extra_headers)
+        source_url = None
+        if source_url_arg:
+            source_url_raw = find_first_url(source_url_arg)
+            if not source_url_raw:
+                if update.message:
+                    await update.message.reply_text("Не вижу корректной ссылки. Пришли URL в формате https://...")
+                return
+            source_url = normalize_url(source_url_raw)
+            duplicate = db.find_by_source_url(source_url)
+            if duplicate:
+                if update.message:
+                    await update.message.reply_text(
+                        f"Похоже, эта ссылка уже обрабатывалась: черновик #{duplicate['id']} (статус: {duplicate['status']})."
+                    )
+                return
+            if update.message:
+                await update.message.reply_text("Нашёл ссылку. Читаю страницу и готовлю черновик...")
+            title, page_text = fetch_page_content(source_url)
+            content = generate_post_draft_from_page(
+                api_key,
+                model=settings.model_draft,
+                source_url=source_url,
+                title=title,
+                page_text=page_text,
+                base_url=base_url,
+                extra_headers=extra_headers,
+            )
+        else:
+            if update.message:
+                await update.message.reply_text("Генерирую черновик...")
+            content = generate_post_draft(
+                api_key,
+                model=settings.model_draft,
+                source_url=None,
+                base_url=base_url,
+                extra_headers=extra_headers,
+            )
     except Exception as exc:
         logger.exception("Error during generation: %s", exc)
         if update.message:
-            await update.message.reply_text("Не удалось сгенерировать черновик. Попробуй ещё раз.")
+            if source_url_arg:
+                await update.message.reply_text(
+                    "Не удалось нормально прочитать страницу. Возможно, там мало текста, сайт закрыл доступ или страница требует JavaScript. Попробуй другую ссылку или пришли текст новости вручную."
+                )
+            else:
+                await update.message.reply_text("Не удалось сгенерировать черновик. Попробуй ещё раз.")
         return
 
     draft_id = db.create_draft(content, source_url=source_url)
@@ -573,7 +612,17 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             db.update_draft_content(draft_id, polished)
             db.update_status(draft_id, "draft")
-            await _edit_callback_message(query, _build_moderation_text(draft_id, polished, draft.get("source_url")), reply_markup=_moderation_keyboard(draft_id))
+            await _edit_callback_message(
+                query,
+                _build_moderation_text(
+                    draft_id,
+                    polished,
+                    draft.get("source_url"),
+                    draft.get("media_type"),
+                    draft.get("media_url"),
+                ),
+                reply_markup=_moderation_keyboard(draft_id),
+            )
 
         elif action == "draft_info":
             reply_markup = _moderation_keyboard(draft_id) if draft.get("status") in ACTIONABLE_DRAFT_STATUSES else None

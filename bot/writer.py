@@ -48,10 +48,23 @@ def _generate_with_chat_completion(
         max_tokens=900,
         extra_headers=extra_headers,
     )
-    text = (response.choices[0].message.content or "").strip()
-    if len(text) > 900:
-        return text[:897].rstrip() + "..."
-    return text
+    return (response.choices[0].message.content or "").strip()
+
+
+def _limit_text_preserving_source(text: str, source_url: str | None = None, limit: int = 900) -> str:
+    if len(text) <= limit:
+        return text
+    if not source_url:
+        return text[: limit - 3].rstrip() + "..."
+    source_line = f"Источник: {source_url}"
+    if len(source_line) >= limit:
+        return source_line[:limit]
+    suffix = f"\n\n{source_line}"
+    body_limit = limit - len(suffix) - 3
+    if body_limit <= 0:
+        return source_line
+    body = text.replace(source_line, "").strip()
+    return body[:body_limit].rstrip() + "..." + suffix
 
 
 def generate_post_draft(
@@ -70,7 +83,8 @@ def generate_post_draft(
         f"{source_line}"
     )
     logger.info("Генерация черновика: model=%s", model)
-    return _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
+    text = _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
+    return _limit_text_preserving_source(text, source_url=source_url)
 
 
 def polish_post_draft(
@@ -92,7 +106,8 @@ def polish_post_draft(
         f"Текущий черновик:\n{draft_text}"
     )
     logger.info("Полировка черновика: model=%s", model)
-    return _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
+    text = _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
+    return _limit_text_preserving_source(text, source_url=source_url)
 
 
 def find_first_url(text: str) -> str | None:
@@ -166,4 +181,5 @@ def generate_post_draft_from_page(api_key: str, model: str, source_url: str, tit
         f"Источник: {source_url}\nЗаголовок: {title}\n\nТекст страницы:\n{page_text}"
     )
     logger.info("Генерация по URL: model=%s", model)
-    return _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
+    text = _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
+    return _limit_text_preserving_source(text, source_url=source_url)
