@@ -93,6 +93,13 @@ def _parse_callback_data(data: str) -> tuple[str, int, str | None]:
     return action, int(draft_id_raw), None
 
 
+def _queue_draft_ids_for_day(db: DraftDatabase, settings, day_offset: int) -> list[int]:
+    start_local, end_local = _get_day_range(day_offset, settings.schedule_timezone)
+    start_utc = start_local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
+    end_utc = end_local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
+    return [int(d["id"]) for d in db.list_scheduled_drafts_between(start_utc, end_utc)]
+
+
 def _main_menu_text() -> str:
     return "🤖 Simplify AI Autopilot\n\nВыбери действие:"
 
@@ -217,11 +224,76 @@ def _status_guard_message(action: str, status: str | None) -> str:
     return f"Это действие недоступно для текущего статуса: {status or 'unknown'}."
 
 
-def _schedule_keyboard(draft_id: int) -> InlineKeyboardMarkup:
-    slots = ["10:00", "14:00", "18:00", "21:00"]
+def _schedule_keyboard(draft_id: int, slots: list[str]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton(slot, callback_data=f"schedule_slot:{draft_id}:{slot}")] for slot in slots]
     )
+
+
+def _get_day_range(day_offset: int, timezone_str: str) -> tuple[datetime, datetime]:
+    tz = ZoneInfo(timezone_str)
+    now_local = datetime.now(tz)
+    start = now_local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=day_offset)
+    return start, start + timedelta(days=1)
+
+
+def _queue_keyboard(day_offset: int, draft_ids: list[int]) -> InlineKeyboardMarkup:
+    rows = []
+    for draft_id in draft_ids:
+        rows.append([InlineKeyboardButton(f"Снять #{draft_id} с очереди", callback_data=f"unschedule:{draft_id}")])
+    if day_offset == 0:
+        rows.extend([
+            [InlineKeyboardButton("🔄 Обновить", callback_data="queue_today:0")],
+            [InlineKeyboardButton("📅 Завтра", callback_data="queue_tomorrow:0")],
+        ])
+    else:
+        rows.extend([
+            [InlineKeyboardButton("🔄 Обновить", callback_data="queue_tomorrow:0")],
+            [InlineKeyboardButton("📅 Сегодня", callback_data="queue_today:0")],
+        ])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _render_queue_text(db: DraftDatabase, settings, day_offset: int) -> str:
+    day_name = "сегодня" if day_offset == 0 else "завтра"
+    start_local, end_local = _get_day_range(day_offset, settings.schedule_timezone)
+    start_utc = start_local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
+    end_utc = end_local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
+    drafts = db.list_scheduled_drafts_between(start_utc, end_utc)
+    slots_map = {slot: None for slot in settings.daily_post_slots}
+    extra: list[dict[str, object]] = []
+    lines = [f"📅 План публикаций на {day_name}", "", "Слоты:"]
+    for draft in drafts:
+        scheduled_raw = str(draft.get("scheduled_at") or "")
+        scheduled_utc = datetime.strptime(scheduled_raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
+        scheduled_local = scheduled_utc.astimezone(ZoneInfo(settings.schedule_timezone))
+        hhmm = scheduled_local.strftime("%H:%M")
+        if hhmm in slots_map and slots_map[hhmm] is None:
+            slots_map[hhmm] = draft
+        else:
+            extra.append(draft)
+    for slot in settings.daily_post_slots:
+        bound = slots_map[slot]
+        lines.append(f"{slot} - #{bound['id']} scheduled" if bound else f"{slot} - пусто")
+    if not drafts:
+        lines.extend(["", "На этот день пока ничего не запланировано."])
+        return "\n".join(lines)
+    lines.extend(["", "Запланировано:"])
+    for draft in drafts:
+        scheduled_raw = str(draft.get("scheduled_at") or "")
+        scheduled_utc = datetime.strptime(scheduled_raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
+        local_time = scheduled_utc.astimezone(ZoneInfo(settings.schedule_timezone)).strftime("%H:%M")
+        snippet = (str(draft.get("content") or "").strip()[:90] or "[пусто]").replace("\n", " ")
+        lines.extend([f"#{draft['id']} - {local_time}", f"Текст: {snippet}", ""])
+    if extra:
+        lines.append("Дополнительно:")
+        for draft in extra:
+            scheduled_raw = str(draft.get("scheduled_at") or "")
+            scheduled_utc = datetime.strptime(scheduled_raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
+            local_time = scheduled_utc.astimezone(ZoneInfo(settings.schedule_timezone)).strftime("%H:%M")
+            lines.append(f"#{draft['id']} - {local_time}")
+    return "\n".join(lines).rstrip()
 
 
 def _preview_keyboard(draft_id: int) -> InlineKeyboardMarkup:
@@ -682,6 +754,54 @@ async def delete_draft_command(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"Черновик #{draft_id} не найден.")
 
 
+async def queue_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    if not _is_admin(update.effective_user.id if update.effective_user else None, settings.admin_id):
+        return
+    if update.message:
+        await update.message.reply_text(
+            _render_queue_text(db, settings, day_offset=0),
+            reply_markup=_queue_keyboard(0, _queue_draft_ids_for_day(db, settings, 0)),
+        )
+
+
+async def queue_tomorrow_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    if not _is_admin(update.effective_user.id if update.effective_user else None, settings.admin_id):
+        return
+    if update.message:
+        await update.message.reply_text(
+            _render_queue_text(db, settings, day_offset=1),
+            reply_markup=_queue_keyboard(1, _queue_draft_ids_for_day(db, settings, 1)),
+        )
+
+
+async def unschedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    if not _is_admin(update.effective_user.id if update.effective_user else None, settings.admin_id):
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /unschedule <draft_id>")
+        return
+    try:
+        draft_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("draft_id должен быть числом.")
+        return
+    draft = db.get_draft(draft_id)
+    if not draft:
+        await update.message.reply_text(f"Черновик #{draft_id} не найден.")
+        return
+    if draft.get("status") != "scheduled":
+        await update.message.reply_text(f"Черновик #{draft_id} сейчас не в очереди.")
+        return
+    db.unschedule_draft(draft_id)
+    await update.message.reply_text(f"Черновик #{draft_id} снят с очереди и снова доступен как черновик.")
+
+
 async def attach_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = context.bot_data["settings"]
     db: DraftDatabase = context.bot_data["db"]
@@ -1024,6 +1144,22 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 )
             return
 
+        if action == "queue_today":
+            await _edit_callback_message(
+                query,
+                _render_queue_text(db, settings, day_offset=0),
+                reply_markup=_queue_keyboard(0, _queue_draft_ids_for_day(db, settings, 0)),
+            )
+            return
+
+        if action == "queue_tomorrow":
+            await _edit_callback_message(
+                query,
+                _render_queue_text(db, settings, day_offset=1),
+                reply_markup=_queue_keyboard(1, _queue_draft_ids_for_day(db, settings, 1)),
+            )
+            return
+
         draft = db.get_draft(draft_id)
         if not draft and action not in {"edit_cancel", "attach_media_cancel"}:
             await _edit_callback_message(query, f"Черновик #{draft_id} не найден.")
@@ -1052,7 +1188,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await context.bot.send_message(
                 chat_id=settings.admin_id,
                 text=schedule_text,
-                reply_markup=_schedule_keyboard(draft_id),
+                reply_markup=_schedule_keyboard(draft_id, settings.daily_post_slots),
             )
             try:
                 await query.answer("Меню слотов отправлено отдельным сообщением.")
@@ -1089,7 +1225,20 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             db.schedule_draft(draft_id, scheduled_utc.strftime("%Y-%m-%d %H:%M:%S"))
             await _edit_callback_message(
                 query,
-                f"🗓️ Черновик #{draft_id} запланирован на {scheduled_local.strftime('%Y-%m-%d %H:%M')} ({settings.schedule_timezone})."
+                f"🗓️ Черновик #{draft_id} запланирован на {scheduled_local.strftime('%Y-%m-%d %H:%M')}.\nОчередь: /queue_today"
+            )
+        elif action == "unschedule":
+            if not draft:
+                await _edit_callback_message(query, f"Черновик #{draft_id} не найден.")
+                return
+            if draft.get("status") != "scheduled":
+                await _edit_callback_message(query, f"Черновик #{draft_id} сейчас не в очереди.")
+                return
+            db.unschedule_draft(draft_id)
+            await _edit_callback_message(
+                query,
+                "Черновик #{0} снят с очереди.".format(draft_id),
+                reply_markup=_queue_keyboard(0, _queue_draft_ids_for_day(db, settings, 0)),
             )
 
         elif action == "preview":
@@ -1404,18 +1553,11 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             )
             await context.bot.send_message(chat_id=settings.admin_id, text=text, reply_markup=keyboard, link_preview_options=_disabled_link_preview_options())
     elif data == "menu_queue":
-        drafts = db.list_drafts(limit=10, status="scheduled")
-        if not drafts:
-            await _edit_callback_message(query, "Запланированных черновиков пока нет.", reply_markup=_back_to_menu_keyboard())
-            return
-        await _edit_callback_message(query, "Запланированные черновики:", reply_markup=_back_to_menu_keyboard())
-        for draft in drafts:
-            await context.bot.send_message(
-                chat_id=settings.admin_id,
-                text=_draft_snippet_text(draft),
-                reply_markup=_draft_actions_keyboard(int(draft["id"]), str(draft.get("status") or "")),
-                link_preview_options=_disabled_link_preview_options(),
-            )
+        await _edit_callback_message(
+            query,
+            _render_queue_text(db, settings, day_offset=0),
+            reply_markup=_queue_keyboard(0, _queue_draft_ids_for_day(db, settings, 0)),
+        )
     elif data == "menu_settings":
         await _edit_callback_message(query, _settings_text(settings), reply_markup=_back_to_menu_keyboard())
     elif data == "menu_usage":
@@ -1438,6 +1580,9 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             "/generate <ссылка> - пост из ссылки\n"
             "/drafts - последние черновики\n"
             "/topics - найденные темы\n"
+            "/queue_today - план публикаций на сегодня\n"
+            "/queue_tomorrow - план публикаций на завтра\n"
+            "/unschedule <id> - снять черновик с очереди\n"
             "/usage_today - расходы ИИ за сегодня\n"
             "/usage_7d - расходы ИИ за 7 дней\n"
             "/usage_month - расходы ИИ за 30 дней\n"
