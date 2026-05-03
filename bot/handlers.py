@@ -222,6 +222,8 @@ async def _generate_url_draft_with_fallback(
                 source_url=source_url,
                 title=title,
                 page_text=page_text,
+                max_chars=settings.post_max_chars,
+                soft_chars=settings.post_soft_chars,
                 base_url=base_url,
                 extra_headers=extra_headers,
             )
@@ -501,6 +503,8 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 api_key,
                 model=settings.model_draft,
                 source_url=None,
+                max_chars=settings.post_max_chars,
+                soft_chars=settings.post_soft_chars,
                 base_url=base_url,
                 extra_headers=extra_headers,
             )
@@ -697,6 +701,8 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 model=settings.model_polish,
                 draft_text=draft["content"],
                 source_url=draft.get("source_url"),
+                max_chars=settings.post_max_chars,
+                soft_chars=settings.post_soft_chars,
                 base_url=base_url,
                 extra_headers=extra_headers,
             )
