@@ -24,6 +24,17 @@ def run() -> None:
     ids = [int(t["id"]) for t in selected]
     assert len(ids) == len(set(ids))
 
+    same_group_topics = [
+        {"id": 11, "score": 99, "category": "tool", "source_group": "tools", "title": "a", "source": "s", "url": "ua"},
+        {"id": 12, "score": 98, "category": "tool", "source_group": "tools", "title": "b", "source": "s", "url": "ub"},
+        {"id": 13, "score": 97, "category": "tool", "source_group": "tools", "title": "c", "source": "s", "url": "uc"},
+        {"id": 14, "score": 96, "category": "tool", "source_group": "tools", "title": "d", "source": "s", "url": "ud"},
+    ]
+    same_group_selected = _select_daily_plan_topics(FakeDB(same_group_topics), limit=4)
+    same_group_ids = [int(t["id"]) for t in same_group_selected]
+    assert len(same_group_selected) == 4
+    assert len(same_group_ids) == len(set(same_group_ids))
+
 
 if __name__ == "__main__":
     run()

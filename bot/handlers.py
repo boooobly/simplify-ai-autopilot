@@ -214,7 +214,7 @@ def _select_daily_plan_topics(db: DraftDatabase, limit: int) -> list[dict]:
     category_counts: dict[str, int] = {}
     source_group_counts: dict[str, int] = {}
 
-    def _pick_from(predicate) -> None:
+    def _pick_from(predicate, respect_balance: bool = True) -> None:
         if len(selected) >= limit:
             return
         for topic in candidates:
@@ -223,7 +223,7 @@ def _select_daily_plan_topics(db: DraftDatabase, limit: int) -> list[dict]:
             source_group = str(topic.get("source_group") or "other").strip().lower()
             if topic_id in selected_ids or not predicate(topic, category, source_group):
                 continue
-            if category_counts.get(category, 0) >= 2 or source_group_counts.get(source_group, 0) >= 2:
+            if respect_balance and (category_counts.get(category, 0) >= 2 or source_group_counts.get(source_group, 0) >= 2):
                 continue
             selected.append(topic)
             selected_ids.add(topic_id)
@@ -234,10 +234,14 @@ def _select_daily_plan_topics(db: DraftDatabase, limit: int) -> list[dict]:
     _pick_from(lambda _t, c, _g: c in {"tool", "guide", "creator", "dev", "mobile"})
     _pick_from(lambda _t, c, _g: c in {"news", "model", "agent", "research", "privacy"})
     _pick_from(lambda _t, c, g: c in {"drama", "meme"} or g in {"community", "github", "custom"})
-    _pick_from(lambda _t, _c, _g: True)
     while len(selected) < limit:
         previous = len(selected)
-        _pick_from(lambda _t, _c, _g: True)
+        _pick_from(lambda _t, _c, _g: True, respect_balance=True)
+        if len(selected) == previous:
+            break
+    while len(selected) < limit:
+        previous = len(selected)
+        _pick_from(lambda _t, _c, _g: True, respect_balance=False)
         if len(selected) == previous:
             break
     return selected[:limit]
