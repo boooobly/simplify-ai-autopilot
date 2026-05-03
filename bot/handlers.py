@@ -725,12 +725,27 @@ async def _send_moderation_preview(
     media_url: str | None = None,
     media_type: str | None = None,
 ) -> None:
-    text = _build_moderation_text(draft_id, content, source_url, media_type, media_url, custom_emoji_aliases=settings.custom_emoji_aliases)
+    settings = context.bot_data["settings"]
+    custom_emoji_aliases = getattr(settings, "custom_emoji_aliases", {})
+    text = _build_moderation_text(
+        draft_id,
+        content,
+        source_url,
+        media_type,
+        media_url,
+        custom_emoji_aliases=custom_emoji_aliases,
+    )
     has_media = media_count(media_url, media_type) > 0
     keyboard = _moderation_keyboard(draft_id, has_media=has_media)
     items = decode_media_items(media_url, media_type)
     if len(items) == 1:
-        short_caption = _build_media_preview_caption(draft_id, content, source_url, media_type, custom_emoji_aliases=settings.custom_emoji_aliases)
+        short_caption = _build_media_preview_caption(
+            draft_id,
+            content,
+            source_url,
+            media_type,
+            custom_emoji_aliases=custom_emoji_aliases,
+        )
         if items[0]["type"] == "photo":
             await context.bot.send_photo(chat_id=admin_id, photo=items[0]["file_id"], caption=short_caption, reply_markup=keyboard)
             return
@@ -2671,9 +2686,9 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
     except EmptyAIResponseError:
         await update.message.reply_text(EMPTY_AI_REPLY_TEXT)
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to finalize URL draft creation for %s", source_url)
         await update.message.reply_text(
-            "Не удалось создать черновик. Ошибка записана в логи.",
+            f"Не удалось создать черновик: {type(exc).__name__}. Ошибка записана в логи.",
             reply_markup=_admin_reply_keyboard(),
         )

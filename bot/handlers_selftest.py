@@ -1,4 +1,4 @@
-from bot.handlers import _build_media_preview_caption, _build_moderation_text
+from bot.handlers import _build_media_preview_caption, _build_moderation_text, _send_moderation_preview
 
 
 def run() -> None:
@@ -21,6 +21,7 @@ def run() -> None:
         custom_emoji_aliases=aliases,
     )
     assert "🤖" in caption
+    assert "settings" not in _send_moderation_preview.__code__.co_names
 
     print("OK")
 
