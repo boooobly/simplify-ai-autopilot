@@ -109,10 +109,23 @@ def _moderation_keyboard(draft_id: int, status: str | None = None) -> InlineKeyb
             [InlineKeyboardButton("🗓️ Запланировать", callback_data=f"schedule:{draft_id}")],
             [InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")],
             [InlineKeyboardButton("✨ Улучшить Claude", callback_data=f"polish:{draft_id}")],
-            [InlineKeyboardButton("✍️ Переписать", callback_data=f"rewrite:{draft_id}")],
+            [InlineKeyboardButton("✏️ Редактировать текст", callback_data=f"edit_text:{draft_id}")],
             [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")],
         ]
     return InlineKeyboardMarkup(rows)
+
+
+def _set_pending_edit(context: ContextTypes.DEFAULT_TYPE, draft_id: int) -> None:
+    context.user_data["pending_edit_draft_id"] = draft_id
+
+
+def _get_pending_edit(context: ContextTypes.DEFAULT_TYPE) -> int | None:
+    draft_id = context.user_data.get("pending_edit_draft_id")
+    return int(draft_id) if isinstance(draft_id, int) else None
+
+
+def _clear_pending_edit(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("pending_edit_draft_id", None)
 
 
 def _can_publish(status: str | None) -> bool:
@@ -366,6 +379,58 @@ async def _send_moderation_preview(
         reply_markup=keyboard,
         link_preview_options=_disabled_link_preview_options(),
     )
+
+
+async def _handle_pending_text_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    pending_draft_id = _get_pending_edit(context)
+    if pending_draft_id is None or not update.message:
+        return False
+
+    db: DraftDatabase = context.bot_data["db"]
+    settings = context.bot_data["settings"]
+    message_text = (update.message.text or "").strip()
+
+    if not message_text:
+        await update.message.reply_text("Пришли новый текст обычным текстовым сообщением.")
+        return True
+
+    draft = db.get_draft(pending_draft_id)
+    if not draft:
+        _clear_pending_edit(context)
+        await update.message.reply_text(f"Черновик #{pending_draft_id} не найден. Редактирование отменено.")
+        return True
+
+    status = str(draft.get("status") or "")
+    if not _can_edit(status):
+        _clear_pending_edit(context)
+        await update.message.reply_text(_status_guard_message("edit", status))
+        return True
+
+    if len(message_text) < 10:
+        await update.message.reply_text(
+            "Текст слишком короткий. Пришли нормальный текст поста или отмени редактирование."
+        )
+        return True
+    if len(message_text) > settings.post_max_chars:
+        await update.message.reply_text(
+            f"Текст длиннее лимита {settings.post_max_chars} символов. Сократи его и отправь ещё раз."
+        )
+        return True
+
+    db.update_draft_content(pending_draft_id, message_text)
+    db.update_status(pending_draft_id, "draft")
+    _clear_pending_edit(context)
+    await update.message.reply_text(f"Готово. Текст черновика #{pending_draft_id} обновлён.")
+    await _send_moderation_preview(
+        context,
+        settings.admin_id,
+        pending_draft_id,
+        message_text,
+        source_url=draft.get("source_url"),
+        media_url=draft.get("media_url"),
+        media_type=draft.get("media_type"),
+    )
+    return True
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Allow /start only for admin user."""
 
@@ -774,7 +839,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
 
         draft = db.get_draft(draft_id)
-        if not draft:
+        if not draft and action != "edit_cancel":
             await _edit_callback_message(query, f"Черновик #{draft_id} не найден.")
             return
 
@@ -882,6 +947,40 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 _build_moderation_text(draft_id, rewritten, draft.get("source_url")),
                 reply_markup=_moderation_keyboard(draft_id, "draft"),
             )
+
+        elif action == "edit_text":
+            if not _can_edit(draft.get("status")):
+                await _edit_callback_message(query, _status_guard_message("edit", draft.get("status")))
+                return
+            _set_pending_edit(context, draft_id)
+            await _edit_callback_message(
+                query,
+                f"✏️ Редактирование черновика #{draft_id}\n\n"
+                "Пришли новый текст поста одним сообщением.\n\n"
+                "Чтобы отменить, нажми кнопку ниже.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("❌ Отменить редактирование", callback_data=f"edit_cancel:{draft_id}")]]
+                ),
+            )
+
+        elif action == "edit_cancel":
+            _clear_pending_edit(context)
+            if not draft:
+                await _edit_callback_message(query, "Редактирование отменено.")
+                return
+            await _edit_callback_message(
+                query,
+                _build_moderation_text(
+                    draft_id,
+                    draft["content"],
+                    draft.get("source_url"),
+                    draft.get("media_type"),
+                    draft.get("media_url"),
+                ),
+                reply_markup=_moderation_keyboard(draft_id, str(draft.get("status") or "")),
+            )
+            if query.message:
+                await query.message.reply_text("Редактирование отменено.")
 
         elif action == "polish":
             if not _can_edit(draft.get("status")):
@@ -1072,6 +1171,10 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     message_text = (update.message.text or "").strip() if update.message else ""
 
     if not _is_admin(user_id, settings.admin_id):
+        return
+
+    handled_pending_edit = await _handle_pending_text_edit(update, context)
+    if handled_pending_edit:
         return
 
     if update.message and update.message.reply_to_message:
