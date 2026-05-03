@@ -6,7 +6,7 @@
 
 - `/start` доступен только администратору
 - `/draft` создаёт тестовый черновик и отправляет его на модерацию
-- `/generate [source_url]` создаёт черновик для Telegram через OpenAI на русском для `@simplify_ai` (если настроен `OPENAI_API_KEY`)
+- `/generate [source_url]` создаёт черновик для Telegram через настроенный AI-провайдер (предпочтительно OpenRouter) на русском для `@simplify_ai`
 - Если администратор отправляет боту обычное сообщение с URL, бот автоматически:
   - извлекает заголовок и читаемый текст страницы,
   - делает summary и генерирует черновик в стиле `@simplify_ai`,
@@ -19,6 +19,7 @@
   - 🗓️ Запланировать
   - ❌ Отклонить
   - ✍️ Переписать
+  - ✨ Улучшить Claude
 - Для Schedule доступны слоты: `10:00`, `14:00`, `18:00`, `21:00`
 - Публикация одобренного контента в канал
 - Черновики поддерживают опциональные `media_url` и `media_type` (`photo`, `animation`, `video`)
@@ -62,7 +63,8 @@ README.md
 
 - Python 3.11+
 - Telegram bot token от BotFather
-- OpenAI API key (опционально, нужен только для `/generate`)
+- OpenRouter API key (рекомендуется для генерации и полировки)
+- OpenAI API key (опциональный fallback)
 
 ## Установка
 
@@ -85,17 +87,23 @@ cp .env.example .env
 - `BOT_TOKEN` — токен бота
 - `ADMIN_ID` — числовой user ID администратора в Telegram
 - `CHANNEL_ID` — username канала (пример: `@my_channel`) или id канала
-- `OPENAI_API_KEY` — опциональный OpenAI API key для команды `/generate`
+- `OPENROUTER_API_KEY` — основной ключ для OpenRouter (предпочтительный провайдер)
+- `OPENAI_API_KEY` — fallback-ключ OpenAI, если OpenRouter не задан
+- `MODEL_DRAFT` — модель для обычных черновиков (по умолчанию `moonshotai/kimi-k2.6`)
+- `MODEL_POLISH` — модель для улучшения черновиков (по умолчанию `anthropic/claude-sonnet-4.5`)
+- `OPENROUTER_SITE_URL` — опциональный Referer для OpenRouter
+- `OPENROUTER_APP_NAME` — имя приложения для OpenRouter (по умолчанию `Simplify AI Autopilot`)
 - `SCHEDULE_TIMEZONE` — таймзона для планирования (по умолчанию `Europe/Moscow`)
 - `DB_PATH` — путь к SQLite-файлу черновиков (по умолчанию `data/drafts.db`)
 - `OPENAI_API_KEY` можно не задавать: бот запускается и работает без него (`/start`, `/draft`, модерация, отклонение, переписывание, публикация).
-- Команда `/generate` требует `OPENAI_API_KEY`; без него бот подскажет, что нужно добавить ключ.
+- Команда `/generate` требует `OPENROUTER_API_KEY` или `OPENAI_API_KEY`; OpenRouter используется в приоритете.
+- `OPENROUTER_API_KEY` храни только в переменных Railway, не в репозитории.
 
 ## Команды
 
 - `/start` — приветствие бота (только для администратора)
 - `/draft` — создание тестового черновика (для проверки)
-- `/generate` — создание AI-черновика
+- `/generate` — создание AI-черновика через `MODEL_DRAFT` (например, Kimi)
 - `/generate https://example.com/article` — создание AI-черновика и сохранение source URL в БД
 - `/collect` — собрать свежие темы-кандидаты
 - `/topics` — показать последние темы с кнопками `✍️ Создать пост`
@@ -132,7 +140,12 @@ python main.py
   - `BOT_TOKEN`
   - `ADMIN_ID`
   - `CHANNEL_ID`
-  - `OPENAI_API_KEY` (опционально, только для `/generate`)
+  - `OPENROUTER_API_KEY` (рекомендуется)
+  - `OPENAI_API_KEY` (опциональный fallback)
+  - `MODEL_DRAFT`
+  - `MODEL_POLISH`
+  - `OPENROUTER_SITE_URL` (опционально)
+  - `OPENROUTER_APP_NAME` (опционально)
   - `DB_PATH` (опционально; по умолчанию `data/drafts.db`)
 
 ## Безопасность
