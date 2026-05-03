@@ -16,7 +16,7 @@ from bot.drafts import create_test_draft, rewrite_test_draft
 from bot.media_utils import decode_media_items, encode_media_group, media_count
 from bot.publisher import publish_to_channel
 from bot.telegram_formatting import strip_quote_markers
-from bot.sources import collect_topics
+from bot.sources import SourceReport, collect_topics, collect_topics_with_diagnostics
 from bot.writer import (
     EmptyAIResponseError,
     GenerationResult,
@@ -1140,8 +1140,9 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
 
 
 
-def _collect_topics_with_stats(db: DraftDatabase) -> tuple[TopicCollectStats, list, list]:
-    items = collect_topics()
+def _collect_topics_with_stats(db: DraftDatabase, items: list | None = None) -> tuple[TopicCollectStats, list, list]:
+    if items is None:
+        items = collect_topics()
     stats = TopicCollectStats(total=len(items))
     inserted = []
     spam_words = ["casino", "porn", "xxx", "bet", "viagra"]
@@ -1166,6 +1167,36 @@ def _collect_topics_with_stats(db: DraftDatabase) -> tuple[TopicCollectStats, li
         else:
             stats.near_duplicate += 1
     return stats, items, inserted
+
+
+def _render_sources_status(reports: list[SourceReport]) -> str:
+    total = len(reports)
+    ok = sum(1 for r in reports if r.status == "ok")
+    empty = sum(1 for r in reports if r.status == "empty")
+    errors = sum(1 for r in reports if r.status == "error")
+    lines = ["📡 Статус источников", "", f"Всего источников: {total}", f"Работают: {ok}", f"Пустые: {empty}", f"Ошибки: {errors}", "", "По группам:"]
+    for group, label in SOURCE_GROUP_LABELS.items():
+        group_reports = [r for r in reports if (r.source_group or "other") == group]
+        if not group_reports:
+            if group == "custom":
+                lines.append(f"{label}: 0/0")
+            continue
+        group_ok = sum(1 for r in group_reports if r.status == "ok")
+        lines.append(f"{label}: {group_ok}/{len(group_reports)}")
+
+    problems = [r for r in reports if r.status in {"error", "empty"}]
+    if problems:
+        lines.append("")
+        lines.append("Проблемы:")
+        limited = problems[:12]
+        for rep in limited:
+            if rep.status == "error":
+                lines.append(f"- {rep.name}: {rep.error or 'ошибка'}")
+            else:
+                lines.append(f"- {rep.name}: 0 тем")
+        if len(problems) > 12:
+            lines.append("Показаны первые 12 проблем.")
+    return "\n".join(lines)[:3900]
 
 
 def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list) -> str:
@@ -1208,6 +1239,48 @@ async def collect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if update.message:
         await update.message.reply_text(_render_collect_text(stats, items, inserted))
+
+
+async def sources_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_admin(user_id, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+    if update.message:
+        await update.message.reply_text("Проверяю источники...")
+    _items, reports = collect_topics_with_diagnostics()
+    if update.message:
+        await update.message.reply_text(_render_sources_status(reports))
+
+
+async def collect_debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_admin(user_id, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+    if update.message:
+        await update.message.reply_text("Собираю темы с диагностикой...")
+    items, reports = collect_topics_with_diagnostics()
+    stats, _all_items, inserted = _collect_topics_with_stats(db, items=items)
+    text = _render_collect_text(stats, items, inserted)
+    ok = sum(1 for r in reports if r.status == "ok")
+    empty = sum(1 for r in reports if r.status == "empty")
+    errors = sum(1 for r in reports if r.status == "error")
+    problems = [r for r in reports if r.status in {"error", "empty"}][:12]
+    problem_lines = [f"- {r.name}: {r.error or 'empty'}" if r.status == "error" else f"- {r.name}: empty" for r in problems]
+    combined = text.replace("🧠 Темы собраны", "🧠 Темы собраны с диагностикой")
+    combined += f"\n\nИсточники:\nРаботают: {ok}\nПустые: {empty}\nОшибки: {errors}"
+    if problem_lines:
+        combined += "\n\nПроблемы:\n" + "\n".join(problem_lines)
+    if len([r for r in reports if r.status in {'error', 'empty'}]) > 12:
+        combined += "\nПоказаны первые 12 проблем."
+    if update.message:
+        await update.message.reply_text(combined[:3900])
 
 
 async def topics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1885,6 +1958,7 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             [
                 [InlineKeyboardButton("🔎 Собрать свежие темы", callback_data="menu_collect")],
                 [InlineKeyboardButton("📋 Показать найденные темы", callback_data="menu_show_topics")],
+                [InlineKeyboardButton("📡 Источники", callback_data="menu_sources_status")],
                 [InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")],
             ]
         )
@@ -1907,6 +1981,9 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             text = _topic_card_text(topic)
             keyboard = _topic_actions_keyboard(int(topic["id"]))
             await context.bot.send_message(chat_id=settings.admin_id, text=text, reply_markup=keyboard, link_preview_options=_disabled_link_preview_options())
+    elif data == "menu_sources_status":
+        _items, reports = collect_topics_with_diagnostics()
+        await _edit_callback_message(query, _render_sources_status(reports), reply_markup=_back_to_menu_keyboard())
     elif data == "menu_queue":
         await _edit_callback_message(
             query,
@@ -1949,6 +2026,8 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             "/usage_7d - расходы ИИ за 7 дней\n"
             "/usage_month - расходы ИИ за 30 дней\n"
             "/collect - собрать темы\n"
+            "/sources_status - проверить источники тем\n"
+            "/collect_debug - собрать темы с диагностикой\n"
             "/draft_info <id> - открыть черновик\n"
             "/delete_draft <id> - удалить черновик\n"
             "/attach_media <id> <photo|video|animation> <url> - прикрепить медиа\n\n"

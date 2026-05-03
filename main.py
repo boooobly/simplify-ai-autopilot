@@ -14,6 +14,7 @@ from bot.handlers import (
     draft_command,
     generate_command,
     collect_command,
+    collect_debug_command,
     attach_media_command,
     moderation_callback,
     start_command,
@@ -23,6 +24,7 @@ from bot.handlers import (
     topics_news_command,
     topics_fun_command,
     topics_hot_command,
+    sources_status_command,
     usage_7d_command,
     usage_month_command,
     usage_today_command,
@@ -60,6 +62,8 @@ def main() -> None:
     application.add_handler(CommandHandler("draft", draft_command))
     application.add_handler(CommandHandler("generate", generate_command))
     application.add_handler(CommandHandler("collect", collect_command))
+    application.add_handler(CommandHandler("collect_debug", collect_debug_command))
+    application.add_handler(CommandHandler("sources_status", sources_status_command))
     application.add_handler(CommandHandler("attach_media", attach_media_command))
     application.add_handler(CommandHandler("topics", topics_command))
     application.add_handler(CommandHandler("topics_all", topics_all_command))

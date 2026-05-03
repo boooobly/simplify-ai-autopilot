@@ -26,6 +26,16 @@ class TopicItem:
     source_group: str = "other"
 
 
+@dataclass
+class SourceReport:
+    name: str
+    url: str
+    source_group: str
+    status: str  # "ok", "empty", "error"
+    item_count: int = 0
+    error: str = ""
+
+
 OFFICIAL_AI_RSS = [("OpenAI blog", "https://openai.com/news/rss.xml"), ("Anthropic news", "https://www.anthropic.com/news/rss.xml"), ("Google AI blog", "https://blog.google/technology/ai/rss/"), ("Perplexity blog", "https://www.perplexity.ai/hub/blog/rss.xml"), ("Hugging Face blog", "https://huggingface.co/blog/feed.xml"), ("Microsoft AI blog", "https://blogs.microsoft.com/ai/feed/"), ("NVIDIA blog AI", "https://blogs.nvidia.com/blog/category/ai/feed/")]
 TECH_MEDIA_RSS = [("VentureBeat AI", "https://venturebeat.com/ai/feed/"), ("The Decoder", "https://the-decoder.com/feed/"), ("MarkTechPost", "https://www.marktechpost.com/feed/"), ("The Verge AI", "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml"), ("TechCrunch AI", "https://techcrunch.com/category/artificial-intelligence/feed/"), ("MIT Technology Review AI", "https://www.technologyreview.com/topic/artificial-intelligence/feed/"), ("Ars Technica AI", "https://arstechnica.com/ai/feed/")]
 RU_TECH_RSS = [("Habr AI", "https://habr.com/ru/rss/hubs/ai/all/"), ("Habr ML", "https://habr.com/ru/rss/hub/machine_learning/"), ("Habr Dev", "https://habr.com/ru/rss/all/all/?fl=ru"), ("vc.ru technology", "https://vc.ru/rss/all"), ("Tproger", "https://tproger.ru/feed"), ("3DNews", "https://3dnews.ru/news/rss"), ("iXBT", "https://www.ixbt.com/export/news.rss")]
@@ -116,7 +126,13 @@ def _fetch_github_trending_ai() -> list[TopicItem]:
 
 
 def collect_topics() -> list[TopicItem]:
+    items, _reports = collect_topics_with_diagnostics()
+    return items
+
+
+def collect_topics_with_diagnostics() -> tuple[list[TopicItem], list[SourceReport]]:
     collected: list[TopicItem] = []
+    reports: list[SourceReport] = []
     headers = {"User-Agent": "Mozilla/5.0 (compatible; simplify-ai-autopilot/1.0; +https://t.me/simplify_ai)"}
     grouped = [(OFFICIAL_AI_RSS, "official_ai", 8), (TECH_MEDIA_RSS, "tech_media", 8), (RU_TECH_RSS, "ru_tech", 8), (TOOLS_RSS, "tools", 8), (COMMUNITY_RSS, "community", 5)]
     custom = parse_custom_topic_feeds(os.getenv("CUSTOM_TOPIC_FEEDS"))
@@ -126,19 +142,25 @@ def collect_topics() -> list[TopicItem]:
             try:
                 response = requests.get(rss_url, timeout=12, headers=headers)
                 response.raise_for_status()
-                collected.extend(_parse_rss(response.text, source_name, group, max_items=limit))
-            except Exception:
-                continue
+                parsed = _parse_rss(response.text, source_name, group, max_items=limit)
+                collected.extend(parsed)
+                reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="ok" if parsed else "empty", item_count=len(parsed)))
+            except Exception as exc:
+                reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="error", error=str(exc)[:160]))
 
     for source_name, group, rss_url in custom:
         try:
             response = requests.get(rss_url, timeout=12, headers=headers)
             response.raise_for_status()
-            collected.extend(_parse_rss(response.text, source_name, group, max_items=8))
-        except Exception:
-            continue
+            parsed = _parse_rss(response.text, source_name, group, max_items=8)
+            collected.extend(parsed)
+            reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="ok" if parsed else "empty", item_count=len(parsed)))
+        except Exception as exc:
+            reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="error", error=str(exc)[:160]))
     try:
-        collected.extend(_fetch_github_trending_ai())
-    except Exception:
-        pass
-    return collected
+        github_items = _fetch_github_trending_ai()
+        collected.extend(github_items)
+        reports.append(SourceReport(name="GitHub Trending AI", url="https://github.com/trending", source_group="github", status="ok" if github_items else "empty", item_count=len(github_items)))
+    except Exception as exc:
+        reports.append(SourceReport(name="GitHub Trending AI", url="https://github.com/trending", source_group="github", status="error", error=str(exc)[:160]))
+    return collected, reports
