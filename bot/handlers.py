@@ -17,7 +17,6 @@ from bot.media_utils import decode_media_items, encode_media_group, media_count
 from bot.publisher import publish_to_channel
 from bot.telegram_formatting import strip_quote_markers
 from bot.sources import SourceReport, collect_topics, collect_topics_with_diagnostics
-from bot.style_guide import SIMPLIFY_AI_STYLE_GUIDE
 from bot.writer import (
     EmptyAIResponseError,
     GenerationResult,
@@ -469,7 +468,6 @@ def _queue_keyboard(day_offset: int, draft_ids: list[int]) -> InlineKeyboardMark
 
 
 def _render_queue_text(db: DraftDatabase, settings, day_offset: int) -> str:
-    _clear_pending_plan_schedule(context)
     day_name = "сегодня" if day_offset == 0 else "завтра"
     start_local, end_local = _get_day_range(day_offset, settings.schedule_timezone)
     start_utc = start_local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
@@ -1845,7 +1843,8 @@ async def style_guide_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         "- обязательно практический смысл и короткий человеческий финал\n"
         "- без 'не про..., а про...', без эм-даша и без выдуманных фактов"
     )
-    await update.message.reply_text(summary)
+    if update.message:
+        await update.message.reply_text(summary)
 
 
 async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
