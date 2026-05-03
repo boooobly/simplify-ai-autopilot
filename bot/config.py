@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import re
 
 from dotenv import load_dotenv
 
@@ -32,6 +33,7 @@ class Settings:
     openrouter_output_cost_per_1m: float = 0.0
     openai_input_cost_per_1m: float = 0.0
     openai_output_cost_per_1m: float = 0.0
+    daily_post_slots: list[str] = field(default_factory=lambda: ["10:00", "14:00", "18:00", "21:00"])
 
     @property
     def has_ai_provider(self) -> bool:
@@ -58,6 +60,17 @@ def _parse_float_env(name: str, default: float) -> float:
         return default
 
 
+
+def _parse_daily_post_slots(raw: str) -> list[str]:
+    default_slots = ["10:00", "14:00", "18:00", "21:00"]
+    slot_re = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+    slots: list[str] = []
+    for part in raw.split(","):
+        value = part.strip()
+        if value and slot_re.match(value):
+            slots.append(value)
+    return slots or default_slots
+
 def load_settings() -> Settings:
     """Load and validate all required environment variables."""
 
@@ -79,6 +92,8 @@ def load_settings() -> Settings:
     openrouter_output_cost_per_1m = _parse_float_env("OPENROUTER_OUTPUT_COST_PER_1M", 0.0)
     openai_input_cost_per_1m = _parse_float_env("OPENAI_INPUT_COST_PER_1M", 0.0)
     openai_output_cost_per_1m = _parse_float_env("OPENAI_OUTPUT_COST_PER_1M", 0.0)
+    daily_post_slots_raw = os.getenv("DAILY_POST_SLOTS", "10:00,14:00,18:00,21:00")
+    daily_post_slots = _parse_daily_post_slots(daily_post_slots_raw)
 
     post_max_chars = _parse_int_env("POST_MAX_CHARS", 1400)
     post_soft_chars = _parse_int_env("POST_SOFT_CHARS", 1100)
@@ -125,4 +140,5 @@ def load_settings() -> Settings:
         openrouter_output_cost_per_1m=openrouter_output_cost_per_1m,
         openai_input_cost_per_1m=openai_input_cost_per_1m,
         openai_output_cost_per_1m=openai_output_cost_per_1m,
+        daily_post_slots=daily_post_slots,
     )

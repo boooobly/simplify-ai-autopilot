@@ -185,6 +185,34 @@ class DraftDatabase:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def list_scheduled_drafts_between(self, start_iso: str, end_iso: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM drafts
+                WHERE status = 'scheduled'
+                  AND scheduled_at IS NOT NULL
+                  AND scheduled_at >= ?
+                  AND scheduled_at < ?
+                ORDER BY scheduled_at ASC
+                """,
+                (start_iso, end_iso),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def unschedule_draft(self, draft_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE drafts
+                SET status = 'draft', scheduled_at = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (draft_id,),
+            )
+            conn.commit()
+
 
     def list_drafts(self, limit: int = 10, status: str | None = None) -> list[dict[str, Any]]:
         with self._connect() as conn:
