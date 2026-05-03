@@ -2648,23 +2648,32 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
 
-    content = generation_result.content
-    if not content.strip():
+    try:
+        content = generation_result.content
+        if not content.strip():
+            await update.message.reply_text(EMPTY_AI_REPLY_TEXT)
+            return
+        draft_id = db.create_draft(content, source_url=source_url)
+        estimated_cost = estimate_ai_cost(provider, generation_result.prompt_tokens, generation_result.completion_tokens, settings)
+        db.record_ai_usage(
+            provider=provider, model=generation_result.model or settings.model_draft, operation=operation,
+            prompt_tokens=generation_result.prompt_tokens, completion_tokens=generation_result.completion_tokens,
+            total_tokens=generation_result.total_tokens, estimated_cost_usd=estimated_cost, source_url=source_url, draft_id=draft_id
+        )
+        logger.info("AI usage provider=%s model=%s operation=%s prompt=%s completion=%s total=%s cost=%s", provider, generation_result.model or settings.model_draft, operation, generation_result.prompt_tokens, generation_result.completion_tokens, generation_result.total_tokens, estimated_cost)
+        await _send_moderation_preview(context, settings.admin_id, draft_id, content, source_url)
+        await update.message.reply_text(f"Черновик #{draft_id} создан и отправлен на модерацию.")
+        if used_fallback:
+            logger.info(
+                "Draft created with fallback model: draft_id=%s source_url=%s",
+                draft_id,
+                source_url,
+            )
+    except EmptyAIResponseError:
         await update.message.reply_text(EMPTY_AI_REPLY_TEXT)
-        return
-    draft_id = db.create_draft(content, source_url=source_url)
-    estimated_cost = estimate_ai_cost(provider, generation_result.prompt_tokens, generation_result.completion_tokens, settings)
-    db.record_ai_usage(
-        provider=provider, model=generation_result.model or settings.model_draft, operation=operation,
-        prompt_tokens=generation_result.prompt_tokens, completion_tokens=generation_result.completion_tokens,
-        total_tokens=generation_result.total_tokens, estimated_cost_usd=estimated_cost, source_url=source_url, draft_id=draft_id
-    )
-    logger.info("AI usage provider=%s model=%s operation=%s prompt=%s completion=%s total=%s cost=%s", provider, generation_result.model or settings.model_draft, operation, generation_result.prompt_tokens, generation_result.completion_tokens, generation_result.total_tokens, estimated_cost)
-    await _send_moderation_preview(context, settings.admin_id, draft_id, content, source_url)
-    await update.message.reply_text(f"Черновик #{draft_id} создан и отправлен на модерацию.")
-    if used_fallback:
-        logger.info(
-            "Draft created with fallback model: draft_id=%s source_url=%s",
-            draft_id,
-            source_url,
+    except Exception:
+        logger.exception("Failed to finalize URL draft creation for %s", source_url)
+        await update.message.reply_text(
+            "Не удалось создать черновик. Ошибка записана в логи.",
+            reply_markup=_admin_reply_keyboard(),
         )
