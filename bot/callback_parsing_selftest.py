@@ -1,9 +1,11 @@
-from bot.handlers import _parse_callback_data
+from bot.handlers import _parse_callback_data, _status_guard_message
 
 
 def run() -> None:
     assert _parse_callback_data("schedule_slot:23:18:00") == ("schedule_slot", 23, "18:00")
     assert _parse_callback_data("schedule:23") == ("schedule", 23, None)
+    assert _status_guard_message("schedule", "published") == "Опубликованный черновик уже нельзя планировать."
+    assert _status_guard_message("schedule", "rejected") == "Отклонённый черновик нельзя планировать."
 
 
 if __name__ == "__main__":

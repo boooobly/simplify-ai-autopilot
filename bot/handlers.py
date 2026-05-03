@@ -131,7 +131,11 @@ def _status_guard_message(action: str, status: str | None) -> str:
     if status == "published":
         if action == "publish":
             return "Этот черновик уже опубликован."
+        if action == "schedule":
+            return "Опубликованный черновик уже нельзя планировать."
         return "Опубликованный черновик уже нельзя менять."
+    if status == "rejected" and action == "schedule":
+        return "Отклонённый черновик нельзя планировать."
     if status == "rejected" and action == "publish":
         return "Этот черновик отклонён. Сначала создай новый или восстанови его позже."
     if status == "scheduled" and action == "edit":
@@ -811,6 +815,13 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             draft_for_slot = db.get_draft(draft_id)
             if not draft_for_slot:
                 await _edit_callback_message(query, f"Черновик #{draft_id} не найден.")
+                return
+            slot_status = str(draft_for_slot.get("status") or "")
+            if slot_status not in {"draft", "approved", "scheduled"}:
+                await _edit_callback_message(
+                    query,
+                    _status_guard_message("schedule", slot_status),
+                )
                 return
             tz = ZoneInfo(settings.schedule_timezone)
             now_local = datetime.now(tz)
