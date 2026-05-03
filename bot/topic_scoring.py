@@ -49,6 +49,10 @@ def score_topic(title: str, source: str, url: str, source_group: str = "other") 
         score += 20
         category = "mobile"
         reason_parts.append("мобильный/расширение")
+    elif any(k in text for k in ["tool", "service", "website", "platform", "api", "plugin", "extension", "app"]) and not any(k in text for k in ["ios", "android", "mobile"]):
+        score += 18
+        category = "tool"
+        reason_parts.append("инструмент")
     elif any(k in text for k in ["meme", "weird", "strange", "tiny", "bizarre", "странн", "необычн"]):
         score += 18
         category = "meme"
@@ -66,27 +70,37 @@ def score_topic(title: str, source: str, url: str, source_group: str = "other") 
         category = "model"
         reason_parts.append("модель")
 
-    if any(k in text for k in ["free", "бесплатн", "course", "курс", "guide", "tutorial", "prompt", "github", "open source"]):
-        score += 30
+    if any(k in text for k in ["free", "бесплатн"]):
+        score += 20
+        reason_parts.append("бесплатно")
+    if any(k in text for k in ["github", "open source", "open-source"]):
+        score += 18
+        reason_parts.append("open-source/GitHub")
+    if any(k in text for k in ["course", "курс", "guide", "tutorial", "prompt"]):
+        score += 12
     if any(k in text for k in ["fail", "bug", "drama", "ban", "leak", "privacy", "data", "lawsuit", "hack", "слеж", "утеч", "бан", "баг"]):
         score += 25
+        reason_parts.append("приватность/данные")
     if any(k in text for k in ["app", "ios", "android", "chrome extension", "browser extension"]):
         score += 25
     if any(k in text for k in ["image", "video", "voice", "avatar", "music", "design", "editor"]):
         score += 25
+        reason_parts.append("картинки/видео/голос")
     if any(k in text for k in ["reddit", "x.com", "twitter", "tiktok", "product hunt"]):
         score += 20
+        reason_parts.append("соцсети/вирусность")
     if any(k in text for k in ["weird", "strange", "tiny", "unusual", "bizarre", "странн", "необычн"]):
         score += 15
 
     if any(k in text for k in ["funding", "raises", "partnership", "enterprise", "earnings", "quarterly", "acquisition"]):
         score -= 25
         category = "business"
-        reason_parts.append("сухая корп-тема")
+        reason_parts.append("штраф: сухая корп-тема")
     if any(k in text for k in ["policy", "regulation"]) and not any(k in text for k in ["privacy", "drama", "leak", "lawsuit", "утеч"]):
         score -= 20
-    if any(k in text for k in ["announces", "announcement", "press release", "officially announced"]):
-        score -= 15
+    if any(k in text for k in ["release", "launch", "announced", "announces", "announcement", "press release", "officially announced"]) and category == "other":
+        category = "news"
+        reason_parts.append("новость/релиз")
 
     if len(title) > 130:
         score -= 10

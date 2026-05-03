@@ -19,6 +19,13 @@ def run() -> None:
         assert draft is not None
         assert draft["status"] == "published"
 
+        r1 = db.upsert_topic_candidate_with_reason("T1", "https://a", "S", None, "news", 50, "r", "same title", "other")
+        assert r1 == "inserted"
+        r2 = db.upsert_topic_candidate_with_reason("T2", "https://a", "S", None, "news", 55, "r", "other title", "other")
+        assert r2 == "existing_url"
+        r3 = db.upsert_topic_candidate_with_reason("T3", "https://b", "S", None, "news", 55, "r", "same title", "other")
+        assert r3 == "near_duplicate"
+
 
 if __name__ == "__main__":
     run()
