@@ -299,7 +299,8 @@ class DraftDatabase:
             cursor = conn.execute("DELETE FROM drafts WHERE id = ?", (draft_id,))
             conn.commit()
             return cursor.rowcount > 0
-    def upsert_topic_candidate(
+
+    def upsert_topic_candidate_with_reason(
         self,
         title: str,
         url: str,
@@ -310,7 +311,7 @@ class DraftDatabase:
         reason: str,
         normalized_title: str,
         source_group: str = "other",
-    ) -> bool:
+    ) -> str:
         with self._connect() as conn:
             existing = conn.execute(
                 "SELECT id, category, score, reason FROM topic_candidates WHERE url = ?",
@@ -331,7 +332,7 @@ class DraftDatabase:
                     (category, score, reason, normalized_title, source_group, int(existing["id"])),
                 )
                 conn.commit()
-                return False
+                return "existing_url"
             near_duplicate = conn.execute(
                 """
                 SELECT id FROM topic_candidates
@@ -342,7 +343,7 @@ class DraftDatabase:
                 (normalized_title,),
             ).fetchone()
             if near_duplicate:
-                return False
+                return "near_duplicate"
             cursor = conn.execute(
                 """
                 INSERT INTO topic_candidates (
@@ -353,8 +354,25 @@ class DraftDatabase:
                 (title, url, source, published_at, category, score, reason, normalized_title, source_group),
             )
             conn.commit()
-            return cursor.rowcount > 0
+            return "inserted" if cursor.rowcount > 0 else "existing_url"
 
+
+
+    def upsert_topic_candidate(
+        self,
+        title: str,
+        url: str,
+        source: str,
+        published_at: str | None,
+        category: str,
+        score: int,
+        reason: str,
+        normalized_title: str,
+        source_group: str = "other",
+    ) -> bool:
+        return self.upsert_topic_candidate_with_reason(
+            title, url, source, published_at, category, score, reason, normalized_title, source_group
+        ) == "inserted"
     def create_topic_candidate(self, title: str, url: str, source: str, published_at: str | None, source_group: str = "other") -> bool:
         return self.upsert_topic_candidate(
             title=title,
@@ -419,6 +437,21 @@ class DraftDatabase:
             rows = conn.execute(
                 "SELECT * FROM topic_candidates " + where_clause + " ORDER BY score DESC, created_at DESC LIMIT ?",
                 tuple(params),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+
+    def list_topic_candidates_min_score(self, limit: int = 15, status: str = "new", min_score: int = 75) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM topic_candidates
+                WHERE status = ? AND score >= ?
+                ORDER BY score DESC, created_at DESC
+                LIMIT ?
+                """,
+                (status, min_score, limit),
             ).fetchall()
             return [dict(row) for row in rows]
     def get_topic_candidate(self, topic_id: int) -> dict[str, Any] | None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -34,6 +35,74 @@ ACTIONABLE_DRAFT_STATUSES = {"draft", "approved"}
 TELEGRAM_CAPTION_LIMIT = 1024
 SHORT_MEDIA_PREVIEW_LIMIT = 850
 EMPTY_AI_REPLY_TEXT = "Модель вернула пустой ответ. Черновик не создан. Попробуй ещё раз или смени MODEL_DRAFT."
+
+
+CATEGORY_LABELS = {
+    "news": "Новости",
+    "tool": "Инструменты",
+    "agent": "Агенты",
+    "model": "Модели",
+    "dev": "Разработка",
+    "creator": "Видео/картинки",
+    "mobile": "Приложения",
+    "drama": "Фейлы/скандалы",
+    "meme": "Мемное",
+    "guide": "Гайды/курсы",
+    "privacy": "Приватность",
+    "research": "Исследования",
+    "business": "Бизнес",
+    "other": "Другое",
+}
+
+SOURCE_GROUP_LABELS = {
+    "official_ai": "Официальные AI-блоги",
+    "tech_media": "Техно-медиа",
+    "ru_tech": "Русские медиа",
+    "tools": "Инструменты",
+    "community": "Сообщества",
+    "github": "GitHub",
+    "custom": "Кастомные источники",
+    "other": "Другое",
+}
+
+
+@dataclass
+class TopicCollectStats:
+    total: int = 0
+    new: int = 0
+    existing: int = 0
+    near_duplicate: int = 0
+    low_score: int = 0
+    invalid: int = 0
+    spam: int = 0
+
+
+def _category_label(value: str | None) -> str:
+    return CATEGORY_LABELS.get((value or "other").strip().lower(), CATEGORY_LABELS["other"])
+
+
+def _source_group_label(value: str | None) -> str:
+    return SOURCE_GROUP_LABELS.get((value or "other").strip().lower(), SOURCE_GROUP_LABELS["other"])
+
+
+def _score_label(score: int) -> str:
+    if score >= 85:
+        return "очень высокий"
+    if score >= 70:
+        return "высокий"
+    if score >= 50:
+        return "средний"
+    return "низкий"
+
+
+def _parse_topic_limit(context: ContextTypes.DEFAULT_TYPE, default: int, max_limit: int = 30) -> int:
+    if not context.args:
+        return default
+    try:
+        value = int(context.args[0])
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(max_limit, value))
 
 
 def estimate_ai_cost(provider: str, prompt_tokens: int, completion_tokens: int, settings) -> float:
@@ -82,10 +151,12 @@ def _disabled_link_preview_options() -> LinkPreviewOptions:
 
 
 def _topic_card_text(topic: dict) -> str:
+    score = int(topic.get("score") or 0)
     return (
-        f"🧠 Тема #{topic['id']} - {topic.get('score', 0)} - {topic.get('category') or 'other'}\n"
+        f"🧠 Тема #{topic['id']} - {score} - {_category_label(topic.get('category'))}\n"
+        f"Вес: {_score_label(score)}\n"
         f"{topic['title']}\n"
-        f"Источник: {topic['source']} / {topic.get('source_group') or 'other'}\n"
+        f"Источник: {topic['source']} / {_source_group_label(topic.get('source_group'))}\n"
         f"Почему: {topic.get('reason') or 'без пояснения'}\n"
         f"URL: {topic['url']}"
     )
@@ -1067,6 +1138,60 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
             )
 
 
+
+
+def _collect_topics_with_stats(db: DraftDatabase) -> tuple[TopicCollectStats, list, list]:
+    items = collect_topics()
+    stats = TopicCollectStats(total=len(items))
+    inserted = []
+    spam_words = ["casino", "porn", "xxx", "bet", "viagra"]
+    for item in items:
+        if len(item.title.strip()) < 8 or not item.url.strip() or not item.normalized_title.strip():
+            stats.invalid += 1
+            continue
+        if any(w in item.title.lower() for w in spam_words):
+            stats.spam += 1
+            continue
+        if item.score < 20 and item.source_group != "custom":
+            stats.low_score += 1
+            continue
+        result = db.upsert_topic_candidate_with_reason(
+            item.title, item.url, item.source, item.published_at, item.category, item.score, item.reason, item.normalized_title, item.source_group
+        )
+        if result == "inserted":
+            stats.new += 1
+            inserted.append(item)
+        elif result == "existing_url":
+            stats.existing += 1
+        else:
+            stats.near_duplicate += 1
+    return stats, items, inserted
+
+
+def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list) -> str:
+    lines = [
+        "🧠 Темы собраны",
+        "",
+        f"Всего найдено: {stats.total}",
+        f"Новых: {stats.new}",
+        f"Уже были: {stats.existing}",
+        f"Дубли по смыслу: {stats.near_duplicate}",
+        f"Низкий вес: {stats.low_score}",
+        f"Мусор/спам: {stats.spam}",
+        f"Некорректные: {stats.invalid}",
+        "",
+    ]
+    if inserted:
+        top = sorted(inserted, key=lambda i: i.score, reverse=True)[:5]
+        lines.append("Лучшие новые:")
+        lines.extend([f"- {it.score} - {_category_label(it.category)} - {it.title[:70]}" for it in top])
+    else:
+        lines.append("Новых сильных тем нет. Посмотри старые через /topics_all или добавь источники в CUSTOM_TOPIC_FEEDS.")
+    lively = [i for i in sorted(items, key=lambda i: i.score, reverse=True) if i.source_group in {"community","github","tools","custom"} or i.category in {"drama","meme","guide","creator"}][:5]
+    lines.extend(["", "Живые темы:"])
+    lines.extend([f"- {it.score} - {_source_group_label(it.source_group)} - {it.title[:70]}" for it in lively])
+    return "\n".join(lines)
+
 async def collect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = context.bot_data["settings"]
     db: DraftDatabase = context.bot_data["db"]
@@ -1079,35 +1204,10 @@ async def collect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if update.message:
         await update.message.reply_text("Собираю свежие AI-темы из источников...")
 
-    items = collect_topics()
-    added = 0
-    skipped = 0
-    spam_words = ["casino", "porn", "xxx", "bet", "viagra"]
-    for item in items:
-        if len(item.title.strip()) < 8 or not item.url.strip() or not item.normalized_title.strip():
-            skipped += 1
-            continue
-        if any(w in item.title.lower() for w in spam_words):
-            skipped += 1
-            continue
-        if item.score < 20 and item.source_group != "custom":
-            skipped += 1
-            continue
-        if db.upsert_topic_candidate(
-            item.title, item.url, item.source, item.published_at, item.category, item.score, item.reason, item.normalized_title, item.source_group
-        ):
-            added += 1
-        else:
-            skipped += 1
+    stats, items, inserted = _collect_topics_with_stats(db)
 
     if update.message:
-        top = sorted(items, key=lambda i: i.score, reverse=True)[:5]
-        lines = ["🧠 Темы собраны", "", f"Новых: {added}", f"Обновлено/пропущено: {skipped}", "", "Лучшие:"]
-        lines.extend([f"- {it.score} - {it.category} - {it.title[:70]}" for it in top])
-        lively = [i for i in sorted(items, key=lambda i: i.score, reverse=True) if i.source_group in {"community","github","tools","custom"} or i.category in {"drama","meme","guide","creator"}][:5]
-        lines.extend(["", "Живые темы:"])
-        lines.extend([f"- {it.score} - {it.source_group} - {it.title[:70]}" for it in lively])
-        await update.message.reply_text("\n".join(lines))
+        await update.message.reply_text(_render_collect_text(stats, items, inserted))
 
 
 async def topics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1119,7 +1219,8 @@ async def topics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text("Нет доступа.")
         return
 
-    topics = db.list_topic_candidates(limit=10, status="new", order_by_score=True)
+    limit = _parse_topic_limit(context, default=10)
+    topics = db.list_topic_candidates(limit=limit, status="new", order_by_score=True)
     if not topics:
         if update.message:
             await update.message.reply_text("Пока нет тем. Запусти /collect")
@@ -1134,6 +1235,9 @@ async def topics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             reply_markup=keyboard,
             link_preview_options=_disabled_link_preview_options(),
         )
+    if update.message:
+        next_limit = min(30, max(limit + 10, 20))
+        await update.message.reply_text(f"Показал {len(topics)} тем. Можно открыть больше: /topics {next_limit}")
 
 
 async def topics_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1161,11 +1265,11 @@ async def topics_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def topics_tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _topics_filtered_command(update, context, categories=["tool", "creator", "guide", "dev", "mobile"])
+    await _topics_filtered_command(update, context, categories=["tool", "creator", "guide", "dev", "mobile"], command_name="topics_tools")
 
 
 async def topics_news_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _topics_filtered_command(update, context, categories=["news", "model", "agent", "research", "business", "privacy"])
+    await _topics_filtered_command(update, context, categories=["news", "model", "agent", "research", "business", "privacy"], command_name="topics_news")
 
 
 async def topics_fun_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1189,7 +1293,8 @@ async def _topics_fun_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         topic_id = int(topic["id"])
         merged[topic_id] = topic
 
-    topics = sorted(merged.values(), key=lambda t: (int(t.get("score") or 0), str(t.get("created_at") or "")), reverse=True)[:10]
+    limit = _parse_topic_limit(context, default=10)
+    topics = sorted(merged.values(), key=lambda t: (int(t.get("score") or 0), str(t.get("created_at") or "")), reverse=True)[:limit]
     if not topics:
         if update.message:
             await update.message.reply_text("По фильтру пока нет тем. Запусти /collect")
@@ -1202,9 +1307,12 @@ async def _topics_fun_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=_topic_actions_keyboard(int(topic["id"])),
             link_preview_options=_disabled_link_preview_options(),
         )
+    if update.message:
+        next_limit = min(30, max(limit + 10, 20))
+        await update.message.reply_text(f"Показал {len(topics)} тем. Можно открыть больше: /topics_fun {next_limit}")
 
 
-async def _topics_filtered_command(update: Update, context: ContextTypes.DEFAULT_TYPE, categories=None, source_groups=None) -> None:
+async def _topics_filtered_command(update: Update, context: ContextTypes.DEFAULT_TYPE, categories=None, source_groups=None, command_name: str = "topics") -> None:
     settings = context.bot_data["settings"]
     db: DraftDatabase = context.bot_data["db"]
     user_id = update.effective_user.id if update.effective_user else None
@@ -1212,7 +1320,8 @@ async def _topics_filtered_command(update: Update, context: ContextTypes.DEFAULT
         if update.message:
             await update.message.reply_text("Нет доступа.")
         return
-    topics = db.list_topic_candidates_filtered(limit=10, status="new", categories=categories, source_groups=source_groups)
+    limit = _parse_topic_limit(context, default=10)
+    topics = db.list_topic_candidates_filtered(limit=limit, status="new", categories=categories, source_groups=source_groups)
     if not topics:
         if update.message:
             await update.message.reply_text("По фильтру пока нет тем. Запусти /collect")
@@ -1224,6 +1333,30 @@ async def _topics_filtered_command(update: Update, context: ContextTypes.DEFAULT
             reply_markup=_topic_actions_keyboard(int(topic["id"])),
             link_preview_options=_disabled_link_preview_options(),
         )
+    if update.message:
+        next_limit = min(30, max(limit + 10, 20))
+        await update.message.reply_text(f"Показал {len(topics)} тем. Можно открыть больше: /{command_name} {next_limit}")
+
+
+async def topics_hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_admin(user_id, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+    limit = _parse_topic_limit(context, default=15)
+    topics = db.list_topic_candidates_min_score(limit=limit, status="new", min_score=75)
+    if not topics:
+        if update.message:
+            await update.message.reply_text("Горячих тем пока нет. Запусти /collect")
+        return
+    for topic in topics:
+        await context.bot.send_message(chat_id=settings.admin_id, text=_topic_card_text(topic), reply_markup=_topic_actions_keyboard(int(topic["id"])), link_preview_options=_disabled_link_preview_options())
+    if update.message:
+        await update.message.reply_text(f"Показал {len(topics)} тем. Можно открыть больше: /topics_hot 30")
+
 async def _usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE, days: int, period_title: str) -> None:
     settings = context.bot_data["settings"]
     db: DraftDatabase = context.bot_data["db"]
@@ -1757,23 +1890,15 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
         )
         await _edit_callback_message(query, "Что сделать с темами?", reply_markup=keyboard)
     elif data == "menu_collect":
-        items = collect_topics()
-        added = 0
-        skipped = 0
-        for item in items:
-            if db.upsert_topic_candidate(
-                item.title, item.url, item.source, item.published_at, item.category, item.score, item.reason, item.normalized_title, item.source_group
-            ):
-                added += 1
-            else:
-                skipped += 1
+        stats, items, inserted = _collect_topics_with_stats(db)
         await _edit_callback_message(
             query,
-            f"🧠 Темы собраны\n\nНовых: {added}\nОбновлено/пропущено: {skipped}",
+            _render_collect_text(stats, items, inserted),
             reply_markup=_back_to_menu_keyboard(),
         )
     elif data == "menu_show_topics":
-        topics = db.list_topic_candidates(limit=10, status="new", order_by_score=True)
+        limit = _parse_topic_limit(context, default=10)
+        topics = db.list_topic_candidates(limit=limit, status="new", order_by_score=True)
         if not topics:
             await _edit_callback_message(query, "Пока нет тем. Запусти /collect", reply_markup=_back_to_menu_keyboard())
             return
@@ -1810,6 +1935,10 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             "/generate <ссылка> - пост из ссылки\n"
             "/drafts - последние черновики\n"
             "/topics - найденные темы\n"
+            "/topics_tools - инструменты и гайды\n"
+            "/topics_news - новости и модели\n"
+            "/topics_fun - живые/мемные темы\n"
+            "/topics_hot - самые сильные темы\n"
             "/topics_all - последние темы (все статусы)\n"
             "/queue_today - план публикаций на сегодня\n"
             "/queue_tomorrow - план публикаций на завтра\n"
