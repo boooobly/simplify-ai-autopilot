@@ -14,6 +14,7 @@ from bot.drafts import create_test_draft, rewrite_test_draft
 from bot.publisher import publish_to_channel
 from bot.sources import collect_topics
 from bot.writer import (
+    EmptyAIResponseError,
     fetch_page_content,
     find_first_url,
     generate_post_draft,
@@ -28,6 +29,7 @@ ALLOWED_DRAFT_STATUSES = {"draft", "approved", "scheduled", "published", "reject
 ACTIONABLE_DRAFT_STATUSES = {"draft", "approved"}
 TELEGRAM_CAPTION_LIMIT = 1024
 SHORT_MEDIA_PREVIEW_LIMIT = 850
+EMPTY_AI_REPLY_TEXT = "Модель вернула пустой ответ. Черновик не создан. Попробуй ещё раз или смени MODEL_DRAFT."
 
 
 def _is_admin(user_id: int | None, admin_id: int) -> bool:
@@ -174,6 +176,45 @@ def _extract_draft_id_from_text(message_text: str) -> int | None:
         else:
             break
     return int(digits) if digits else None
+
+
+async def _generate_url_draft_with_fallback(
+    *,
+    api_key: str,
+    settings,
+    source_url: str,
+    title: str,
+    page_text: str,
+    base_url: str | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> tuple[str, bool]:
+    try:
+        content = generate_post_draft_from_page(
+            api_key,
+            model=settings.model_draft,
+            source_url=source_url,
+            title=title,
+            page_text=page_text,
+            base_url=base_url,
+            extra_headers=extra_headers,
+        )
+        return content, False
+    except EmptyAIResponseError as exc:
+        logger.warning("Draft model returned empty content for URL %s: %s", source_url, exc)
+        fallback_model = (settings.model_polish or "").strip()
+        if fallback_model and fallback_model != settings.model_draft:
+            logger.warning("Trying fallback generation with MODEL_POLISH=%s", fallback_model)
+            content = generate_post_draft_from_page(
+                api_key,
+                model=fallback_model,
+                source_url=source_url,
+                title=title,
+                page_text=page_text,
+                base_url=base_url,
+                extra_headers=extra_headers,
+            )
+            return content, True
+        raise
 
 
 
@@ -421,9 +462,9 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             if update.message:
                 await update.message.reply_text("Нашёл ссылку. Читаю страницу и готовлю черновик...")
             title, page_text = fetch_page_content(source_url)
-            content = generate_post_draft_from_page(
-                api_key,
-                model=settings.model_draft,
+            content, used_fallback = await _generate_url_draft_with_fallback(
+                api_key=api_key,
+                settings=settings,
                 source_url=source_url,
                 title=title,
                 page_text=page_text,
@@ -440,6 +481,11 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 base_url=base_url,
                 extra_headers=extra_headers,
             )
+            used_fallback = False
+    except EmptyAIResponseError:
+        if update.message:
+            await update.message.reply_text(EMPTY_AI_REPLY_TEXT)
+        return
     except Exception as exc:
         logger.exception("Error during generation: %s", exc)
         if update.message:
@@ -451,11 +497,19 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 await update.message.reply_text("Не удалось сгенерировать черновик. Попробуй ещё раз.")
         return
 
+    if not content.strip():
+        if update.message:
+            await update.message.reply_text(EMPTY_AI_REPLY_TEXT)
+        return
     draft_id = db.create_draft(content, source_url=source_url)
     await _send_moderation_preview(context, settings.admin_id, draft_id, content, source_url)
 
     if update.message:
         await update.message.reply_text(f"Черновик #{draft_id} создан и отправлен на модерацию.")
+        if source_url and used_fallback:
+            await update.message.reply_text(
+                "Черновик создан через fallback-модель, потому что draft-модель вернула пустой ответ."
+            )
 
 
 async def collect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -644,18 +698,25 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
             logger.info("topic_generate provider=%s model=%s", provider, settings.model_draft)
             title, page_text = fetch_page_content(topic["url"])
-            content = generate_post_draft_from_page(
-                api_key,
-                model=settings.model_draft,
+            content, used_fallback = await _generate_url_draft_with_fallback(
+                api_key=api_key,
+                settings=settings,
                 source_url=topic["url"],
                 title=title,
                 page_text=page_text,
                 base_url=base_url,
                 extra_headers=extra_headers,
             )
+            if not content.strip():
+                await _edit_callback_message(query, EMPTY_AI_REPLY_TEXT)
+                return
             new_draft_id = db.create_draft(content, source_url=topic["url"])
             await _send_moderation_preview(context, settings.admin_id, new_draft_id, content, topic["url"])
             await _edit_callback_message(query, f"Создан черновик #{new_draft_id} из темы #{topic['id']}.")
+            if used_fallback and query.message:
+                await query.message.reply_text(
+                    "Черновик создан через fallback-модель, потому что draft-модель вернула пустой ответ."
+                )
 
         else:
             await _edit_callback_message(query, "Неизвестное действие.")
@@ -731,9 +792,18 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         title, page_text = fetch_page_content(source_url)
         api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
         logger.info("url_generate provider=%s model=%s", provider, settings.model_draft)
-        content = generate_post_draft_from_page(
-            api_key, model=settings.model_draft, source_url=source_url, title=title, page_text=page_text, base_url=base_url, extra_headers=extra_headers
+        content, used_fallback = await _generate_url_draft_with_fallback(
+            api_key=api_key,
+            settings=settings,
+            source_url=source_url,
+            title=title,
+            page_text=page_text,
+            base_url=base_url,
+            extra_headers=extra_headers,
         )
+    except EmptyAIResponseError:
+        await update.message.reply_text(EMPTY_AI_REPLY_TEXT)
+        return
     except Exception as exc:
         logger.exception("Failed to process URL %s: %s", source_url, exc)
         await update.message.reply_text(
@@ -741,6 +811,13 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
 
+    if not content.strip():
+        await update.message.reply_text(EMPTY_AI_REPLY_TEXT)
+        return
     draft_id = db.create_draft(content, source_url=source_url)
     await _send_moderation_preview(context, settings.admin_id, draft_id, content, source_url)
     await update.message.reply_text(f"Черновик #{draft_id} готов и отправлен на модерацию.")
+    if used_fallback:
+        await update.message.reply_text(
+            "Черновик создан через fallback-модель, потому что draft-модель вернула пустой ответ."
+        )
