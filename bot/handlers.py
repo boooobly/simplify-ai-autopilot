@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Update
@@ -287,6 +287,22 @@ def _main_menu_text() -> str:
     return "🤖 Simplify AI Autopilot\n\nВыбери действие:"
 
 
+
+
+def _clear_pending_plan_schedule(context) -> None:
+    context.user_data.pop("pending_plan_schedule_day", None)
+    context.user_data.pop("pending_plan_schedule_items", None)
+
+
+def _generated_plan_keyboard(day_offset: int, has_created: bool) -> InlineKeyboardMarkup | None:
+    queue_callback = "queue_today:0" if day_offset == 0 else "queue_tomorrow:0"
+    schedule_callback = "menu_schedule_generated_plan_day" if day_offset == 0 else "menu_schedule_generated_plan_tomorrow"
+    rows: list[list[InlineKeyboardButton]] = []
+    if has_created:
+        rows.append([InlineKeyboardButton("📅 Поставить созданные в очередь", callback_data=schedule_callback)])
+    rows.append([InlineKeyboardButton("📅 Открыть очередь", callback_data=queue_callback)])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")])
+    return InlineKeyboardMarkup(rows) if rows else None
 def _main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -452,6 +468,7 @@ def _queue_keyboard(day_offset: int, draft_ids: list[int]) -> InlineKeyboardMark
 
 
 def _render_queue_text(db: DraftDatabase, settings, day_offset: int) -> str:
+    _clear_pending_plan_schedule(context)
     day_name = "сегодня" if day_offset == 0 else "завтра"
     start_local, end_local = _get_day_range(day_offset, settings.schedule_timezone)
     start_utc = start_local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
@@ -1093,6 +1110,7 @@ async def _generate_drafts_from_plan(
     db: DraftDatabase,
     day_offset: int,
 ) -> str:
+    _clear_pending_plan_schedule(context)
     day_name = "сегодня" if day_offset == 0 else "завтра"
     queue_hint = "/queue_today" if day_offset == 0 else "/queue_tomorrow"
     empty_slots = _empty_slots_for_day(db, settings, day_offset)
@@ -1104,6 +1122,7 @@ async def _generate_drafts_from_plan(
     seen_topic_ids: set[int] = set()
     ok_lines: list[str] = []
     error_lines: list[str] = []
+    pending_items: list[dict[str, int | str]] = []
     created_count = 0
     for slot, topic in zip(empty_slots, topics):
         topic_id = int(topic["id"])
@@ -1116,15 +1135,77 @@ async def _generate_drafts_from_plan(
         )
         if new_draft_id is not None:
             created_count += 1
+            pending_items.append({"slot": slot, "draft_id": new_draft_id, "topic_id": topic_id})
             ok_lines.append(f"{slot} - черновик #{new_draft_id} из темы #{topic_id}")
         else:
             error_lines.append(f"{slot} - тема #{topic_id}: {error or 'неизвестная ошибка'}")
+    if pending_items:
+        context.user_data["pending_plan_schedule_day"] = day_offset
+        context.user_data["pending_plan_schedule_items"] = pending_items
+    else:
+        context.user_data.pop("pending_plan_schedule_day", None)
+        context.user_data.pop("pending_plan_schedule_items", None)
+
     lines = ["🧩 Черновики из плана созданы", "", f"День: {day_name}", f"Создано: {created_count}", f"Ошибок: {len(error_lines)}", ""]
     if ok_lines:
         lines.extend(["Готово:", *ok_lines, ""])
     if error_lines:
         lines.extend(["Ошибки:", *error_lines, ""])
     lines.extend(["Дальше:", 'проверь черновики и поставь их в очередь через кнопки "🗓️ Запланировать".'])
+    return "\n".join(lines).rstrip()
+
+
+def _scheduled_at_for_slot(day_offset: int, slot: str, timezone_str: str) -> str:
+    start_local, _end_local = _get_day_range(day_offset, timezone_str)
+    slot_hour, slot_minute = slot.split(":", 1)
+    local_dt = start_local.replace(hour=int(slot_hour), minute=int(slot_minute), second=0, microsecond=0)
+    return local_dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+async def _schedule_generated_plan(*, context, settings, db, day_offset: int) -> str:
+    pending_day = context.user_data.get("pending_plan_schedule_day")
+    pending_items = context.user_data.get("pending_plan_schedule_items")
+    if pending_day != day_offset or not pending_items:
+        generate_hint = "/generate_plan_day" if day_offset == 0 else "/generate_plan_tomorrow"
+        return f"Нет свежего плана для постановки в очередь. Сначала запусти {generate_hint}"
+
+    day_name = "сегодня" if day_offset == 0 else "завтра"
+    queue_hint = "/queue_today" if day_offset == 0 else "/queue_tomorrow"
+    empty_slots = set(_empty_slots_for_day(db, settings, day_offset))
+    ok_lines: list[str] = []
+    error_lines: list[str] = []
+    scheduled_count = 0
+
+    for item in pending_items:
+        slot = str(item.get("slot") or "")
+        draft_id = int(item.get("draft_id"))
+        if slot not in empty_slots:
+            error_lines.append(f"{slot} - слот уже занят")
+            continue
+        draft = db.get_draft(draft_id)
+        if not draft:
+            error_lines.append(f"{slot} - черновик #{draft_id} не найден")
+            continue
+        status = str(draft.get("status") or "")
+        if status not in {"draft", "approved"}:
+            error_lines.append(f"{slot} - черновик #{draft_id} уже не черновик")
+            continue
+        scheduled_at_utc = _scheduled_at_for_slot(day_offset, slot, settings.schedule_timezone)
+        db.schedule_draft(draft_id, scheduled_at_utc)
+        empty_slots.remove(slot)
+        scheduled_count += 1
+        ok_lines.append(f"{slot} - черновик #{draft_id}")
+
+    if scheduled_count > 0:
+        context.user_data.pop("pending_plan_schedule_day", None)
+        context.user_data.pop("pending_plan_schedule_items", None)
+
+    lines = ["📅 Черновики поставлены в очередь", "", f"День: {day_name}", f"Запланировано: {scheduled_count}", f"Ошибок: {len(error_lines)}", ""]
+    if ok_lines:
+        lines.extend(["Готово:", *ok_lines, ""])
+    if error_lines:
+        lines.extend(["Ошибки:", *error_lines, ""])
+    lines.append(f"Проверь: {queue_hint}")
     return "\n".join(lines).rstrip()
 
 
@@ -1136,7 +1217,8 @@ async def generate_plan_day_command(update: Update, context: ContextTypes.DEFAUL
     if update.message:
         await update.message.reply_text("Создаю черновики из плана...")
         summary = await _generate_drafts_from_plan(context=context, settings=settings, db=db, day_offset=0)
-        await update.message.reply_text(summary)
+        has_created = bool(context.user_data.get("pending_plan_schedule_items")) and context.user_data.get("pending_plan_schedule_day") == 0
+        await update.message.reply_text(summary, reply_markup=_generated_plan_keyboard(0, has_created))
 
 
 async def generate_plan_tomorrow_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1147,6 +1229,27 @@ async def generate_plan_tomorrow_command(update: Update, context: ContextTypes.D
     if update.message:
         await update.message.reply_text("Создаю черновики из плана...")
         summary = await _generate_drafts_from_plan(context=context, settings=settings, db=db, day_offset=1)
+        has_created = bool(context.user_data.get("pending_plan_schedule_items")) and context.user_data.get("pending_plan_schedule_day") == 1
+        await update.message.reply_text(summary, reply_markup=_generated_plan_keyboard(1, has_created))
+
+
+async def schedule_generated_plan_day_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    if not _is_admin(update.effective_user.id if update.effective_user else None, settings.admin_id):
+        return
+    if update.message:
+        summary = await _schedule_generated_plan(context=context, settings=settings, db=db, day_offset=0)
+        await update.message.reply_text(summary)
+
+
+async def schedule_generated_plan_tomorrow_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    if not _is_admin(update.effective_user.id if update.effective_user else None, settings.admin_id):
+        return
+    if update.message:
+        summary = await _schedule_generated_plan(context=context, settings=settings, db=db, day_offset=1)
         await update.message.reply_text(summary)
 
 
@@ -2233,10 +2336,20 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
     elif data == "menu_generate_plan_day":
         await _edit_callback_message(query, "Создаю черновики...")
         summary = await _generate_drafts_from_plan(context=context, settings=settings, db=db, day_offset=0)
-        await context.bot.send_message(chat_id=settings.admin_id, text=summary)
+        has_created = bool(context.user_data.get("pending_plan_schedule_items")) and context.user_data.get("pending_plan_schedule_day") == 0
+        await context.bot.send_message(chat_id=settings.admin_id, text=summary, reply_markup=_generated_plan_keyboard(0, has_created))
     elif data == "menu_generate_plan_tomorrow":
         await _edit_callback_message(query, "Создаю черновики...")
         summary = await _generate_drafts_from_plan(context=context, settings=settings, db=db, day_offset=1)
+        has_created = bool(context.user_data.get("pending_plan_schedule_items")) and context.user_data.get("pending_plan_schedule_day") == 1
+        await context.bot.send_message(chat_id=settings.admin_id, text=summary, reply_markup=_generated_plan_keyboard(1, has_created))
+    elif data == "menu_schedule_generated_plan_day":
+        await _edit_callback_message(query, "Ставлю черновики в очередь...")
+        summary = await _schedule_generated_plan(context=context, settings=settings, db=db, day_offset=0)
+        await context.bot.send_message(chat_id=settings.admin_id, text=summary)
+    elif data == "menu_schedule_generated_plan_tomorrow":
+        await _edit_callback_message(query, "Ставлю черновики в очередь...")
+        summary = await _schedule_generated_plan(context=context, settings=settings, db=db, day_offset=1)
         await context.bot.send_message(chat_id=settings.admin_id, text=summary)
     elif data == "menu_settings":
         await _edit_callback_message(query, _settings_text(settings), reply_markup=_back_to_menu_keyboard())
@@ -2269,6 +2382,8 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             "/plan_tomorrow - подобрать темы на завтра\n"
             "/generate_plan_day - создать черновики из плана на сегодня\n"
             "/generate_plan_tomorrow - создать черновики из плана на завтра\n"
+            "/schedule_generated_plan_day - поставить созданные черновики в очередь на сегодня\n"
+            "/schedule_generated_plan_tomorrow - поставить созданные черновики в очередь на завтра\n"
             "/queue_today - план публикаций на сегодня\n"
             "/queue_tomorrow - план публикаций на завтра\n"
             "/failed_drafts - последние неудачные публикации\n"
