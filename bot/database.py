@@ -54,6 +54,11 @@ class DraftDatabase:
                 )
                 """
             )
+            self._ensure_column(conn, "topic_candidates", "category", "TEXT")
+            self._ensure_column(conn, "topic_candidates", "score", "INTEGER DEFAULT 0")
+            self._ensure_column(conn, "topic_candidates", "reason", "TEXT")
+            self._ensure_column(conn, "topic_candidates", "normalized_title", "TEXT")
+            self._ensure_column(conn, "topic_candidates", "last_seen_at", "TIMESTAMP")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ai_usage (
@@ -293,28 +298,92 @@ class DraftDatabase:
             cursor = conn.execute("DELETE FROM drafts WHERE id = ?", (draft_id,))
             conn.commit()
             return cursor.rowcount > 0
-    def create_topic_candidate(self, title: str, url: str, source: str, published_at: str | None) -> bool:
+    def upsert_topic_candidate(
+        self,
+        title: str,
+        url: str,
+        source: str,
+        published_at: str | None,
+        category: str,
+        score: int,
+        reason: str,
+        normalized_title: str,
+    ) -> bool:
         with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT id, category, score, reason FROM topic_candidates WHERE url = ?",
+                (url,),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE topic_candidates
+                    SET last_seen_at = CURRENT_TIMESTAMP,
+                        category = ?,
+                        score = ?,
+                        reason = ?,
+                        normalized_title = COALESCE(normalized_title, ?)
+                    WHERE id = ?
+                    """,
+                    (category, score, reason, normalized_title, int(existing["id"])),
+                )
+                conn.commit()
+                return False
+            near_duplicate = conn.execute(
+                """
+                SELECT id FROM topic_candidates
+                WHERE normalized_title = ?
+                  AND status != 'rejected'
+                LIMIT 1
+                """,
+                (normalized_title,),
+            ).fetchone()
+            if near_duplicate:
+                return False
             cursor = conn.execute(
                 """
-                INSERT OR IGNORE INTO topic_candidates (title, url, source, published_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO topic_candidates (
+                    title, url, source, published_at, status, category, score, reason, normalized_title, created_at, last_seen_at
+                )
+                VALUES (?, ?, ?, ?, 'new', ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """,
-                (title, url, source, published_at),
+                (title, url, source, published_at, category, score, reason, normalized_title),
             )
             conn.commit()
             return cursor.rowcount > 0
 
-    def list_topic_candidates(self, limit: int = 10) -> list[dict[str, Any]]:
+    def create_topic_candidate(self, title: str, url: str, source: str, published_at: str | None) -> bool:
+        return self.upsert_topic_candidate(
+            title=title,
+            url=url,
+            source=source,
+            published_at=published_at,
+            category="other",
+            score=0,
+            reason="Без оценки",
+            normalized_title=title.strip().lower(),
+        )
+
+    def list_topic_candidates(
+        self, limit: int = 10, status: str | None = "new", order_by_score: bool = True
+    ) -> list[dict[str, Any]]:
         with self._connect() as conn:
+            where_clause = "WHERE status = ?" if status is not None else ""
+            params: tuple[Any, ...] = (status, limit) if status is not None else (limit,)
+            order_by = "ORDER BY score DESC, created_at DESC" if order_by_score else "ORDER BY created_at DESC"
             rows = conn.execute(
                 """
                 SELECT *
                 FROM topic_candidates
-                ORDER BY id DESC
+                """
+                + where_clause
+                + """
+                """
+                + order_by
+                + """
                 LIMIT ?
                 """,
-                (limit,),
+                params,
             ).fetchall()
             return [dict(row) for row in rows]
 
@@ -322,6 +391,11 @@ class DraftDatabase:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM topic_candidates WHERE id = ?", (topic_id,)).fetchone()
             return dict(row) if row else None
+
+    def update_topic_status(self, topic_id: int, status: str) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE topic_candidates SET status = ? WHERE id = ?", (status, topic_id))
+            conn.commit()
 
     def record_ai_usage(
         self,

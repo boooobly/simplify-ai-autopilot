@@ -18,6 +18,7 @@ from bot.handlers import (
     moderation_callback,
     start_command,
     topics_command,
+    topics_all_command,
     usage_7d_command,
     usage_month_command,
     usage_today_command,
@@ -57,6 +58,7 @@ def main() -> None:
     application.add_handler(CommandHandler("collect", collect_command))
     application.add_handler(CommandHandler("attach_media", attach_media_command))
     application.add_handler(CommandHandler("topics", topics_command))
+    application.add_handler(CommandHandler("topics_all", topics_all_command))
     application.add_handler(CommandHandler("usage_today", usage_today_command))
     application.add_handler(CommandHandler("usage_7d", usage_7d_command))
     application.add_handler(CommandHandler("usage_month", usage_month_command))

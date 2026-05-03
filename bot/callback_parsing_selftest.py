@@ -8,6 +8,7 @@ def run() -> None:
     assert _parse_callback_data("queue_tomorrow:0") == ("queue_tomorrow", 0, None)
     assert _parse_callback_data("unschedule:42") == ("unschedule", 42, None)
     assert _parse_callback_data("restore_draft:42") == ("restore_draft", 42, None)
+    assert _parse_callback_data("reject_topic:42") == ("reject_topic", 42, None)
     assert _status_guard_message("schedule", "published") == "Опубликованный черновик уже нельзя планировать."
     assert _status_guard_message("schedule", "rejected") == "Отклонённый черновик нельзя планировать."
 
