@@ -21,6 +21,9 @@ TRACKING_PARAMS = {
 NOISE_PATTERNS = ["cookie", "cookies", "accept all", "subscribe", "sign up", "newsletter", "privacy policy", "terms of use", "реклама", "подписаться", "принять", "куки", "политика конфиденциальности"]
 ARTICLE_SELECTORS = ["article", "main", '[role="main"]', ".post", ".article", ".entry-content", ".post-content", ".content"]
 
+class EmptyAIResponseError(RuntimeError):
+    pass
+
 
 def _load_style_prompt() -> str:
     return STYLE_PATH.read_text(encoding="utf-8").strip()
@@ -48,7 +51,37 @@ def _generate_with_chat_completion(
         max_tokens=900,
         extra_headers=extra_headers,
     )
-    return (response.choices[0].message.content or "").strip()
+    choice = response.choices[0]
+    finish_reason = choice.finish_reason
+    message_content = choice.message.content
+    content = ""
+    if isinstance(message_content, str):
+        content = message_content
+    elif isinstance(message_content, list):
+        text_parts: list[str] = []
+        for part in message_content:
+            if isinstance(part, dict):
+                if part.get("type") == "text" and isinstance(part.get("text"), str):
+                    text_parts.append(part["text"])
+                elif isinstance(part.get("content"), str):
+                    text_parts.append(part["content"])
+            elif hasattr(part, "text") and isinstance(part.text, str):
+                text_parts.append(part.text)
+        content = "\n".join(text_parts)
+    elif message_content is not None:
+        content = str(message_content)
+    stripped = content.strip()
+    logger.info(
+        "AI completion received: model=%s finish_reason=%s text_length=%s",
+        model,
+        finish_reason,
+        len(stripped),
+    )
+    if not stripped:
+        raise EmptyAIResponseError("AI model returned empty content")
+    if len(stripped) < 40:
+        raise EmptyAIResponseError("AI model returned empty content")
+    return stripped
 
 
 def _limit_text_preserving_source(text: str, source_url: str | None = None, limit: int = 900) -> str:
@@ -176,6 +209,9 @@ def generate_post_draft_from_page(api_key: str, model: str, source_url: str, tit
         "Ниже ссылка и извлечённый текст страницы. Опирайся только на этот текст страницы. "
         "Если факт не подтверждается текстом, не выдумывай его. "
         "Сделай один готовый пост в стиле @simplify_ai длиной до 900 символов. "
+        "Не оставляй ответ пустым. "
+        "Даже если новость кажется простой, напиши короткий пост на основе подтверждённых фактов. "
+        "Если данных мало, сделай осторожный короткий пост без домыслов. "
         "В конце обязательно добавь строку: Источник: <source_url>. "
         "Верни только финальный текст поста без комментариев и без markdown-блоков.\n\n"
         f"Источник: {source_url}\nЗаголовок: {title}\n\nТекст страницы:\n{page_text}"
