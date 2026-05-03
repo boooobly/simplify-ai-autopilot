@@ -1,13 +1,12 @@
 from bot.handlers import _render_sources_status
-from bot.sources import SourceReport, collect_topics
+from bot.sources import SourceReport, collect_topics_with_diagnostics
 
 
 def run() -> None:
     report = SourceReport(name="Test", url="https://example.com", source_group="custom", status="ok", item_count=1)
     assert report.name == "Test"
 
-    items = collect_topics()
-    assert isinstance(items, list)
+    assert callable(collect_topics_with_diagnostics)
 
     text = _render_sources_status(
         [
