@@ -1070,6 +1070,11 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             if _get_pending_media(context) != draft_id:
                 await _edit_callback_message(query, "Нет активного режима прикрепления для этого черновика.")
                 return
+            status = str(draft.get("status") or "")
+            if not _can_edit(status):
+                _clear_pending_media(context)
+                await _edit_callback_message(query, _status_guard_message("edit", status))
+                return
             items = context.user_data.get("pending_media_items") or []
             if not items:
                 await query.answer("Медиа ещё не добавлено. Пришли фото, видео или GIF/анимацию.", show_alert=True)
