@@ -1,17 +1,19 @@
 """Self-test for @simplify_ai style guide constants."""
 
-from bot.style_guide import HUMANIZER_RULES_FOR_SIMPLIFY_AI, SIMPLIFY_AI_STYLE_GUIDE
+from bot.style_guide import HUMANIZER_RULES_FOR_SIMPLIFY_AI, SIMPLIFY_AI_EMOJI_ALIAS_GUIDE, SIMPLIFY_AI_STYLE_GUIDE
 
 
 def main() -> None:
-    combined = f"{SIMPLIFY_AI_STYLE_GUIDE}\n{HUMANIZER_RULES_FOR_SIMPLIFY_AI}".lower()
-    assert "@simplify_ai" in combined
-    assert "➖" in combined
-    assert "не про" in combined
-    assert "эм-даш" in combined or "—" in combined
-    assert "не выдумывай факты" in combined or "не invent" in combined
-    print("style_guide_selftest: ok")
+    combined = f"{SIMPLIFY_AI_STYLE_GUIDE}\n{HUMANIZER_RULES_FOR_SIMPLIFY_AI}\n{SIMPLIFY_AI_EMOJI_ALIAS_GUIDE}".lower()
+    assert '[[emoji:claude]]' in combined
+    assert '[[emoji:chatgpt]]' in combined
+    assert '[[emoji:deepseek]]' in combined
+    assert '[[emoji:github]]' in combined
+    assert 'never invent new [[emoji:...]] names'.lower() in combined
+    assert 'do not auto-replace fallback emoji by meaning'.lower() in combined
+    assert '[[link:text|url]]' in combined
+    print('style_guide_selftest: ok')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

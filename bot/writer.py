@@ -12,7 +12,7 @@ import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
 
-from bot.style_guide import HUMANIZER_RULES_FOR_SIMPLIFY_AI, SIMPLIFY_AI_STYLE_GUIDE
+from bot.style_guide import HUMANIZER_RULES_FOR_SIMPLIFY_AI, SIMPLIFY_AI_EMOJI_ALIAS_GUIDE, SIMPLIFY_AI_STYLE_GUIDE
 
 logger = logging.getLogger(__name__)
 STYLE_PATH = Path("prompts/post_style.md")
@@ -182,7 +182,7 @@ def generate_post_draft(
     base_url: str | None = None,
     extra_headers: dict[str, str] | None = None,
 ) -> GenerationResult:
-    style = _load_style_prompt() + "\n\n" + SIMPLIFY_AI_STYLE_GUIDE
+    style = _load_style_prompt() + "\n\n" + SIMPLIFY_AI_STYLE_GUIDE + "\n\n" + SIMPLIFY_AI_EMOJI_ALIAS_GUIDE
     source_context = source_url or "не указан"
     user_prompt = (
         "Создай один черновик поста для Telegram-канала @simplify_ai. "
@@ -211,13 +211,13 @@ def polish_post_draft(
     base_url: str | None = None,
     extra_headers: dict[str, str] | None = None,
 ) -> GenerationResult:
-    style = _load_style_prompt() + "\n\n" + SIMPLIFY_AI_STYLE_GUIDE
+    style = _load_style_prompt() + "\n\n" + SIMPLIFY_AI_STYLE_GUIDE + "\n\n" + SIMPLIFY_AI_EMOJI_ALIAS_GUIDE
     user_prompt = (
         "Улучши черновик для @simplify_ai. Сохрани простой человеческий тон, как у реального автора Telegram-канала. "
         "Сделай текст яснее и живее, но не делай его стерильным или корпоративным. "
         "Не меняй факты и не добавляй новые факты. Не перегружай объяснениями. "
         "Не добавляй строку Источник в сам пост. Ссылка хранится отдельно в модерации. Верни только финальный текст. "
-        "Сохраняй все существующие маркеры ссылок вида [[LINK:text|url]]. "
+        "Сохраняй все существующие маркеры ссылок вида [[LINK:text|url]]. Сохраняй существующие [[EMOJI:alias]] маркеры без изменений. "
         "Если пост про сервис/инструмент и в тексте есть raw URL, преобразуй его в короткий CTA с [[LINK:text|url]]. "
         "Не удаляй полезные CTA-ссылки и не выдумывай новые ссылки. "
         "Для перечислений используй обычные строки с ➖. Бот сам оформит блок из 2+ пунктов как цитату. "
@@ -308,7 +308,7 @@ def fetch_page_content(source_url: str, timeout_seconds: int = 12) -> tuple[str,
 
 
 def generate_post_draft_from_page(api_key: str, model: str, source_url: str, title: str, page_text: str, max_chars: int = 1400, soft_chars: int = 1100, base_url: str | None = None, extra_headers: dict[str, str] | None = None) -> GenerationResult:
-    style = _load_style_prompt() + "\n\n" + SIMPLIFY_AI_STYLE_GUIDE
+    style = _load_style_prompt() + "\n\n" + SIMPLIFY_AI_STYLE_GUIDE + "\n\n" + SIMPLIFY_AI_EMOJI_ALIAS_GUIDE
     user_prompt = (
         "Ниже ссылка и извлечённый текст страницы. Опирайся только на этот текст страницы. "
         "Соблюдай стиль-гайд ниже как основные правила. "

@@ -35,6 +35,7 @@ class Settings:
     openai_output_cost_per_1m: float = 0.0
     daily_post_slots: list[str] = field(default_factory=lambda: ["10:00", "14:00", "18:00", "21:00"])
     custom_emoji_map: dict[str, str] = field(default_factory=dict)
+    custom_emoji_aliases: dict[str, tuple[str, str]] = field(default_factory=dict)
 
     @property
     def has_ai_provider(self) -> bool:
@@ -73,6 +74,9 @@ def _parse_daily_post_slots(raw: str) -> list[str]:
     return slots or default_slots
 
 
+ALIAS_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
 def _parse_custom_emoji_map(raw: str) -> dict[str, str]:
     result: dict[str, str] = {}
     for part in raw.split(";"):
@@ -85,6 +89,25 @@ def _parse_custom_emoji_map(raw: str) -> dict[str, str]:
         if not fallback_emoji or not custom_emoji_id.isdigit():
             continue
         result[fallback_emoji] = custom_emoji_id
+    return result
+
+
+
+def _parse_custom_emoji_aliases(raw: str) -> dict[str, tuple[str, str]]:
+    result: dict[str, tuple[str, str]] = {}
+    for part in raw.split(";"):
+        item = part.strip()
+        if not item:
+            continue
+        pieces = item.split("|", 2)
+        if len(pieces) != 3:
+            continue
+        alias, fallback_emoji, custom_emoji_id = (piece.strip() for piece in pieces)
+        if not ALIAS_RE.match(alias):
+            continue
+        if not fallback_emoji or not custom_emoji_id.isdigit():
+            continue
+        result[alias] = (fallback_emoji, custom_emoji_id)
     return result
 
 def load_settings() -> Settings:
@@ -111,6 +134,7 @@ def load_settings() -> Settings:
     daily_post_slots_raw = os.getenv("DAILY_POST_SLOTS", "10:00,14:00,18:00,21:00")
     daily_post_slots = _parse_daily_post_slots(daily_post_slots_raw)
     custom_emoji_map = _parse_custom_emoji_map(os.getenv("CUSTOM_EMOJI_MAP", ""))
+    custom_emoji_aliases = _parse_custom_emoji_aliases(os.getenv("CUSTOM_EMOJI_ALIASES", ""))
 
     post_max_chars = _parse_int_env("POST_MAX_CHARS", 1400)
     post_soft_chars = _parse_int_env("POST_SOFT_CHARS", 1100)
@@ -159,4 +183,5 @@ def load_settings() -> Settings:
         openai_output_cost_per_1m=openai_output_cost_per_1m,
         daily_post_slots=daily_post_slots,
         custom_emoji_map=custom_emoji_map,
+        custom_emoji_aliases=custom_emoji_aliases,
     )

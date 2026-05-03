@@ -545,7 +545,7 @@ def _build_moderation_text(
         media = items[0]["type"] if items else "нет"
     elif count > 1:
         media = f"{count} файлов"
-    body = strip_quote_markers(content).strip() or "[пусто]"
+    body = strip_quote_markers(content, custom_emoji_aliases=settings.custom_emoji_aliases).strip() or "[пусто]"
     return (
         f"📝 Черновик #{draft_id}\n"
         f"Источник: {source}\n"
@@ -601,7 +601,7 @@ def _build_media_preview_caption(
 ) -> str:
     source = source_url or "не указан"
     media = media_type or "нет"
-    body = strip_quote_markers(content).strip() or "[пусто]"
+    body = strip_quote_markers(content, custom_emoji_aliases=settings.custom_emoji_aliases).strip() or "[пусто]"
     snippet = body[:500]
     caption = (
         f"📝 Черновик #{draft_id}\n"
@@ -1946,7 +1946,7 @@ def _extract_custom_emoji_lines(message) -> list[str]:
             continue
         fragment = _extract_entity_text(message, entity)
         fallback = fragment or "?"
-        lines.append(f"emoji: {fallback}\ncustom_emoji_id: {emoji_id}")
+        lines.append(f"emoji: {fallback}\ncustom_emoji_id: {emoji_id}\nalias template:\nemoji_{len(lines) + 1}|{fallback}|{emoji_id}")
     return lines
 
 
@@ -2061,6 +2061,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     draft_to_publish.get("media_url"),
                     draft_to_publish.get("media_type"),
                     settings.custom_emoji_map,
+                    settings.custom_emoji_aliases,
                 )
             except Exception:
                 if was_scheduled:
@@ -2132,7 +2133,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
 
         elif action == "preview":
-            preview_text = strip_quote_markers(str(draft.get("content") or "")).strip() or "[пусто]"
+            preview_text = strip_quote_markers(str(draft.get("content") or ""), custom_emoji_aliases=settings.custom_emoji_aliases).strip() or "[пусто]"
             await _edit_callback_message(
                 query,
                 preview_text,
