@@ -12,6 +12,7 @@ from telegram.ext import ContextTypes
 from bot.database import DraftDatabase
 from bot.drafts import create_test_draft, rewrite_test_draft
 from bot.publisher import publish_to_channel
+from bot.telegram_formatting import strip_quote_markers
 from bot.sources import collect_topics
 from bot.writer import (
     EmptyAIResponseError,
@@ -78,7 +79,7 @@ def _build_moderation_text(
 ) -> str:
     source = source_url or "не указан"
     media = media_type if media_type and media_url else "нет"
-    body = content.strip() or "[пусто]"
+    body = strip_quote_markers(content).strip() or "[пусто]"
     return (
         f"📝 Черновик #{draft_id}\n"
         f"Источник: {source}\n"
@@ -120,7 +121,7 @@ def _build_media_preview_caption(
 ) -> str:
     source = source_url or "не указан"
     media = media_type or "нет"
-    body = content.strip() or "[пусто]"
+    body = strip_quote_markers(content).strip() or "[пусто]"
     snippet = body[:500]
     caption = (
         f"📝 Черновик #{draft_id}\n"
@@ -668,7 +669,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
 
         elif action == "preview":
-            preview_text = str(draft.get("content") or "").strip() or "[пусто]"
+            preview_text = strip_quote_markers(str(draft.get("content") or "")).strip() or "[пусто]"
             await _edit_callback_message(
                 query,
                 preview_text,
