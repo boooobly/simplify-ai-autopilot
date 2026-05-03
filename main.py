@@ -34,6 +34,8 @@ from bot.handlers import (
     menu_command,
     queue_today_command,
     queue_tomorrow_command,
+    plan_day_command,
+    plan_tomorrow_command,
     unschedule_command,
     restore_draft_command,
     failed_drafts_command,
@@ -79,6 +81,8 @@ def main() -> None:
     application.add_handler(CommandHandler("delete_draft", delete_draft_command))
     application.add_handler(CommandHandler("queue_today", queue_today_command))
     application.add_handler(CommandHandler("queue_tomorrow", queue_tomorrow_command))
+    application.add_handler(CommandHandler("plan_day", plan_day_command))
+    application.add_handler(CommandHandler("plan_tomorrow", plan_tomorrow_command))
     application.add_handler(CommandHandler("unschedule", unschedule_command))
     application.add_handler(CommandHandler("restore_draft", restore_draft_command))
     application.add_handler(CommandHandler("failed_drafts", failed_drafts_command))
