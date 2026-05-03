@@ -1922,11 +1922,21 @@ async def style_guide_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(summary, reply_markup=_admin_reply_keyboard())
 
 
+def _extract_entity_text(message, entity) -> str:
+    try:
+        if message.text:
+            return message.parse_entity(entity)
+        if message.caption:
+            return message.parse_caption_entity(entity)
+    except Exception:
+        return ""
+    return ""
+
+
 def _extract_custom_emoji_lines(message) -> list[str]:
     lines: list[str] = []
     if not message:
         return lines
-    text = message.text or message.caption or ""
     entities = list(message.entities or []) + list(message.caption_entities or [])
     for entity in entities:
         if getattr(entity, "type", "") != "custom_emoji":
@@ -1934,7 +1944,7 @@ def _extract_custom_emoji_lines(message) -> list[str]:
         emoji_id = getattr(entity, "custom_emoji_id", "") or ""
         if not str(emoji_id).isdigit():
             continue
-        fragment = text[entity.offset: entity.offset + entity.length] if text else ""
+        fragment = _extract_entity_text(message, entity)
         fallback = fragment or "?"
         lines.append(f"emoji: {fallback}\ncustom_emoji_id: {emoji_id}")
     return lines
@@ -1945,7 +1955,7 @@ async def emoji_ids_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     user_id = update.effective_user.id if update.effective_user else None
     if not _is_admin(user_id, settings.admin_id):
         if update.message:
-            await update.message.reply_text("Нет доступа.")
+            await update.message.reply_text("Нет доступа.", reply_markup=_admin_reply_keyboard())
         return
     if not update.message:
         return
@@ -1953,10 +1963,11 @@ async def emoji_ids_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     lines = _extract_custom_emoji_lines(target)
     if not lines:
         await update.message.reply_text(
-            "Кастомные emoji не найдены. Пришли сообщение с нужным кастомным emoji или ответь на него командой /emoji_ids."
+            "Кастомные emoji не найдены. Пришли сообщение с нужным кастомным emoji или ответь на него командой /emoji_ids.",
+            reply_markup=_admin_reply_keyboard(),
         )
         return
-    await update.message.reply_text("\n\n".join(lines))
+    await update.message.reply_text("\n\n".join(lines), reply_markup=_admin_reply_keyboard())
 
 
 async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
