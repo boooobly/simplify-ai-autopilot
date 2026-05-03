@@ -90,9 +90,19 @@ Rules:
 - Choose custom emoji by visual meaning and topic, not by fallback emoji.
 - Use custom emoji sparingly: title, CTA line, or final thought.
 - Do not place custom emoji in every sentence.
+- Do not use raw emoji when a custom alias exists.
 - If topic does not match any alias, use a normal emoji or no emoji.
-- Do not auto-replace fallback emoji by meaning.
-- Plain 🤖 must stay plain unless the model explicitly writes [[EMOJI:claude]], [[EMOJI:chatgpt]] or [[EMOJI:deepseek]].
-- Plain 📱 must stay plain unless the model explicitly writes [[EMOJI:github]], [[EMOJI:photoshop]] or [[EMOJI:windows]].
+- Use raw ➖ for list markers only.
+- Use [[EMOJI:screen_card]] for generic AI model/tool news when no brand-specific alias exists.
 - CTA links should use [[LINK:text|url]] markers.
+
+Correct:
+[[EMOJI:screen_card]] MiniMax-M1: миллион токенов в открытом доступе
+[[EMOJI:thought]] Пока одни модели берут качеством рассуждений, M1 берёт объёмом памяти.
+[[EMOJI:link]] Веса и детали - [[LINK:на Hugging Face|https://huggingface.co/...]]
+
+Wrong:
+🤖 MiniMax-M1: миллион токенов в открытом доступе
+💭 Пока одни модели...
+🧾 Веса и детали - [[LINK:на Hugging Face|...]]
 """.strip()

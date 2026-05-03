@@ -10,8 +10,11 @@ def main() -> None:
     assert '[[emoji:deepseek]]' in combined
     assert '[[emoji:github]]' in combined
     assert 'never invent new [[emoji:...]] names'.lower() in combined
-    assert 'do not auto-replace fallback emoji by meaning'.lower() in combined
     assert '[[link:text|url]]' in combined
+    assert 'correct:' in combined
+    assert '[[emoji:screen_card]] minimax-m1' in combined
+    assert 'wrong:' in combined
+    assert 'do not use raw emoji when a custom alias exists'.lower() in combined
     print('style_guide_selftest: ok')
 
 
