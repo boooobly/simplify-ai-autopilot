@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Update
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from bot.database import DraftDatabase
@@ -113,6 +114,16 @@ def _schedule_keyboard(draft_id: int) -> InlineKeyboardMarkup:
     )
 
 
+def _preview_keyboard(draft_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("↩️ Вернуть обратно", callback_data=f"preview_back:{draft_id}")],
+            [InlineKeyboardButton("✅ Опубликовать", callback_data=f"publish:{draft_id}")],
+            [InlineKeyboardButton("🗓️ Запланировать", callback_data=f"schedule:{draft_id}")],
+        ]
+    )
+
+
 def _build_moderation_text(
     draft_id: int,
     content: str,
@@ -142,18 +153,31 @@ def _is_media_callback_message(query) -> bool:
 async def _edit_callback_message(
     query, text: str, reply_markup: InlineKeyboardMarkup | None = None
 ) -> None:
-    if _is_media_callback_message(query):
-        if len(text) <= TELEGRAM_CAPTION_LIMIT:
-            await query.edit_message_caption(caption=text, reply_markup=reply_markup)
+    try:
+        if _is_media_callback_message(query):
+            if len(text) <= TELEGRAM_CAPTION_LIMIT:
+                await query.edit_message_caption(caption=text, reply_markup=reply_markup)
+                return
+            await query.edit_message_caption(
+                caption="Готово. Полный текст отправил отдельным сообщением ниже.",
+                reply_markup=reply_markup,
+            )
+            if query.message:
+                await query.message.reply_text(text, link_preview_options=_disabled_link_preview_options())
             return
-        await query.edit_message_caption(
-            caption="Готово. Полный текст отправил отдельным сообщением ниже.",
+        await query.edit_message_text(
+            text,
             reply_markup=reply_markup,
+            link_preview_options=_disabled_link_preview_options(),
         )
-        if query.message:
-            await query.message.reply_text(text, link_preview_options=_disabled_link_preview_options())
-        return
-    await query.edit_message_text(text, reply_markup=reply_markup, link_preview_options=_disabled_link_preview_options())
+    except BadRequest as exc:
+        if "message is not modified" in str(exc).lower():
+            try:
+                await query.answer("Уже показано.")
+            except Exception as answer_exc:
+                logger.warning("Failed to answer not-modified callback: %s", answer_exc)
+            return
+        raise
 
 
 def _build_media_preview_caption(
@@ -767,6 +791,19 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await _edit_callback_message(
                 query,
                 preview_text,
+                reply_markup=_preview_keyboard(draft_id),
+            )
+
+        elif action == "preview_back":
+            await _edit_callback_message(
+                query,
+                _build_moderation_text(
+                    draft_id,
+                    draft["content"],
+                    draft.get("source_url"),
+                    draft.get("media_type"),
+                    draft.get("media_url"),
+                ),
                 reply_markup=_moderation_keyboard(draft_id),
             )
 
