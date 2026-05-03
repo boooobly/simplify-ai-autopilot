@@ -94,9 +94,17 @@ def _resolve_ai_provider(settings) -> tuple[str, str, str | None, dict[str, str]
     return settings.openai_api_key, "openai", None, None
 
 
-def _moderation_keyboard(draft_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
+def _moderation_keyboard(draft_id: int, status: str | None = None) -> InlineKeyboardMarkup:
+    if status == "scheduled":
+        rows = [
+            [InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")],
+            [InlineKeyboardButton("✅ Опубликовать сейчас", callback_data=f"publish:{draft_id}")],
+            [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")],
+        ]
+    elif status in {"published", "rejected"}:
+        rows = [[InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")]]
+    else:
+        rows = [
             [InlineKeyboardButton("✅ Опубликовать", callback_data=f"publish:{draft_id}")],
             [InlineKeyboardButton("🗓️ Запланировать", callback_data=f"schedule:{draft_id}")],
             [InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")],
@@ -104,7 +112,31 @@ def _moderation_keyboard(draft_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("✍️ Переписать", callback_data=f"rewrite:{draft_id}")],
             [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")],
         ]
-    )
+    return InlineKeyboardMarkup(rows)
+
+
+def _can_publish(status: str | None) -> bool:
+    return status in {"draft", "approved", "scheduled"}
+
+
+def _can_schedule(status: str | None) -> bool:
+    return status in {"draft", "approved"}
+
+
+def _can_edit(status: str | None) -> bool:
+    return status in {"draft", "approved"}
+
+
+def _status_guard_message(action: str, status: str | None) -> str:
+    if status == "published":
+        if action == "publish":
+            return "Этот черновик уже опубликован."
+        return "Опубликованный черновик уже нельзя менять."
+    if status == "rejected" and action == "publish":
+        return "Этот черновик отклонён. Сначала создай новый или восстанови его позже."
+    if status == "scheduled" and action == "edit":
+        return "Запланированный черновик уже в очереди. Сначала сними его с очереди позже."
+    return f"Это действие недоступно для текущего статуса: {status or 'unknown'}."
 
 
 def _schedule_keyboard(draft_id: int) -> InlineKeyboardMarkup:
@@ -177,6 +209,7 @@ async def _edit_callback_message(
             except Exception as answer_exc:
                 logger.warning("Failed to answer not-modified callback: %s", answer_exc)
             return
+        logger.warning("Failed to edit callback message: %s", exc)
         raise
 
 
@@ -417,7 +450,7 @@ async def draft_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"Черновик #{draft_id} не найден.")
         return
 
-    reply_markup = _moderation_keyboard(draft_id) if draft.get("status") in ACTIONABLE_DRAFT_STATUSES else None
+    reply_markup = _moderation_keyboard(draft_id, str(draft.get("status") or ""))
     await update.message.reply_text(
         _full_draft_text(draft),
         reply_markup=reply_markup,
@@ -609,8 +642,10 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
     if message:
         await message.reply_text(f"Черновик #{draft_id} создан и отправлен на модерацию.")
         if source_url and used_fallback:
-            await message.reply_text(
-                "Черновик создан через fallback-модель, потому что draft-модель вернула пустой ответ."
+            logger.info(
+                "Draft created with fallback model: draft_id=%s source_url=%s",
+                draft_id,
+                source_url,
             )
 
 
@@ -725,9 +760,12 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             new_draft_id = db.create_draft(content, source_url=topic["url"])
             await _send_moderation_preview(context, settings.admin_id, new_draft_id, content, topic["url"])
             await _edit_callback_message(query, f"Создан черновик #{new_draft_id} из темы #{topic_id}.")
-            if used_fallback and query.message:
-                await query.message.reply_text(
-                    "Черновик создан через fallback-модель, потому что draft-модель вернула пустой ответ."
+            if used_fallback:
+                logger.info(
+                    "Topic draft created with fallback model: topic_id=%s draft_id=%s source_url=%s",
+                    topic_id,
+                    new_draft_id,
+                    topic["url"],
                 )
             return
 
@@ -737,6 +775,9 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
 
         if action == "publish":
+            if not _can_publish(draft.get("status")):
+                await _edit_callback_message(query, _status_guard_message("publish", draft.get("status")))
+                return
             await publish_to_channel(
                 context.bot,
                 settings.channel_id,
@@ -748,6 +789,9 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await _edit_callback_message(query, f"✅ Черновик #{draft_id} опубликован в канал.")
 
         elif action == "schedule":
+            if not _can_schedule(draft.get("status")):
+                await _edit_callback_message(query, _status_guard_message("schedule", draft.get("status")))
+                return
             db.update_status(draft_id, "approved")
             schedule_text = f"Выбери слот публикации для черновика #{draft_id} (часовой пояс: {settings.schedule_timezone}):"
             await context.bot.send_message(
@@ -795,33 +839,43 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
 
         elif action == "preview_back":
+            refreshed = db.get_draft(draft_id) or draft
             await _edit_callback_message(
                 query,
                 _build_moderation_text(
                     draft_id,
-                    draft["content"],
-                    draft.get("source_url"),
-                    draft.get("media_type"),
-                    draft.get("media_url"),
+                    refreshed["content"],
+                    refreshed.get("source_url"),
+                    refreshed.get("media_type"),
+                    refreshed.get("media_url"),
                 ),
-                reply_markup=_moderation_keyboard(draft_id),
+                reply_markup=_moderation_keyboard(draft_id, str(refreshed.get("status") or "")),
             )
 
         elif action == "reject":
+            if draft.get("status") == "published":
+                await _edit_callback_message(query, "Опубликованный черновик нельзя отклонить.")
+                return
             db.update_status(draft_id, "rejected")
             await _edit_callback_message(query, f"❌ Черновик #{draft_id} отклонён.")
 
         elif action == "rewrite":
+            if not _can_edit(draft.get("status")):
+                await _edit_callback_message(query, _status_guard_message("edit", draft.get("status")))
+                return
             rewritten = rewrite_test_draft(draft["content"])
             db.update_draft_content(draft_id, rewritten)
             db.update_status(draft_id, "draft")
             await _edit_callback_message(
                 query,
                 _build_moderation_text(draft_id, rewritten, draft.get("source_url")),
-                reply_markup=_moderation_keyboard(draft_id),
+                reply_markup=_moderation_keyboard(draft_id, "draft"),
             )
 
         elif action == "polish":
+            if not _can_edit(draft.get("status")):
+                await _edit_callback_message(query, _status_guard_message("edit", draft.get("status")))
+                return
             if not settings.has_ai_provider:
                 await _edit_callback_message(query, "AI-провайдер не настроен.")
                 return
@@ -849,11 +903,11 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     draft.get("media_type"),
                     draft.get("media_url"),
                 ),
-                reply_markup=_moderation_keyboard(draft_id),
+                reply_markup=_moderation_keyboard(draft_id, "draft"),
             )
 
         elif action == "draft_info":
-            reply_markup = _moderation_keyboard(draft_id) if draft.get("status") in ACTIONABLE_DRAFT_STATUSES else None
+            reply_markup = _moderation_keyboard(draft_id, str(draft.get("status") or ""))
             await _edit_callback_message(
                 query,
                 _full_draft_text(draft),
@@ -866,7 +920,16 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as exc:  # Keep user-facing flow stable on runtime errors.
         logger.exception("Error while handling moderation callback: %s", exc)
         try:
-            await _edit_callback_message(query, "Что-то пошло не так. Попробуй ещё раз.")
+            if "draft_id" in locals():
+                await _edit_callback_message(
+                    query,
+                    f"Что-то пошло не так. Попробуй ещё раз или открой черновик через /draft_info {draft_id}.",
+                )
+            else:
+                await _edit_callback_message(
+                    query,
+                    "Что-то пошло не так. Попробуй ещё раз или открой черновик через /draft_info <id>.",
+                )
         except Exception as edit_exc:
             logger.exception("Failed to edit callback message after error: %s", edit_exc)
             if query.message:
@@ -1075,8 +1138,10 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
     draft_id = db.create_draft(content, source_url=source_url)
     await _send_moderation_preview(context, settings.admin_id, draft_id, content, source_url)
-    await update.message.reply_text(f"Черновик #{draft_id} готов и отправлен на модерацию.")
+    await update.message.reply_text(f"Черновик #{draft_id} создан и отправлен на модерацию.")
     if used_fallback:
-        await update.message.reply_text(
-            "Черновик создан через fallback-модель, потому что draft-модель вернула пустой ответ."
+        logger.info(
+            "Draft created with fallback model: draft_id=%s source_url=%s",
+            draft_id,
+            source_url,
         )
