@@ -29,7 +29,7 @@ from bot.writer import (
 
 logger = logging.getLogger(__name__)
 ALLOWED_MEDIA_TYPES = {"photo", "video", "animation"}
-ALLOWED_DRAFT_STATUSES = {"draft", "approved", "scheduled", "published", "rejected"}
+ALLOWED_DRAFT_STATUSES = {"draft", "approved", "scheduled", "publishing", "published", "rejected", "failed"}
 ACTIONABLE_DRAFT_STATUSES = {"draft", "approved"}
 TELEGRAM_CAPTION_LIMIT = 1024
 SHORT_MEDIA_PREVIEW_LIMIT = 850
@@ -152,6 +152,14 @@ def _moderation_keyboard(draft_id: int, status: str | None = None, has_media: bo
             [InlineKeyboardButton("✅ Опубликовать сейчас", callback_data=f"publish:{draft_id}")],
             [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")],
         ]
+    elif status == "publishing":
+        rows = [[InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")]]
+    elif status == "failed":
+        rows = [
+            [InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")],
+            [InlineKeyboardButton("🔁 Вернуть в черновики", callback_data=f"restore_draft:{draft_id}")],
+            [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")],
+        ]
     elif status in {"published", "rejected"}:
         rows = [[InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")]]
     else:
@@ -219,6 +227,10 @@ def _status_guard_message(action: str, status: str | None) -> str:
         return "Отклонённый черновик нельзя планировать."
     if status == "rejected" and action == "publish":
         return "Этот черновик отклонён. Сначала создай новый или восстанови его позже."
+    if status == "publishing":
+        return "Черновик сейчас публикуется. Подожди немного."
+    if status == "failed":
+        return "Черновик в статусе failed. Сначала верни его в черновики."
     if status == "scheduled" and action == "edit":
         return "Запланированный черновик уже в очереди. Сначала сними его с очереди позже."
     return f"Это действие недоступно для текущего статуса: {status or 'unknown'}."
@@ -671,7 +683,7 @@ async def drafts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     status = context.args[0].strip().lower() if context.args else None
     if status and status not in ALLOWED_DRAFT_STATUSES:
         await update.message.reply_text(
-            "Неизвестный статус. Доступные статусы: draft, approved, scheduled, published, rejected"
+            "Неизвестный статус. Доступные статусы: draft, approved, scheduled, publishing, published, rejected, failed"
         )
         return
 
@@ -800,6 +812,54 @@ async def unschedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     db.unschedule_draft(draft_id)
     await update.message.reply_text(f"Черновик #{draft_id} снят с очереди и снова доступен как черновик.")
+
+
+async def restore_draft_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    if not _is_admin(update.effective_user.id if update.effective_user else None, settings.admin_id):
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /restore_draft <draft_id>")
+        return
+    try:
+        draft_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("draft_id должен быть числом.")
+        return
+    draft = db.get_draft(draft_id)
+    if not draft:
+        await update.message.reply_text(f"Черновик #{draft_id} не найден.")
+        return
+    if draft.get("status") not in {"failed", "publishing"}:
+        await update.message.reply_text(f"Черновик #{draft_id} не требует восстановления.")
+        return
+    db.restore_draft(draft_id)
+    await update.message.reply_text(f"Черновик #{draft_id} возвращён в черновики.")
+
+
+async def failed_drafts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    if not _is_admin(update.effective_user.id if update.effective_user else None, settings.admin_id):
+        return
+    drafts = db.list_drafts(limit=10, status="failed")
+    if not drafts:
+        await update.message.reply_text("Нет черновиков в статусе failed.")
+        return
+    for draft in drafts:
+        draft_id = int(draft["id"])
+        await context.bot.send_message(
+            chat_id=settings.admin_id,
+            text=_draft_snippet_text(draft),
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton(f"Открыть #{draft_id}", callback_data=f"draft_info:{draft_id}")],
+                    [InlineKeyboardButton("🔁 Вернуть в черновики", callback_data=f"restore_draft:{draft_id}")],
+                ]
+            ),
+            link_preview_options=_disabled_link_preview_options(),
+        )
 
 
 async def attach_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1169,14 +1229,29 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             if not _can_publish(draft.get("status")):
                 await _edit_callback_message(query, _status_guard_message("publish", draft.get("status")))
                 return
-            await publish_to_channel(
-                context.bot,
-                settings.channel_id,
-                draft["content"],
-                draft.get("media_url"),
-                draft.get("media_type"),
-            )
-            db.update_status(draft_id, "published")
+            was_scheduled = draft.get("status") == "scheduled"
+            draft_to_publish = draft
+            if was_scheduled:
+                if not db.mark_draft_publishing(draft_id):
+                    await _edit_callback_message(query, "Черновик уже не в очереди.")
+                    return
+                draft_to_publish = db.get_draft(draft_id)
+                if not draft_to_publish:
+                    await _edit_callback_message(query, f"Черновик #{draft_id} не найден.")
+                    return
+            try:
+                await publish_to_channel(
+                    context.bot,
+                    settings.channel_id,
+                    draft_to_publish["content"],
+                    draft_to_publish.get("media_url"),
+                    draft_to_publish.get("media_type"),
+                )
+            except Exception:
+                if was_scheduled:
+                    db.mark_draft_failed(draft_id)
+                raise
+            db.mark_draft_published(draft_id)
             await _edit_callback_message(query, f"✅ Черновик #{draft_id} опубликован в канал.")
 
         elif action == "schedule":
@@ -1268,11 +1343,32 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
 
         elif action == "reject":
-            if draft.get("status") == "published":
+            if draft.get("status") in {"published", "publishing"}:
                 await _edit_callback_message(query, "Опубликованный черновик нельзя отклонить.")
                 return
             db.update_status(draft_id, "rejected")
             await _edit_callback_message(query, f"❌ Черновик #{draft_id} отклонён.")
+        elif action == "restore_draft":
+            if draft.get("status") not in {"failed", "publishing"}:
+                await _edit_callback_message(query, f"Черновик #{draft_id} не требует восстановления.")
+                return
+            db.restore_draft(draft_id)
+            refreshed = db.get_draft(draft_id) or draft
+            await _edit_callback_message(
+                query,
+                _build_moderation_text(
+                    draft_id,
+                    str(refreshed.get("content") or ""),
+                    refreshed.get("source_url"),
+                    refreshed.get("media_type"),
+                    refreshed.get("media_url"),
+                ),
+                reply_markup=_moderation_keyboard(
+                    draft_id,
+                    str(refreshed.get("status") or ""),
+                    has_media=media_count(refreshed.get("media_url"), refreshed.get("media_type")) > 0,
+                ),
+            )
 
         elif action == "rewrite":
             if not _can_edit(draft.get("status")):
@@ -1582,7 +1678,9 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             "/topics - найденные темы\n"
             "/queue_today - план публикаций на сегодня\n"
             "/queue_tomorrow - план публикаций на завтра\n"
+            "/failed_drafts - последние неудачные публикации\n"
             "/unschedule <id> - снять черновик с очереди\n"
+            "/restore_draft <id> - вернуть failed/publishing в черновики\n"
             "/usage_today - расходы ИИ за сегодня\n"
             "/usage_7d - расходы ИИ за 7 дней\n"
             "/usage_month - расходы ИИ за 30 дней\n"

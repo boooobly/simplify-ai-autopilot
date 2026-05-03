@@ -28,6 +28,8 @@ from bot.handlers import (
     queue_today_command,
     queue_tomorrow_command,
     unschedule_command,
+    restore_draft_command,
+    failed_drafts_command,
 )
 from bot.publisher import run_scheduled_publishing
 
@@ -64,6 +66,8 @@ def main() -> None:
     application.add_handler(CommandHandler("queue_today", queue_today_command))
     application.add_handler(CommandHandler("queue_tomorrow", queue_tomorrow_command))
     application.add_handler(CommandHandler("unschedule", unschedule_command))
+    application.add_handler(CommandHandler("restore_draft", restore_draft_command))
+    application.add_handler(CommandHandler("failed_drafts", failed_drafts_command))
     application.add_handler(MessageHandler(~filters.COMMAND, admin_url_message))
     application.add_handler(CallbackQueryHandler(moderation_callback))
 
