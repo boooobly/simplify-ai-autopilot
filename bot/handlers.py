@@ -41,6 +41,41 @@ def _is_admin(user_id: int | None, admin_id: int) -> bool:
     return user_id is not None and user_id == admin_id
 
 
+def _main_menu_text() -> str:
+    return "🤖 Simplify AI Autopilot\n\nВыбери действие:"
+
+
+def _main_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✍️ Создать черновик", callback_data="menu_generate")],
+            [InlineKeyboardButton("🔗 Пост из ссылки", callback_data="menu_url_help")],
+            [InlineKeyboardButton("📝 Черновики", callback_data="menu_drafts")],
+            [InlineKeyboardButton("🧠 Темы", callback_data="menu_topics")],
+            [InlineKeyboardButton("📅 Очередь", callback_data="menu_queue")],
+            [InlineKeyboardButton("⚙️ Настройки", callback_data="menu_settings")],
+            [InlineKeyboardButton("❓ Помощь", callback_data="menu_help")],
+        ]
+    )
+
+
+def _back_to_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")]])
+
+
+def _settings_text(settings) -> str:
+    ai_provider = "OpenRouter" if settings.openrouter_api_key else ("OpenAI" if settings.openai_api_key else "не настроен")
+    return (
+        "⚙️ Настройки\n\n"
+        f"AI provider: {ai_provider}\n"
+        f"Draft model: {settings.model_draft}\n"
+        f"Polish model: {settings.model_polish}\n"
+        f"Timezone: {settings.schedule_timezone}\n"
+        f"Post soft/max chars: {settings.post_soft_chars} / {settings.post_max_chars}\n"
+        f"DB path: {settings.db_path}"
+    )
+
+
 def _resolve_ai_provider(settings) -> tuple[str, str, str | None, dict[str, str] | None]:
     if settings.openrouter_api_key:
         headers = {"X-Title": settings.openrouter_app_name}
@@ -275,21 +310,24 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     if update.message:
         await update.message.reply_text(
-            "Привет 👋\n"
-            "Бот работает.\n\n"
-            "Команды:\n"
-            "/draft - создать тестовый черновик\n"
-            "/generate - создать черновик через draft-модель\n"
-            "/generate <ссылка> - прочитать страницу и создать черновик по ссылке\n"
-            "После генерации можно нажать кнопку «✨ Улучшить Claude» для полировки текста.\n"
-            "Также можно просто отправить ссылку обычным сообщением — бот тоже создаст черновик.\n"
-            "/collect - собрать свежие темы\n"
-            "/topics - показать найденные темы\n"
-            "/attach_media <id> <photo|video|animation> <url> - прикрепить медиа\n"
-            "/drafts - показать последние черновики\n"
-            "/drafts <status> - показать черновики по статусу\n"
-            "/draft_info <id> - открыть черновик\n"
-            "/delete_draft <id> - удалить черновик"
+            "Привет 👋\nБот работает.",
+            reply_markup=_main_menu_keyboard(),
+            link_preview_options=_disabled_link_preview_options(),
+        )
+
+
+async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_admin(user_id, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа. Этот бот только для администратора.")
+        return
+    if update.message:
+        await update.message.reply_text(
+            _main_menu_text(),
+            reply_markup=_main_menu_keyboard(),
+            link_preview_options=_disabled_link_preview_options(),
         )
 
 
@@ -460,10 +498,14 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     source_url_arg = " ".join(context.args).strip() if context.args else None
+    await _generate_from_command(context, settings, db, source_url_arg, update.message)
+
+
+async def _generate_from_command(context, settings, db: DraftDatabase, source_url_arg: str | None, message) -> None:
 
     if not settings.has_ai_provider:
-        if update.message:
-            await update.message.reply_text("AI-провайдер не настроен. Добавь OPENROUTER_API_KEY или OPENAI_API_KEY и перезапусти бота.")
+        if message:
+            await message.reply_text("AI-провайдер не настроен. Добавь OPENROUTER_API_KEY или OPENAI_API_KEY и перезапусти бота.")
         return
 
     try:
@@ -473,20 +515,20 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if source_url_arg:
             source_url_raw = find_first_url(source_url_arg)
             if not source_url_raw:
-                if update.message:
-                    await update.message.reply_text("Не вижу корректной ссылки. Пришли URL в формате https://...")
+                if message:
+                    await message.reply_text("Не вижу корректной ссылки. Пришли URL в формате https://...")
                 return
             source_url = normalize_url(source_url_raw)
             duplicate = db.find_by_source_url(source_url)
             if duplicate:
-                if update.message:
-                    await update.message.reply_text(
+                if message:
+                    await message.reply_text(
                         f"Похоже, эта ссылка уже обрабатывалась: черновик #{duplicate['id']} (статус: {duplicate['status']}).",
                         link_preview_options=_disabled_link_preview_options(),
                     )
                 return
-            if update.message:
-                await update.message.reply_text("Нашёл ссылку. Читаю страницу и готовлю черновик...")
+            if message:
+                await message.reply_text("Нашёл ссылку. Читаю страницу и готовлю черновик...")
             title, page_text = fetch_page_content(source_url)
             content, used_fallback = await _generate_url_draft_with_fallback(
                 api_key=api_key,
@@ -498,8 +540,8 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 extra_headers=extra_headers,
             )
         else:
-            if update.message:
-                await update.message.reply_text("Генерирую черновик...")
+            if message:
+                await message.reply_text("Генерирую черновик...")
             content = generate_post_draft(
                 api_key,
                 model=settings.model_draft,
@@ -511,31 +553,31 @@ async def generate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             used_fallback = False
     except EmptyAIResponseError:
-        if update.message:
-            await update.message.reply_text(EMPTY_AI_REPLY_TEXT)
+        if message:
+            await message.reply_text(EMPTY_AI_REPLY_TEXT)
         return
     except Exception as exc:
         logger.exception("Error during generation: %s", exc)
-        if update.message:
+        if message:
             if source_url_arg:
-                await update.message.reply_text(
+                await message.reply_text(
                     "Не удалось нормально прочитать страницу. Возможно, там мало текста, сайт закрыл доступ или страница требует JavaScript. Попробуй другую ссылку или пришли текст новости вручную."
                 )
             else:
-                await update.message.reply_text("Не удалось сгенерировать черновик. Попробуй ещё раз.")
+                await message.reply_text("Не удалось сгенерировать черновик. Попробуй ещё раз.")
         return
 
     if not content.strip():
-        if update.message:
-            await update.message.reply_text(EMPTY_AI_REPLY_TEXT)
+        if message:
+            await message.reply_text(EMPTY_AI_REPLY_TEXT)
         return
     draft_id = db.create_draft(content, source_url=source_url)
     await _send_moderation_preview(context, settings.admin_id, draft_id, content, source_url)
 
-    if update.message:
-        await update.message.reply_text(f"Черновик #{draft_id} создан и отправлен на модерацию.")
+    if message:
+        await message.reply_text(f"Черновик #{draft_id} создан и отправлен на модерацию.")
         if source_url and used_fallback:
-            await update.message.reply_text(
+            await message.reply_text(
                 "Черновик создан через fallback-модель, потому что draft-модель вернула пустой ответ."
             )
 
@@ -611,9 +653,13 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     await query.answer()
+    data = query.data or ""
+    if data.startswith("menu_"):
+        await _handle_menu_callback(update, context, data)
+        return
 
     try:
-        parts = (query.data or "").split(":")
+        parts = data.split(":")
         action = parts[0]
         if action == "schedule_slot":
             draft_id = int(parts[1])
@@ -772,6 +818,108 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.exception("Failed to edit callback message after error: %s", edit_exc)
             if query.message:
                 await query.message.reply_text("Что-то пошло не так. Посмотри логи.")
+
+
+async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    query = update.callback_query
+    if not query:
+        return
+
+    if data == "menu_back":
+        await _edit_callback_message(query, _main_menu_text(), reply_markup=_main_menu_keyboard())
+    elif data == "menu_generate":
+        await _edit_callback_message(query, "Генерирую черновик...")
+        before = db.list_drafts(limit=1)
+        before_id = int(before[0]["id"]) if before else 0
+        await _generate_from_command(context, settings, db, None, query.message)
+        after = db.list_drafts(limit=1)
+        if after and int(after[0]["id"]) > before_id:
+            await _edit_callback_message(query, "Черновик создан и отправлен на модерацию.", reply_markup=_back_to_menu_keyboard())
+        else:
+            await _edit_callback_message(query, "Черновик не создан.", reply_markup=_back_to_menu_keyboard())
+    elif data == "menu_url_help":
+        await _edit_callback_message(
+            query,
+            "Пришли ссылку одним сообщением, и я сделаю черновик поста из страницы.",
+            reply_markup=_back_to_menu_keyboard(),
+        )
+    elif data == "menu_drafts":
+        drafts = db.list_drafts(limit=10)
+        if not drafts:
+            await _edit_callback_message(query, "Черновики не найдены.", reply_markup=_back_to_menu_keyboard())
+            return
+        await _edit_callback_message(query, "Последние черновики:", reply_markup=_back_to_menu_keyboard())
+        for draft in drafts:
+            await context.bot.send_message(
+                chat_id=settings.admin_id,
+                text=_draft_snippet_text(draft),
+                reply_markup=_draft_actions_keyboard(int(draft["id"]), str(draft.get("status") or "")),
+                link_preview_options=_disabled_link_preview_options(),
+            )
+    elif data == "menu_topics":
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("🔎 Собрать свежие темы", callback_data="menu_collect")],
+                [InlineKeyboardButton("📋 Показать найденные темы", callback_data="menu_show_topics")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")],
+            ]
+        )
+        await _edit_callback_message(query, "Что сделать с темами?", reply_markup=keyboard)
+    elif data == "menu_collect":
+        items = collect_topics()
+        added = 0
+        for item in items:
+            if db.create_topic_candidate(item.title, item.url, item.source, item.published_at):
+                added += 1
+        await _edit_callback_message(
+            query,
+            f"Готово. Найдено: {len(items)}, добавлено новых: {added}.",
+            reply_markup=_back_to_menu_keyboard(),
+        )
+    elif data == "menu_show_topics":
+        topics = db.list_topic_candidates(limit=10)
+        if not topics:
+            await _edit_callback_message(query, "Пока нет тем. Запусти /collect", reply_markup=_back_to_menu_keyboard())
+            return
+        await _edit_callback_message(query, "Найденные темы:", reply_markup=_back_to_menu_keyboard())
+        for topic in topics:
+            text = f"🧠 Тема #{topic['id']}\nИсточник: {topic['source']}\nЗаголовок: {topic['title']}\nURL: {topic['url']}"
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("✍️ Создать пост", callback_data=f"topic_generate:{topic['id']}")]]
+            )
+            await context.bot.send_message(chat_id=settings.admin_id, text=text, reply_markup=keyboard, link_preview_options=_disabled_link_preview_options())
+    elif data == "menu_queue":
+        drafts = db.list_drafts(limit=10, status="scheduled")
+        if not drafts:
+            await _edit_callback_message(query, "Запланированных черновиков пока нет.", reply_markup=_back_to_menu_keyboard())
+            return
+        await _edit_callback_message(query, "Запланированные черновики:", reply_markup=_back_to_menu_keyboard())
+        for draft in drafts:
+            await context.bot.send_message(
+                chat_id=settings.admin_id,
+                text=_draft_snippet_text(draft),
+                reply_markup=_draft_actions_keyboard(int(draft["id"]), str(draft.get("status") or "")),
+                link_preview_options=_disabled_link_preview_options(),
+            )
+    elif data == "menu_settings":
+        await _edit_callback_message(query, _settings_text(settings), reply_markup=_back_to_menu_keyboard())
+    elif data == "menu_help":
+        await _edit_callback_message(
+            query,
+            "Команды:\n"
+            "/menu - открыть меню\n"
+            "/generate - черновик через draft-модель\n"
+            "/generate <ссылка> - пост из ссылки\n"
+            "/drafts - последние черновики\n"
+            "/topics - найденные темы\n"
+            "/collect - собрать темы\n"
+            "/draft_info <id> - открыть черновик\n"
+            "/delete_draft <id> - удалить черновик\n"
+            "/attach_media <id> <photo|video|animation> <url> - прикрепить медиа",
+            reply_markup=_back_to_menu_keyboard(),
+        )
 
 
 async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

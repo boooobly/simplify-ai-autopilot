@@ -21,6 +21,7 @@ from bot.handlers import (
     drafts_command,
     draft_info_command,
     delete_draft_command,
+    menu_command,
 )
 from bot.publisher import run_scheduled_publishing
 
@@ -42,6 +43,7 @@ def main() -> None:
     application.bot_data["db"] = db
 
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("menu", menu_command))
     application.add_handler(CommandHandler("draft", draft_command))
     application.add_handler(CommandHandler("generate", generate_command))
     application.add_handler(CommandHandler("collect", collect_command))
