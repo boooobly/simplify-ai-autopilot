@@ -12,6 +12,8 @@ import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
 
+from bot.style_guide import HUMANIZER_RULES_FOR_SIMPLIFY_AI, SIMPLIFY_AI_STYLE_GUIDE
+
 logger = logging.getLogger(__name__)
 STYLE_PATH = Path("prompts/post_style.md")
 URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
@@ -180,10 +182,11 @@ def generate_post_draft(
     base_url: str | None = None,
     extra_headers: dict[str, str] | None = None,
 ) -> GenerationResult:
-    style = _load_style_prompt()
+    style = _load_style_prompt() + "\n\n" + SIMPLIFY_AI_STYLE_GUIDE
     source_context = source_url or "не указан"
     user_prompt = (
         "Создай один черновик поста для Telegram-канала @simplify_ai. "
+        "Соблюдай стиль-гайд ниже как основные правила. "
         "Верни только готовый текст поста, без пояснений, без markdown-блока и без служебных комментариев. "
         f"Желательная длина до {soft_chars} символов. Жёсткий максимум {max_chars} символов. Не обрывай мысль. "
         "Не добавляй строку Источник в сам пост. Ссылка хранится отдельно в модерации. "
@@ -208,7 +211,7 @@ def polish_post_draft(
     base_url: str | None = None,
     extra_headers: dict[str, str] | None = None,
 ) -> GenerationResult:
-    style = _load_style_prompt()
+    style = _load_style_prompt() + "\n\n" + SIMPLIFY_AI_STYLE_GUIDE
     user_prompt = (
         "Улучши черновик для @simplify_ai. Сохрани простой человеческий тон, как у реального автора Telegram-канала. "
         "Сделай текст яснее и живее, но не делай его стерильным или корпоративным. "
@@ -219,7 +222,15 @@ def polish_post_draft(
         "Если в черновике есть \"▌\", убери этот символ. Не выводи raw HTML и не используй markdown blockquote. "
         "Пост должен быть цельным, без обрыва мысли посередине. "
         "Без AI-клише, без эм-даша, без кавычек-ёлочек. "
-        "Избегай штампов: 'не про..., а про...', 'главный вывод простой', 'важно отметить', 'давайте разберем', 'в заключение'.\n\n"
+        "Избегай штампов: 'не про..., а про...', 'главный вывод простой', 'важно отметить', 'давайте разберем', 'в заключение'. "
+        "Это финальный humanizer-pass: убери AI-клише, сделай текст естественным, сохрани факты, "
+        "сохрани Telegram-формат, сохрани маркеры списка ➖ и короткую человеческую концовку. "
+        "Не добавляй строку Источник внутрь поста.\n\n"
+        "Перед возвратом финального текста молча проверь: "
+        "похоже ли это на обычного автора Telegram, нет ли AI-клише, нет ли конструкции 'не про..., а про...', "
+        "нет ли стерильного маркетингового тона, не слишком ли длинно, нет ли неподтверждённых фактов. "
+        "Верни только финальный очищенный пост, без отчёта о проверке.\n\n"
+        f"Дополнительные humanizer-правила:\n{HUMANIZER_RULES_FOR_SIMPLIFY_AI}\n\n"
         f"Источник (контекст модерации): {source_url or 'не указан'}\n\n"
         f"Желательная длина до {soft_chars} символов. Жёсткий максимум {max_chars} символов. Не обрывай мысль.\n\n"
         f"Текущий черновик:\n{_strip_source_lines(draft_text)}"
@@ -294,9 +305,10 @@ def fetch_page_content(source_url: str, timeout_seconds: int = 12) -> tuple[str,
 
 
 def generate_post_draft_from_page(api_key: str, model: str, source_url: str, title: str, page_text: str, max_chars: int = 1400, soft_chars: int = 1100, base_url: str | None = None, extra_headers: dict[str, str] | None = None) -> GenerationResult:
-    style = _load_style_prompt()
+    style = _load_style_prompt() + "\n\n" + SIMPLIFY_AI_STYLE_GUIDE
     user_prompt = (
         "Ниже ссылка и извлечённый текст страницы. Опирайся только на этот текст страницы. "
+        "Соблюдай стиль-гайд ниже как основные правила. "
         "Не выдумывай факты, если их нет в тексте. "
         "Сделай один готовый пост в стиле @simplify_ai. "
         "Структура: короткий заголовок с emoji, 1-2 простых вводных предложения, практический смысл простыми словами, короткая финальная мысль с 💭 (когда уместно). "

@@ -468,7 +468,6 @@ def _queue_keyboard(day_offset: int, draft_ids: list[int]) -> InlineKeyboardMark
 
 
 def _render_queue_text(db: DraftDatabase, settings, day_offset: int) -> str:
-    _clear_pending_plan_schedule(context)
     day_name = "сегодня" if day_offset == 0 else "завтра"
     start_local, end_local = _get_day_range(day_offset, settings.schedule_timezone)
     start_utc = start_local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
@@ -1832,6 +1831,22 @@ async def usage_month_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await _usage_command(update, context, days=30, period_title="30 дней")
 
 
+async def style_guide_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_admin(user_id, settings.admin_id):
+        return
+    summary = (
+        "Текущий стиль @simplify_ai:\n"
+        "- простой русский, короткие фразы, без AI-клише\n"
+        "- формат: emoji-заголовок, короткий ввод, при необходимости список с ➖\n"
+        "- обязательно практический смысл и короткий человеческий финал\n"
+        "- без 'не про..., а про...', без эм-даша и без выдуманных фактов"
+    )
+    if update.message:
+        await update.message.reply_text(summary)
+
+
 async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle Publish/Reject/Rewrite button clicks."""
 
@@ -2392,6 +2407,7 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             "/usage_today - расходы ИИ за сегодня\n"
             "/usage_7d - расходы ИИ за 7 дней\n"
             "/usage_month - расходы ИИ за 30 дней\n"
+            "/style_guide - краткая сводка текущего стиля генерации\n"
             "/collect - собрать темы\n"
             "/sources_status - проверить источники тем\n"
             "/collect_debug - собрать темы с диагностикой\n"

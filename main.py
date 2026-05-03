@@ -27,6 +27,7 @@ from bot.handlers import (
     sources_status_command,
     usage_7d_command,
     usage_month_command,
+    style_guide_command,
     usage_today_command,
     drafts_command,
     draft_info_command,
@@ -80,6 +81,7 @@ def main() -> None:
     application.add_handler(CommandHandler("usage_today", usage_today_command))
     application.add_handler(CommandHandler("usage_7d", usage_7d_command))
     application.add_handler(CommandHandler("usage_month", usage_month_command))
+    application.add_handler(CommandHandler("style_guide", style_guide_command))
     application.add_handler(CommandHandler("drafts", drafts_command))
     application.add_handler(CommandHandler("draft_info", draft_info_command))
     application.add_handler(CommandHandler("delete_draft", delete_draft_command))
