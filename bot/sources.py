@@ -9,6 +9,7 @@ from xml.etree import ElementTree as ET
 
 import requests
 from bs4 import BeautifulSoup
+from bot.topic_scoring import normalize_topic_title, score_topic
 
 
 @dataclass
@@ -17,6 +18,10 @@ class TopicItem:
     url: str
     source: str
     published_at: str | None = None
+    category: str = "other"
+    score: int = 0
+    reason: str = ""
+    normalized_title: str = ""
 
 
 RSS_SOURCES: list[tuple[str, str]] = [
@@ -25,7 +30,21 @@ RSS_SOURCES: list[tuple[str, str]] = [
     ("Google AI blog", "https://blog.google/technology/ai/rss/"),
     ("Perplexity blog", "https://www.perplexity.ai/hub/blog/rss.xml"),
     ("Hugging Face blog", "https://huggingface.co/blog/feed.xml"),
+    ("Microsoft AI blog", "https://blogs.microsoft.com/ai/feed/"),
+    ("NVIDIA blog AI", "https://blogs.nvidia.com/blog/category/ai/feed/"),
+    ("VentureBeat AI", "https://venturebeat.com/ai/feed/"),
+    ("The Decoder", "https://the-decoder.com/feed/"),
+    ("MarkTechPost", "https://www.marktechpost.com/feed/"),
 ]
+
+
+def _with_scoring(topic: TopicItem) -> TopicItem:
+    score, category, reason = score_topic(topic.title, topic.source, topic.url)
+    topic.score = score
+    topic.category = category
+    topic.reason = reason
+    topic.normalized_title = normalize_topic_title(topic.title)
+    return topic
 
 
 def _parse_rss(xml_text: str, source_name: str, max_items: int = 8) -> list[TopicItem]:
@@ -47,7 +66,9 @@ def _parse_rss(xml_text: str, source_name: str, max_items: int = 8) -> list[Topi
             except Exception:
                 published_at = None
 
-        topics.append(TopicItem(title=title, url=link, source=source_name, published_at=published_at))
+        topics.append(
+            _with_scoring(TopicItem(title=title, url=link, source=source_name, published_at=published_at))
+        )
 
     return topics
 
@@ -70,12 +91,12 @@ def _fetch_github_trending_ai() -> list[TopicItem]:
         if not repo_path.startswith("/"):
             continue
         topics.append(
-            TopicItem(
+            _with_scoring(TopicItem(
                 title=f"GitHub Trending: {repo_name}",
                 url=f"https://github.com{repo_path}",
                 source="GitHub Trending AI",
                 published_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-            )
+            ))
         )
     return topics[:8]
 

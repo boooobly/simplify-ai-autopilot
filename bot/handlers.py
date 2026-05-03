@@ -81,6 +81,16 @@ def _disabled_link_preview_options() -> LinkPreviewOptions:
     return LinkPreviewOptions(is_disabled=True)
 
 
+def _topic_card_text(topic: dict) -> str:
+    return (
+        f"🧠 Тема #{topic['id']} - {topic.get('score', 0)} - {topic.get('category') or 'other'}\n"
+        f"{topic['title']}\n"
+        f"Источник: {topic['source']}\n"
+        f"Почему: {topic.get('reason') or 'без пояснения'}\n"
+        f"URL: {topic['url']}"
+    )
+
+
 def _is_admin(user_id: int | None, admin_id: int) -> bool:
     return user_id is not None and user_id == admin_id
 
@@ -1062,12 +1072,20 @@ async def collect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     items = collect_topics()
     added = 0
+    skipped = 0
     for item in items:
-        if db.create_topic_candidate(item.title, item.url, item.source, item.published_at):
+        if db.upsert_topic_candidate(
+            item.title, item.url, item.source, item.published_at, item.category, item.score, item.reason, item.normalized_title
+        ):
             added += 1
+        else:
+            skipped += 1
 
     if update.message:
-        await update.message.reply_text(f"Готово. Найдено: {len(items)}, добавлено новых: {added}.")
+        top = sorted(items, key=lambda i: i.score, reverse=True)[:5]
+        lines = ["🧠 Темы собраны", "", f"Новых: {added}", f"Обновлено/пропущено: {skipped}", "", "Лучшие:"]
+        lines.extend([f"- {it.score} - {it.category} - {it.title[:70]}" for it in top])
+        await update.message.reply_text("\n".join(lines))
 
 
 async def topics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1079,26 +1097,46 @@ async def topics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text("Нет доступа.")
         return
 
-    topics = db.list_topic_candidates(limit=10)
+    topics = db.list_topic_candidates(limit=10, status="new", order_by_score=True)
     if not topics:
         if update.message:
             await update.message.reply_text("Пока нет тем. Запусти /collect")
         return
 
     for topic in topics:
-        text = (
-            f"🧠 Тема #{topic['id']}\n"
-            f"Источник: {topic['source']}\n"
-            f"Заголовок: {topic['title']}\n"
-            f"URL: {topic['url']}"
-        )
+        text = _topic_card_text(topic)
         keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("✍️ Создать пост", callback_data=f"topic_generate:{topic['id']}")]]
+            [
+                [InlineKeyboardButton("✍️ Создать черновик", callback_data=f"topic_generate:{topic['id']}")],
+                [InlineKeyboardButton("❌ Отклонить тему", callback_data=f"reject_topic:{topic['id']}")],
+            ]
         )
         await context.bot.send_message(
             chat_id=settings.admin_id,
             text=text,
             reply_markup=keyboard,
+            link_preview_options=_disabled_link_preview_options(),
+        )
+
+
+async def topics_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_admin(user_id, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+    topics = db.list_topic_candidates(limit=15, status=None, order_by_score=True)
+    if not topics:
+        if update.message:
+            await update.message.reply_text("Пока нет тем. Запусти /collect")
+        return
+    for topic in topics:
+        status = topic.get("status") or "new"
+        await context.bot.send_message(
+            chat_id=settings.admin_id,
+            text=f"{_topic_card_text(topic)}\nСтатус: {status}",
             link_preview_options=_disabled_link_preview_options(),
         )
 
@@ -1193,6 +1231,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 total_tokens=generation_result.total_tokens, estimated_cost_usd=estimated_cost, source_url=topic["url"], draft_id=new_draft_id
             )
             logger.info("AI usage provider=%s model=%s operation=%s prompt=%s completion=%s total=%s cost=%s", provider, generation_result.model or settings.model_draft, "topic_generate", generation_result.prompt_tokens, generation_result.completion_tokens, generation_result.total_tokens, estimated_cost)
+            db.update_topic_status(topic_id, "used")
             await _send_moderation_preview(context, settings.admin_id, new_draft_id, generation_result.content, topic["url"])
             await _edit_callback_message(query, f"Создан черновик #{new_draft_id} из темы #{topic_id}.")
             if used_fallback:
@@ -1218,6 +1257,15 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 _render_queue_text(db, settings, day_offset=1),
                 reply_markup=_queue_keyboard(1, _queue_draft_ids_for_day(db, settings, 1)),
             )
+            return
+
+        if action == "reject_topic":
+            topic = db.get_topic_candidate(draft_id)
+            if not topic:
+                await _edit_callback_message(query, f"Тема #{draft_id} не найдена.")
+                return
+            db.update_topic_status(draft_id, "rejected")
+            await _edit_callback_message(query, f"Тема #{draft_id} отклонена.")
             return
 
         draft = db.get_draft(draft_id)
@@ -1628,24 +1676,32 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
     elif data == "menu_collect":
         items = collect_topics()
         added = 0
+        skipped = 0
         for item in items:
-            if db.create_topic_candidate(item.title, item.url, item.source, item.published_at):
+            if db.upsert_topic_candidate(
+                item.title, item.url, item.source, item.published_at, item.category, item.score, item.reason, item.normalized_title
+            ):
                 added += 1
+            else:
+                skipped += 1
         await _edit_callback_message(
             query,
-            f"Готово. Найдено: {len(items)}, добавлено новых: {added}.",
+            f"🧠 Темы собраны\n\nНовых: {added}\nОбновлено/пропущено: {skipped}",
             reply_markup=_back_to_menu_keyboard(),
         )
     elif data == "menu_show_topics":
-        topics = db.list_topic_candidates(limit=10)
+        topics = db.list_topic_candidates(limit=10, status="new", order_by_score=True)
         if not topics:
             await _edit_callback_message(query, "Пока нет тем. Запусти /collect", reply_markup=_back_to_menu_keyboard())
             return
         await _edit_callback_message(query, "Найденные темы:", reply_markup=_back_to_menu_keyboard())
         for topic in topics:
-            text = f"🧠 Тема #{topic['id']}\nИсточник: {topic['source']}\nЗаголовок: {topic['title']}\nURL: {topic['url']}"
+            text = _topic_card_text(topic)
             keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("✍️ Создать пост", callback_data=f"topic_generate:{topic['id']}")]]
+                [
+                    [InlineKeyboardButton("✍️ Создать черновик", callback_data=f"topic_generate:{topic['id']}")],
+                    [InlineKeyboardButton("❌ Отклонить тему", callback_data=f"reject_topic:{topic['id']}")],
+                ]
             )
             await context.bot.send_message(chat_id=settings.admin_id, text=text, reply_markup=keyboard, link_preview_options=_disabled_link_preview_options())
     elif data == "menu_queue":
@@ -1676,6 +1732,7 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             "/generate <ссылка> - пост из ссылки\n"
             "/drafts - последние черновики\n"
             "/topics - найденные темы\n"
+            "/topics_all - последние темы (все статусы)\n"
             "/queue_today - план публикаций на сегодня\n"
             "/queue_tomorrow - план публикаций на завтра\n"
             "/failed_drafts - последние неудачные публикации\n"
