@@ -1,4 +1,24 @@
-from bot.config import _parse_custom_emoji_aliases, _parse_custom_emoji_map, _parse_daily_post_slots
+import os
+
+from bot.config import (
+    _detect_railway_with_local_db_path,
+    _parse_custom_emoji_aliases,
+    _parse_custom_emoji_map,
+    _parse_daily_post_slots,
+    _validate_channel_id,
+    load_settings,
+    startup_diagnostics,
+)
+
+
+def _with_env(env: dict[str, str], fn) -> None:
+    saved = dict(os.environ)
+    try:
+        os.environ.update(env)
+        fn()
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
 
 
 def run() -> None:
@@ -13,6 +33,49 @@ def run() -> None:
         'chatgpt': ('🤖', '123'),
         'deepseek': ('🤖', '124'),
     }
+
+    assert _validate_channel_id("@simplify_ai") == "@simplify_ai"
+    assert _validate_channel_id("-1001234567890") == "-1001234567890"
+    for invalid_channel in ["https://t.me/+abcdef", "t.me/joinchat/abcdef", "random plain text"]:
+        try:
+            _validate_channel_id(invalid_channel)
+            raise AssertionError(f"Expected invalid CHANNEL_ID: {invalid_channel}")
+        except ValueError as exc:
+            assert "invite-ссылкой" in str(exc)
+
+    def _admin_id_must_be_int() -> None:
+        os.environ["BOT_TOKEN"] = "token"
+        os.environ["ADMIN_ID"] = "abc"
+        os.environ["CHANNEL_ID"] = "@simplify_ai"
+        try:
+            load_settings()
+            raise AssertionError("Expected ValueError for ADMIN_ID")
+        except ValueError as exc:
+            assert "ADMIN_ID должен быть целым числом" in str(exc)
+
+    _with_env({"BOT_TOKEN": "", "ADMIN_ID": "", "CHANNEL_ID": ""}, _admin_id_must_be_int)
+
+    def _diagnostics_no_secrets() -> None:
+        os.environ["BOT_TOKEN"] = "bot-secret"
+        os.environ["ADMIN_ID"] = "123"
+        os.environ["CHANNEL_ID"] = "@simplify_ai"
+        os.environ["OPENROUTER_API_KEY"] = "or-secret"
+        os.environ["OPENAI_API_KEY"] = "oa-secret"
+        settings = load_settings()
+        lines = startup_diagnostics(settings)
+        text = "\n".join(lines)
+        assert "bot-secret" not in text
+        assert "or-secret" not in text
+        assert "oa-secret" not in text
+
+    _with_env({}, _diagnostics_no_secrets)
+
+    def _railway_warning_detected() -> None:
+        os.environ["RAILWAY_ENVIRONMENT"] = "prod"
+        assert _detect_railway_with_local_db_path("data/drafts.db")
+        assert _detect_railway_with_local_db_path("./data/drafts.db")
+
+    _with_env({"RAILWAY_ENVIRONMENT": ""}, _railway_warning_detected)
     print('OK: DAILY_POST_SLOTS and custom emoji parsers')
 
 

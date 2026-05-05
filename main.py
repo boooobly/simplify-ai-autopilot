@@ -8,7 +8,7 @@ import os
 from telegram import BotCommand
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
-from bot.config import load_settings
+from bot.config import load_settings, startup_diagnostics
 from bot.database import DraftDatabase
 from bot.handlers import (
     admin_url_message,
@@ -46,6 +46,7 @@ from bot.handlers import (
     restore_draft_command,
     failed_drafts_command,
     emoji_ids_command,
+    health_command,
 )
 from bot.publisher import run_scheduled_publishing
 
@@ -74,6 +75,7 @@ async def _post_init(application: Application) -> None:
             BotCommand("usage_today", "Расходы ИИ сегодня"),
             BotCommand("style_guide", "Сводка по стилю"),
             BotCommand("emoji_ids", "ID кастомных emoji"),
+            BotCommand("health", "Статус бота"),
         ]
     )
 
@@ -81,6 +83,8 @@ def main() -> None:
     setup_logging()
 
     settings = load_settings()
+    for line in startup_diagnostics(settings):
+        logging.getLogger(__name__).info("startup: %s", line)
     db = DraftDatabase(settings.db_path)
 
     application = Application.builder().token(settings.bot_token).post_init(_post_init).build()
@@ -120,6 +124,7 @@ def main() -> None:
     application.add_handler(CommandHandler("restore_draft", restore_draft_command))
     application.add_handler(CommandHandler("failed_drafts", failed_drafts_command))
     application.add_handler(CommandHandler("emoji_ids", emoji_ids_command))
+    application.add_handler(CommandHandler("health", health_command))
     application.add_handler(MessageHandler(~filters.COMMAND, admin_url_message))
     application.add_handler(CallbackQueryHandler(moderation_callback))
 

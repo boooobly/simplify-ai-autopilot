@@ -75,6 +75,8 @@ def _parse_daily_post_slots(raw: str) -> list[str]:
 
 
 ALIAS_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+CHANNEL_USERNAME_RE = re.compile(r"^@[A-Za-z0-9_]{5,}$")
+CHANNEL_NUMERIC_ID_RE = re.compile(r"^-?\d+$")
 
 
 def _parse_custom_emoji_map(raw: str) -> dict[str, str]:
@@ -109,6 +111,55 @@ def _parse_custom_emoji_aliases(raw: str) -> dict[str, tuple[str, str]]:
             continue
         result[alias] = (fallback_emoji, custom_emoji_id)
     return result
+
+
+def _validate_channel_id(channel_id: str) -> str:
+    value = channel_id.strip()
+    lowered = value.lower()
+    if "t.me/" in lowered or "telegram.me/" in lowered:
+        raise ValueError("CHANNEL_ID должен быть @username канала или числовым id вида -100..., а не invite-ссылкой.")
+    if CHANNEL_USERNAME_RE.match(value):
+        return value
+    if CHANNEL_NUMERIC_ID_RE.match(value):
+        return value
+    raise ValueError("CHANNEL_ID должен быть @username канала или числовым id вида -100..., а не invite-ссылкой.")
+
+
+def _detect_railway_with_local_db_path(db_path: str) -> bool:
+    is_railway = any(os.getenv(name, "").strip() for name in ("RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID"))
+    if not is_railway:
+        return False
+    normalized = db_path.strip().replace("\\", "/").lower()
+    return normalized in {"data/drafts.db", "./data/drafts.db"}
+
+
+def _ai_provider_label(openrouter_api_key: str | None, openai_api_key: str | None) -> str:
+    if openrouter_api_key:
+        return "OpenRouter"
+    if openai_api_key:
+        return "OpenAI"
+    return "not configured"
+
+
+def startup_diagnostics(settings: Settings) -> list[str]:
+    channel_type = "username" if settings.channel_id.startswith("@") else "numeric id"
+    lines = [
+        f"AI provider: {_ai_provider_label(settings.openrouter_api_key, settings.openai_api_key)}",
+        f"model_draft: {settings.model_draft}",
+        f"model_polish: {settings.model_polish}",
+        f"schedule_timezone: {settings.schedule_timezone}",
+        f"daily_post_slots: {', '.join(settings.daily_post_slots)}",
+        f"post_soft_chars/post_max_chars: {settings.post_soft_chars}/{settings.post_max_chars}",
+        f"DB_PATH: {settings.db_path}",
+        f"CHANNEL_ID type: {channel_type}",
+        f"custom emoji aliases count: {len(settings.custom_emoji_aliases)}",
+        f"custom emoji map count: {len(settings.custom_emoji_map)}",
+    ]
+    if _detect_railway_with_local_db_path(settings.db_path):
+        lines.append(
+            "Внимание: DB_PATH указывает на локальный data/drafts.db. На Railway без persistent volume база может потеряться после redeploy. Лучше использовать путь volume, например /data/drafts.db."
+        )
+    return lines
 
 def load_settings() -> Settings:
     """Load and validate all required environment variables."""
@@ -154,14 +205,14 @@ def load_settings() -> Settings:
         missing.append("CHANNEL_ID")
 
     if missing:
-        raise ValueError(
-            f"Missing required environment variables: {', '.join(missing)}"
-        )
+        raise ValueError(f"Не заданы обязательные переменные окружения: {', '.join(missing)}. Заполни их в .env/Railway Variables.")
 
     try:
         admin_id = int(admin_raw)
     except ValueError as exc:
-        raise ValueError("ADMIN_ID must be a valid integer Telegram user ID") from exc
+        raise ValueError("ADMIN_ID должен быть целым числом (Telegram user id).") from exc
+
+    channel_id = _validate_channel_id(channel_id)
 
     return Settings(
         bot_token=token,

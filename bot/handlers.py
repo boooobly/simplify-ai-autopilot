@@ -11,6 +11,7 @@ from telegram import KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup,
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
+from bot.config import _detect_railway_with_local_db_path
 from bot.database import DraftDatabase
 from bot.drafts import create_test_draft, rewrite_test_draft
 from bot.media_utils import decode_media_items, encode_media_group, media_count
@@ -185,6 +186,40 @@ def _topic_actions_keyboard(topic_id: int) -> InlineKeyboardMarkup:
 
 def _is_admin(user_id: int | None, admin_id: int) -> bool:
     return user_id is not None and user_id == admin_id
+
+
+def _ai_provider_for_status(settings) -> str:
+    if settings.openrouter_api_key:
+        return "OpenRouter"
+    if settings.openai_api_key:
+        return "OpenAI"
+    return "не настроен"
+
+
+async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.application.bot_data["settings"]
+    if not _is_admin(update.effective_user.id if update.effective_user else None, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+
+    provider = _ai_provider_for_status(settings)
+    lines = [
+        "Бот запущен",
+        f"Провайдер AI: {provider}",
+        f"Draft model: {settings.model_draft}",
+        f"Polish model: {settings.model_polish}",
+        f"Таймзона: {settings.schedule_timezone}",
+        f"Слоты: {', '.join(settings.daily_post_slots)}",
+        f"DB path: {settings.db_path}",
+        f"AI настроен: {'да' if settings.has_ai_provider else 'нет'}",
+        f"Emoji aliases: {len(settings.custom_emoji_aliases)}",
+        f"Emoji map: {len(settings.custom_emoji_map)}",
+    ]
+    if _detect_railway_with_local_db_path(settings.db_path):
+        lines.append("⚠️ Railway: локальный DB_PATH может потеряться без persistent volume.")
+    if update.message:
+        await update.message.reply_text("\n".join(lines), reply_markup=_admin_reply_keyboard())
 
 
 def _parse_callback_data(data: str) -> tuple[str, int, str | None]:
