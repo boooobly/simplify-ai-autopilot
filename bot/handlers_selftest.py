@@ -1,4 +1,9 @@
-from bot.handlers import _build_media_preview_caption, _build_moderation_text, _send_moderation_preview
+from bot.handlers import (
+    _build_media_preview_caption,
+    _build_moderation_text,
+    _render_failed_drafts_text,
+    _send_moderation_preview,
+)
 
 
 def run() -> None:
@@ -22,6 +27,19 @@ def run() -> None:
     )
     assert "🤖" in caption
     assert "settings" not in _send_moderation_preview.__code__.co_names
+
+    failed_text = _render_failed_drafts_text([
+        {
+            "id": 42,
+            "source_url": "https://example.com/news",
+            "media_url": "abc",
+            "media_type": "photo",
+            "updated_at": "2026-05-05 10:00:00",
+            "content": "Тестовый упавший черновик\nсо второй строкой",
+        }
+    ])
+    assert "#42" in failed_text
+    assert "Можно восстановить: /restore_draft ID" in failed_text
 
     print("OK")
 

@@ -13,6 +13,7 @@ from bot.telegram_formatting import render_post_html, strip_quote_markers
 
 
 MEDIA_CAPTION_LIMIT = 1024
+RECOVERY_REASON = "Черновик был в статусе publishing при старте бота. Переведён в failed для ручной проверки."
 logger = logging.getLogger(__name__)
 
 
@@ -120,6 +121,14 @@ async def publish_to_channel(
 
     await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))
 
+
+
+
+def recover_stuck_publishing_drafts(db: DraftDatabase) -> list[int]:
+    recovered_ids = db.recover_stuck_publishing_drafts()
+    for draft_id in recovered_ids:
+        logger.warning("%s draft_id=%s", RECOVERY_REASON, draft_id)
+    return recovered_ids
 
 async def run_scheduled_publishing(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Publish due scheduled drafts every minute."""
