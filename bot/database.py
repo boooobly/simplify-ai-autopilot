@@ -256,17 +256,53 @@ class DraftDatabase:
             )
             conn.commit()
 
-    def restore_draft(self, draft_id: int) -> None:
+    def list_publishing_drafts(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
-            conn.execute(
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM drafts
+                WHERE status = 'publishing'
+                ORDER BY updated_at ASC, id ASC
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def recover_stuck_publishing_drafts(self) -> list[int]:
+        recovered_ids: list[int] = []
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id
+                FROM drafts
+                WHERE status = 'publishing'
+                ORDER BY updated_at ASC, id ASC
+                """
+            ).fetchall()
+            if rows:
+                recovered_ids = [int(row["id"]) for row in rows]
+                conn.execute(
+                    """
+                    UPDATE drafts
+                    SET status = 'failed', updated_at = CURRENT_TIMESTAMP
+                    WHERE status = 'publishing'
+                    """
+                )
+            conn.commit()
+        return recovered_ids
+
+    def restore_draft(self, draft_id: int) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
                 """
                 UPDATE drafts
                 SET status = 'draft', scheduled_at = NULL, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                WHERE id = ? AND status = 'failed'
                 """,
                 (draft_id,),
             )
             conn.commit()
+            return cursor.rowcount == 1
 
 
     def list_drafts(self, limit: int = 10, status: str | None = None) -> list[dict[str, Any]]:
