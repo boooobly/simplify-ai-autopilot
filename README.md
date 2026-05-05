@@ -39,25 +39,18 @@
 - Дедупликация тем по URL (повторная тема не добавляется)
 - Работа через long polling (подходит для Railway worker service)
 
-## Структура проекта
+## Архитектура
 
-```text
-main.py
-bot/
-  config.py
-  database.py
-  handlers.py
-  publisher.py
-  drafts.py
-  writer.py
-prompts/
-  post_style.md
-data/
-  .gitkeep
-requirements.txt
-.env.example
-README.md
-```
+- `main.py` — entrypoint приложения, регистрация команд и запуск scheduler.
+- `bot/config.py` — загрузка и валидация env-настроек.
+- `bot/database.py` — SQLite persistence для черновиков, тем и планирования.
+- `bot/handlers.py` — Telegram-команды, callbacks и модерационные действия.
+- `bot/writer.py` — генерация черновиков через AI и парсинг URL-источников.
+- `bot/sources.py` и `bot/topic_scoring.py` — сбор и ранжирование тем.
+- `bot/publisher.py` — публикация постов в Telegram-канал.
+- `bot/telegram_formatting.py` — безопасное Telegram HTML-форматирование, ссылки, blockquote, custom emoji.
+- `bot/media_utils.py` — вспомогательные функции для media group.
+- `bot/style_guide.py` и `prompts/post_style.md` — правила стиля `@simplify_ai`.
 
 ## Требования
 
