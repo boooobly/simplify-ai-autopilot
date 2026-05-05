@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Compile Python sources
+        run: python -m compileall main.py bot
+
+      - name: Run selftests as modules
+        run: |
+          python - <<'PY'
+          import pathlib
+          import subprocess
+          import sys
+
+          selftests = sorted(pathlib.Path("bot").glob("*_selftest.py"))
+          if not selftests:
+              print("No selftests found.")
+              sys.exit(1)
+
+          for test_file in selftests:
+              module = ".".join(test_file.with_suffix("").parts)
+              print(f"Running {module}")
+              subprocess.run([sys.executable, "-m", module], check=True)
+          PY
