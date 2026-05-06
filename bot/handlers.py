@@ -1461,26 +1461,11 @@ async def restore_draft_command(update: Update, context: ContextTypes.DEFAULT_TY
     if not draft:
         await update.message.reply_text(f"Черновик #{draft_id} не найден.")
         return
-    if draft.get("status") != "failed":
-        await update.message.reply_text(
-            f"Черновик #{draft_id} нельзя восстановить: нужен статус failed, сейчас {draft.get('status')}."
-        )
+    if draft.get("status") not in {"failed", "publishing"}:
+        await update.message.reply_text(f"Черновик #{draft_id} не требует восстановления.")
         return
-    restored = db.restore_draft(draft_id)
-    if not restored:
-        await update.message.reply_text(f"Не удалось восстановить черновик #{draft_id}. Проверь статус и попробуй снова.")
-        return
-    refreshed = db.get_draft(draft_id) or draft
+    db.restore_draft(draft_id)
     await update.message.reply_text(f"Черновик #{draft_id} возвращён в черновики.")
-    await _send_moderation_preview(
-        context,
-        settings.admin_id,
-        draft_id,
-        str(refreshed.get("content") or ""),
-        source_url=refreshed.get("source_url"),
-        media_url=refreshed.get("media_url"),
-        media_type=refreshed.get("media_type"),
-    )
 
 
 async def failed_drafts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2267,15 +2252,10 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             db.update_status(draft_id, "rejected")
             await _edit_callback_message(query, f"❌ Черновик #{draft_id} отклонён.")
         elif action == "restore_draft":
-            if draft.get("status") != "failed":
-                await _edit_callback_message(
-                    query,
-                    f"Черновик #{draft_id} нельзя восстановить: нужен статус failed, сейчас {draft.get('status')}.",
-                )
+            if draft.get("status") not in {"failed", "publishing"}:
+                await _edit_callback_message(query, f"Черновик #{draft_id} не требует восстановления.")
                 return
-            if not db.restore_draft(draft_id):
-                await _edit_callback_message(query, f"Не удалось восстановить черновик #{draft_id}.")
-                return
+            db.restore_draft(draft_id)
             refreshed = db.get_draft(draft_id) or draft
             await _edit_callback_message(
                 query,
@@ -2639,7 +2619,7 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             "/queue_tomorrow - план публикаций на завтра\n"
             "/failed_drafts - последние неудачные публикации\n"
             "/unschedule <id> - снять черновик с очереди\n"
-            "/restore_draft <id> - вернуть failed в черновики\n"
+            "/restore_draft <id> - вернуть failed/publishing в черновики\n"
             "/usage_today - расходы ИИ за сегодня\n"
             "/usage_7d - расходы ИИ за 7 дней\n"
             "/usage_month - расходы ИИ за 30 дней\n"

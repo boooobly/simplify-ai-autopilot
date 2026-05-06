@@ -48,7 +48,7 @@ from bot.handlers import (
     emoji_ids_command,
     health_command,
 )
-from bot.publisher import recover_stuck_publishing_drafts, run_scheduled_publishing
+from bot.publisher import run_scheduled_publishing
 
 
 def setup_logging() -> None:
@@ -86,7 +86,6 @@ def main() -> None:
     for line in startup_diagnostics(settings):
         logging.getLogger(__name__).info("startup: %s", line)
     db = DraftDatabase(settings.db_path)
-    recover_stuck_publishing_drafts(db)
 
     application = Application.builder().token(settings.bot_token).post_init(_post_init).build()
     application.bot_data["settings"] = settings
