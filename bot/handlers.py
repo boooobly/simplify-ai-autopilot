@@ -190,6 +190,20 @@ def _render_failed_drafts_text(drafts: list[dict]) -> str:
     lines.append("Можно восстановить: /restore_draft ID")
     return "\n".join(lines).strip()
 
+
+def _failed_drafts_keyboard(drafts: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for draft in drafts:
+        draft_id = int(draft["id"])
+        rows.append(
+            [
+                InlineKeyboardButton(f"Открыть #{draft_id}", callback_data=f"draft_info:{draft_id}"),
+                InlineKeyboardButton(f"🔁 Восстановить #{draft_id}", callback_data=f"restore_draft:{draft_id}"),
+            ]
+        )
+    return InlineKeyboardMarkup(rows)
+
+
 def _topic_card_text(topic: dict) -> str:
     score = int(topic.get("score") or 0)
     return (
@@ -1481,6 +1495,7 @@ async def failed_drafts_command(update: Update, context: ContextTypes.DEFAULT_TY
     await context.bot.send_message(
         chat_id=settings.admin_id,
         text=_render_failed_drafts_text(drafts),
+        reply_markup=_failed_drafts_keyboard(drafts),
         link_preview_options=_disabled_link_preview_options(),
     )
 
