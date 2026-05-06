@@ -163,6 +163,47 @@ def _disabled_link_preview_options() -> LinkPreviewOptions:
     return LinkPreviewOptions(is_disabled=True)
 
 
+
+def _format_failed_draft_line(draft: dict) -> str:
+    draft_id = int(draft["id"])
+    source_url = str(draft.get("source_url") or "—")
+    media_type = str(draft.get("media_type") or "нет")
+    media_total = media_count(draft.get("media_url"), draft.get("media_type"))
+    updated_at = str(draft.get("updated_at") or "—")
+    snippet = strip_quote_markers(str(draft.get("content") or "")).replace("\n", " ").strip()
+    if len(snippet) > 120:
+        snippet = snippet[:119].rstrip() + "…"
+    if not snippet:
+        snippet = "[пусто]"
+    return (
+        f"#{draft_id} | media: {media_type} ({media_total}) | updated: {updated_at}\n"
+        f"URL: {source_url}\n"
+        f"{snippet}"
+    )
+
+
+def _render_failed_drafts_text(drafts: list[dict]) -> str:
+    lines = ["❗ Failed drafts (последние 10)", ""]
+    for draft in drafts:
+        lines.append(_format_failed_draft_line(draft))
+        lines.append("")
+    lines.append("Можно восстановить: /restore_draft ID")
+    return "\n".join(lines).strip()
+
+
+def _failed_drafts_keyboard(drafts: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for draft in drafts:
+        draft_id = int(draft["id"])
+        rows.append(
+            [
+                InlineKeyboardButton(f"Открыть #{draft_id}", callback_data=f"draft_info:{draft_id}"),
+                InlineKeyboardButton(f"🔁 Восстановить #{draft_id}", callback_data=f"restore_draft:{draft_id}"),
+            ]
+        )
+    return InlineKeyboardMarkup(rows)
+
+
 def _topic_card_text(topic: dict) -> str:
     score = int(topic.get("score") or 0)
     return (
@@ -1436,19 +1477,12 @@ async def failed_drafts_command(update: Update, context: ContextTypes.DEFAULT_TY
     if not drafts:
         await update.message.reply_text("Нет черновиков в статусе failed.")
         return
-    for draft in drafts:
-        draft_id = int(draft["id"])
-        await context.bot.send_message(
-            chat_id=settings.admin_id,
-            text=_draft_snippet_text(draft),
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [InlineKeyboardButton(f"Открыть #{draft_id}", callback_data=f"draft_info:{draft_id}")],
-                    [InlineKeyboardButton("🔁 Вернуть в черновики", callback_data=f"restore_draft:{draft_id}")],
-                ]
-            ),
-            link_preview_options=_disabled_link_preview_options(),
-        )
+    await context.bot.send_message(
+        chat_id=settings.admin_id,
+        text=_render_failed_drafts_text(drafts),
+        reply_markup=_failed_drafts_keyboard(drafts),
+        link_preview_options=_disabled_link_preview_options(),
+    )
 
 
 async def attach_media_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
