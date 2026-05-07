@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import re
+from dataclasses import dataclass
 
 from telegram import Bot, InputMediaPhoto, InputMediaVideo, LinkPreviewOptions
 from telegram.ext import ContextTypes
@@ -13,11 +15,19 @@ from bot.telegram_formatting import render_post_html, strip_quote_markers
 
 
 MEDIA_CAPTION_LIMIT = 1024
+MEDIA_PREVIEW_CAPTION_LIMIT = 300
+INTERNAL_MARKER_PATTERN = re.compile(
+    r"\[\[LINK:.+?\|.+?\]\]|\[\[EMOJI:[a-zA-Z0-9_-]+\]\]|\[\[/?QUOTE\]\]",
+    re.DOTALL,
+)
 logger = logging.getLogger(__name__)
 
 
-def _fit_caption(text: str) -> str:
-    return text if len(text) <= MEDIA_CAPTION_LIMIT else text[: MEDIA_CAPTION_LIMIT - 1].rstrip() + "…"
+@dataclass(frozen=True)
+class SafeCaption:
+    text: str
+    parse_mode: str | None
+    send_full_text_after: bool
 
 
 def _render_or_plain(
@@ -31,10 +41,47 @@ def _render_or_plain(
         return strip_quote_markers(text, custom_emoji_aliases=custom_emoji_aliases), None
 
 
-def _short_media_caption(text: str) -> str:
-    if len(text) <= 300:
-        return text
-    return text[:299].rstrip() + "…"
+def _remove_incomplete_trailing_marker(text: str) -> str:
+    """Drop an incomplete internal marker fragment at the end of a preview."""
+
+    marker_start = text.rfind("[[")
+    marker_end = text.rfind("]]", marker_start) if marker_start != -1 else -1
+    if marker_start != -1 and marker_end == -1:
+        return text[:marker_start].rstrip()
+    return text
+
+
+def _shorten_internal_text(text: str, limit: int = MEDIA_PREVIEW_CAPTION_LIMIT) -> str:
+    """Shorten source post text without splitting internal Telegram markers."""
+
+    if len(text) <= limit:
+        return _remove_incomplete_trailing_marker(text)
+
+    cut = max(0, limit - 1)
+    for match in INTERNAL_MARKER_PATTERN.finditer(text):
+        if match.start() < cut < match.end():
+            cut = match.start()
+            break
+
+    shortened = _remove_incomplete_trailing_marker(text[:cut]).rstrip()
+    return f"{shortened}…" if shortened else "…"
+
+
+def _prepare_media_caption(
+    text: str,
+    custom_emoji_map: dict[str, str] | None = None,
+    custom_emoji_aliases: dict[str, tuple[str, str]] | None = None,
+) -> SafeCaption:
+    """Build a Telegram caption by shortening internal text before HTML rendering."""
+
+    send_full_text_after = len(text) > MEDIA_CAPTION_LIMIT
+    caption_source = _shorten_internal_text(text) if send_full_text_after else text
+    caption_text, caption_mode = _render_or_plain(
+        caption_source,
+        custom_emoji_map=custom_emoji_map,
+        custom_emoji_aliases=custom_emoji_aliases,
+    )
+    return SafeCaption(caption_text, caption_mode, send_full_text_after)
 
 
 async def publish_to_channel(
@@ -67,17 +114,13 @@ async def publish_to_channel(
                 else:
                     await bot.send_animation(chat_id=channel_id, animation=item["file_id"])
             return
-        caption = None
-        caption_mode = None
-        send_full_text_after = False
-        if len(content) <= MEDIA_CAPTION_LIMIT:
-            caption = _fit_caption(rendered_text)
-            caption_mode = parse_mode
-        else:
-            short_caption, short_mode = _render_or_plain(_short_media_caption(content), custom_emoji_map=custom_emoji_map, custom_emoji_aliases=custom_emoji_aliases)
-            caption = _fit_caption(short_caption)
-            caption_mode = short_mode
-            send_full_text_after = True
+        safe_caption = _prepare_media_caption(
+            content,
+            custom_emoji_map=custom_emoji_map,
+            custom_emoji_aliases=custom_emoji_aliases,
+        )
+        caption = safe_caption.text
+        caption_mode = safe_caption.parse_mode
         group = []
         for idx, item in enumerate(media_items):
             if item["type"] == "photo":
@@ -86,35 +129,56 @@ async def publish_to_channel(
                 group.append(InputMediaVideo(media=item["file_id"], caption=caption if idx == 0 else None, parse_mode=caption_mode if idx == 0 else None))
         if group:
             await bot.send_media_group(chat_id=channel_id, media=group)
-            if send_full_text_after:
+            if safe_caption.send_full_text_after:
                 await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))
             return
 
     if media_items and media_items[0]["type"] == "photo":
         media_url = media_items[0]["file_id"]
-        if len(content) <= MEDIA_CAPTION_LIMIT:
-            await bot.send_photo(chat_id=channel_id, photo=media_url, caption=_fit_caption(rendered_text), parse_mode=parse_mode)
-        else:
-            short_caption, short_mode = _render_or_plain(_short_media_caption(content), custom_emoji_map=custom_emoji_map, custom_emoji_aliases=custom_emoji_aliases)
-            await bot.send_photo(chat_id=channel_id, photo=media_url, caption=_fit_caption(short_caption), parse_mode=short_mode)
+        safe_caption = _prepare_media_caption(
+            content,
+            custom_emoji_map=custom_emoji_map,
+            custom_emoji_aliases=custom_emoji_aliases,
+        )
+        await bot.send_photo(
+            chat_id=channel_id,
+            photo=media_url,
+            caption=safe_caption.text,
+            parse_mode=safe_caption.parse_mode,
+        )
+        if safe_caption.send_full_text_after:
             await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))
         return
     if media_items and media_items[0]["type"] == "video":
         media_url = media_items[0]["file_id"]
-        if len(content) <= MEDIA_CAPTION_LIMIT:
-            await bot.send_video(chat_id=channel_id, video=media_url, caption=_fit_caption(rendered_text), parse_mode=parse_mode)
-        else:
-            short_caption, short_mode = _render_or_plain(_short_media_caption(content), custom_emoji_map=custom_emoji_map, custom_emoji_aliases=custom_emoji_aliases)
-            await bot.send_video(chat_id=channel_id, video=media_url, caption=_fit_caption(short_caption), parse_mode=short_mode)
+        safe_caption = _prepare_media_caption(
+            content,
+            custom_emoji_map=custom_emoji_map,
+            custom_emoji_aliases=custom_emoji_aliases,
+        )
+        await bot.send_video(
+            chat_id=channel_id,
+            video=media_url,
+            caption=safe_caption.text,
+            parse_mode=safe_caption.parse_mode,
+        )
+        if safe_caption.send_full_text_after:
             await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))
         return
     if media_items and media_items[0]["type"] == "animation":
         media_url = media_items[0]["file_id"]
-        if len(content) <= MEDIA_CAPTION_LIMIT:
-            await bot.send_animation(chat_id=channel_id, animation=media_url, caption=_fit_caption(rendered_text), parse_mode=parse_mode)
-        else:
-            short_caption, short_mode = _render_or_plain(_short_media_caption(content), custom_emoji_map=custom_emoji_map, custom_emoji_aliases=custom_emoji_aliases)
-            await bot.send_animation(chat_id=channel_id, animation=media_url, caption=_fit_caption(short_caption), parse_mode=short_mode)
+        safe_caption = _prepare_media_caption(
+            content,
+            custom_emoji_map=custom_emoji_map,
+            custom_emoji_aliases=custom_emoji_aliases,
+        )
+        await bot.send_animation(
+            chat_id=channel_id,
+            animation=media_url,
+            caption=safe_caption.text,
+            parse_mode=safe_caption.parse_mode,
+        )
+        if safe_caption.send_full_text_after:
             await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))
         return
 
