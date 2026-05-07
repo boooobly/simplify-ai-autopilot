@@ -16,12 +16,16 @@ class DraftDatabase:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 30000")
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA synchronous = NORMAL")
         return conn
 
     def _init_db(self) -> None:
         with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode = WAL")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS drafts (
@@ -77,7 +81,38 @@ class DraftDatabase:
                 )
                 """
             )
+            self._ensure_indexes(conn)
             conn.commit()
+
+    def _ensure_indexes(self, conn: sqlite3.Connection) -> None:
+        index_statements = [
+            """
+            CREATE INDEX IF NOT EXISTS idx_drafts_status_scheduled_at
+            ON drafts (status, scheduled_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_drafts_source_url
+            ON drafts (source_url)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_drafts_status_updated_at
+            ON drafts (status, updated_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_topic_candidates_status_score_created_at
+            ON topic_candidates (status, score, created_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_topic_candidates_normalized_title
+            ON topic_candidates (normalized_title)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_ai_usage_created_at
+            ON ai_usage (created_at)
+            """,
+        ]
+        for statement in index_statements:
+            conn.execute(statement)
 
     def _ensure_column(
         self, conn: sqlite3.Connection, table_name: str, column_name: str, column_sql_type: str
