@@ -86,6 +86,10 @@ def main() -> None:
     for line in startup_diagnostics(settings):
         logging.getLogger(__name__).info("startup: %s", line)
     db = DraftDatabase(settings.db_path)
+    recovered_count = db.recover_stuck_publishing_drafts()
+    logging.getLogger(__name__).info(
+        "startup: recovered %s stuck publishing drafts to failed", recovered_count
+    )
 
     application = Application.builder().token(settings.bot_token).post_init(_post_init).build()
     application.bot_data["settings"] = settings
