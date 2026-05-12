@@ -18,7 +18,7 @@ from bot.media_utils import decode_media_items, encode_media_group, media_count
 from bot.publisher import publish_to_channel
 from bot.telegram_formatting import strip_quote_markers
 from bot.sources import SourceReport, collect_topics, collect_topics_with_diagnostics
-from bot.topic_display import topic_display_reason, topic_display_title, topic_original_title_line
+from bot.topic_display import topic_angle_ru, topic_display_reason, topic_display_title, topic_original_title_line, topic_summary_ru
 from bot.writer import (
     EmptyAIResponseError,
     GenerationResult,
@@ -28,6 +28,7 @@ from bot.writer import (
     generate_post_draft_from_page,
     normalize_url,
     translate_topic_title_to_ru,
+    enrich_topic_metadata_ru,
     polish_post_draft,
 )
 
@@ -211,11 +212,18 @@ def _topic_card_text(topic: dict) -> str:
     lines = [
         f"🧠 Тема #{topic['id']} - {score} - {_category_label(topic.get('category'))}",
         f"Вес: {_score_label(score)}",
+        "",
         topic_display_title(topic),
+        "",
+        "О чем:",
+        topic_summary_ru(topic),
+        "",
+        "Идея поста:",
+        topic_angle_ru(topic),
     ]
     original_line = topic_original_title_line(topic)
     if original_line:
-        lines.append(original_line)
+        lines.extend(["", original_line])
     lines.extend(
         [
             f"Источник: {topic['source']} / {_source_group_label(topic.get('source_group'))}",
@@ -359,6 +367,8 @@ def _render_plan_text(day_name: str, slots: list[str], topics: list[dict]) -> st
             [
                 f"{slot} - тема #{topic['id']} - {_category_label(topic.get('category'))} - вес {score}",
                 topic_display_title(topic),
+                f"О чем: {topic_summary_ru(topic)}",
+                f"Идея поста: {topic_angle_ru(topic)}",
                 "",
             ]
         )
@@ -468,6 +478,59 @@ def _translate_topic_title_if_available(item, settings, db: DraftDatabase) -> No
         provider=provider,
         model=result.model or settings.model_draft,
         operation="topic_translate_title",
+        prompt_tokens=result.prompt_tokens,
+        completion_tokens=result.completion_tokens,
+        total_tokens=result.total_tokens,
+        estimated_cost_usd=estimated_cost,
+        source_url=item.url,
+        draft_id=None,
+    )
+
+
+def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase) -> None:
+    if not settings or not getattr(settings, "has_ai_provider", False):
+        return
+    if item.title_ru and item.summary_ru and item.angle_ru:
+        return
+    api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
+    if not api_key:
+        return
+    try:
+        result = enrich_topic_metadata_ru(
+            api_key=api_key,
+            model=settings.model_draft,
+            title=item.title,
+            source=item.source,
+            description=getattr(item, "original_description", None),
+            base_url=base_url,
+            extra_headers=extra_headers,
+        )
+    except Exception as exc:
+        logger.warning("Topic metadata enrichment failed: %s", exc)
+        return
+    if not result or not result.content.strip():
+        return
+    parts = [part.strip() for part in result.content.splitlines() if part.strip()]
+    if len(parts) < 3:
+        return
+    topic = db.find_topic_candidate_by_url(item.url)
+    if not topic:
+        return
+    item.title_ru = item.title_ru or parts[0]
+    item.summary_ru = item.summary_ru or parts[1]
+    item.angle_ru = item.angle_ru or parts[2]
+    db.update_topic_candidate_display_fields(
+        int(topic["id"]),
+        title_ru=item.title_ru,
+        summary_ru=item.summary_ru,
+        angle_ru=item.angle_ru,
+        reason_ru=item.reason_ru,
+    )
+    estimated_cost = estimate_ai_cost(provider, result.prompt_tokens, result.completion_tokens, settings)
+    db.record_ai_usage(
+        provider=provider,
+        model=result.model or settings.model_draft,
+        operation="topic_enrich_metadata",
         prompt_tokens=result.prompt_tokens,
         completion_tokens=result.completion_tokens,
         total_tokens=result.total_tokens,
@@ -1743,14 +1806,14 @@ def _collect_topics_with_stats(db: DraftDatabase, items: list | None = None, set
             stats.low_score += 1
             continue
         result = db.upsert_topic_candidate_with_reason(
-            item.title, item.url, item.source, item.published_at, item.category, item.score, item.reason, item.normalized_title, item.source_group, item.title_ru, item.reason_ru
+            item.title, item.url, item.source, item.published_at, item.category, item.score, item.reason, item.normalized_title, item.source_group, item.title_ru, item.summary_ru, item.angle_ru, item.reason_ru, item.original_description
         )
         if result == "inserted":
             stats.new += 1
             inserted.append(item)
             if translated_count < translation_limit and item.score >= 75:
                 before_title_ru = item.title_ru
-                _translate_topic_title_if_available(item, settings, db)
+                _enrich_topic_metadata_if_available(item, settings, db)
                 if item.title_ru and item.title_ru != before_title_ru:
                     translated_count += 1
         elif result == "existing_url":

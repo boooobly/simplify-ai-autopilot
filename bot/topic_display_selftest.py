@@ -9,8 +9,10 @@ def run() -> None:
         "id": 7,
         "title": "OpenAI releases a new model",
         "title_ru": "OpenAI выпустила новую модель",
+        "summary_ru": "Коротко объясняет новую возможность модели.",
+        "angle_ru": "Можно показать, что изменится для обычных пользователей.",
         "reason": "model",
-        "reason_ru": "модель",
+        "reason_ru": "Тема набрала высокий вес, потому что это официальный AI-релиз.",
         "source": "OpenAI blog",
         "source_group": "official_ai",
         "category": "model",
@@ -19,8 +21,12 @@ def run() -> None:
     }
     card = _topic_card_text(topic)
     assert "OpenAI выпустила новую модель" in card
+    assert "О чем:" in card
+    assert "Коротко объясняет новую возможность модели." in card
+    assert "Идея поста:" in card
+    assert "Можно показать, что изменится" in card
     assert "Оригинал: OpenAI releases a new model" in card
-    assert "Почему: модель" in card
+    assert "Почему: Тема набрала высокий вес" in card
     assert "URL: https://example.com/openai-model" in card
 
     fallback_topic = {
@@ -37,7 +43,24 @@ def run() -> None:
     assert topic_display_title(fallback_topic) == "English fallback title"
     assert topic_display_reason(fallback_topic) == "новость/релиз"
     assert "English fallback title" in fallback_card
+    assert "О чем:" in fallback_card
+    assert "Источник предлагает новость по AI" in fallback_card
+    assert "Идея поста:" in fallback_card
     assert "Оригинал:" not in fallback_card
+
+    github_fallback = {
+        "id": 9,
+        "title": "GitHub Trending: owner / repo",
+        "source": "GitHub Trending AI",
+        "source_group": "github",
+        "category": "dev",
+        "score": 80,
+        "reason": "разработка/GitHub",
+        "url": "https://github.com/owner/repo",
+    }
+    github_card = _topic_card_text(github_fallback)
+    assert "Похоже на GitHub-проект по AI/разработке" in github_card
+    assert "URL: https://github.com/owner/repo" in github_card
 
     plan = _render_plan_text("сегодня", ["10:00"], [topic])
     assert "OpenAI выпустила новую модель" in plan

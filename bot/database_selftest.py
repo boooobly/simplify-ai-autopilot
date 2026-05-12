@@ -47,7 +47,7 @@ def _assert_database_settings(db: DraftDatabase) -> None:
         assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1
         assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
         topic_columns = {row["name"] for row in conn.execute("PRAGMA table_info(topic_candidates)").fetchall()}
-        assert {"title_ru", "reason_ru"} <= topic_columns
+        assert {"title_ru", "summary_ru", "angle_ru", "reason_ru", "original_description"} <= topic_columns
 
 
 def _assert_basic_draft_flow(db: DraftDatabase) -> None:
@@ -115,7 +115,20 @@ def _assert_publishing_recovery(db: DraftDatabase) -> None:
 
 def _assert_topic_candidates(db: DraftDatabase) -> None:
     r1 = db.upsert_topic_candidate_with_reason(
-        "T1", "https://a", "S", None, "news", 50, "r", "same title", "other", "Русский T1", "русская причина"
+        "T1",
+        "https://a",
+        "S",
+        None,
+        "news",
+        50,
+        "r",
+        "same title",
+        "other",
+        "Русский T1",
+        "Короткое русское объяснение",
+        "Идея поста",
+        "русская причина",
+        "Original description",
     )
     assert r1 == "inserted"
     r2 = db.upsert_topic_candidate_with_reason(
@@ -131,17 +144,25 @@ def _assert_topic_candidates(db: DraftDatabase) -> None:
     assert len(candidates) == 1
     assert candidates[0]["url"] == "https://a"
     assert candidates[0]["title_ru"] == "Русский T1"
+    assert candidates[0]["summary_ru"] == "Короткое русское объяснение"
+    assert candidates[0]["angle_ru"] == "Идея поста"
     assert candidates[0]["reason_ru"] == "русская причина"
+    assert candidates[0]["original_description"] == "Original description"
     row_by_url = db.find_topic_candidate_by_url("https://a")
     assert row_by_url is not None
     assert row_by_url["title_ru"] == "Русский T1"
-    assert db.update_topic_candidate_display_fields(int(row_by_url["id"]), title_ru="Обновленный T1") is True
-    assert db.find_topic_candidate_by_url("https://a")["title_ru"] == "Обновленный T1"
+    assert db.update_topic_candidate_display_fields(int(row_by_url["id"]), title_ru="Обновленный T1", summary_ru="Обновленное о чем", angle_ru="Обновленная идея") is True
+    updated = db.find_topic_candidate_by_url("https://a")
+    assert updated["title_ru"] == "Обновленный T1"
+    assert updated["summary_ru"] == "Обновленное о чем"
+    assert updated["angle_ru"] == "Обновленная идея"
     assert db.create_topic_candidate("English fallback title", "https://fallback", "S", None) is True
     fallback = db.find_topic_candidate_by_url("https://fallback")
     assert fallback is not None
     assert fallback["title_ru"] is None
     assert fallback["title"] == "English fallback title"
+    assert fallback["summary_ru"] is None
+    assert fallback["angle_ru"] is None
     hot_candidates = db.list_topic_candidates_min_score(limit=5, min_score=50)
     assert [candidate["url"] for candidate in hot_candidates] == ["https://a"]
 
