@@ -123,6 +123,64 @@ def _generate_with_chat_completion(
     )
 
 
+
+def enrich_topic_metadata_ru(
+    *,
+    api_key: str,
+    model: str,
+    title: str,
+    source: str,
+    description: str | None = None,
+    base_url: str | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> GenerationResult | None:
+    """Generate short Russian topic display metadata; return pipe-separated fields."""
+    clean_title = title.strip()
+    if not clean_title:
+        return None
+    system_prompt = (
+        "You help a Russian-speaking Telegram channel admin understand AI topic candidates. "
+        "Return exactly three short lines in Russian: title_ru, summary_ru, angle_ru. "
+        "Do not translate URLs. Preserve product names, repo names, model names, company names and versions. "
+        "Do not invent facts beyond the given title, source and description. Keep each line short."
+    )
+    user_prompt = (
+        f"Title: {clean_title[:300]}\n"
+        f"Source: {source[:120]}\n"
+        f"Description: {(description or '')[:500]}\n\n"
+        "Format:\nTITLE: ...\nSUMMARY: ...\nANGLE: ..."
+    )
+    try:
+        result = _generate_with_chat_completion(
+            api_key=api_key,
+            model=model,
+            user_prompt=user_prompt,
+            system_prompt=system_prompt,
+            base_url=base_url,
+            extra_headers=extra_headers,
+            max_tokens=220,
+        )
+    except Exception as exc:
+        logger.warning("Topic metadata enrichment failed: %s", exc)
+        return None
+    lines = [line.strip() for line in result.content.splitlines() if line.strip()]
+    values: dict[str, str] = {}
+    for line in lines:
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip().lower()
+        if key in {"title", "title_ru"}:
+            values["title"] = value.strip().strip('"“”')
+        elif key in {"summary", "summary_ru"}:
+            values["summary"] = value.strip().strip('"“”')
+        elif key in {"angle", "angle_ru"}:
+            values["angle"] = value.strip().strip('"“”')
+    if not all(values.get(k) for k in ("title", "summary", "angle")):
+        return None
+    result.content = "\n".join([values["title"][:180], values["summary"][:260], values["angle"][:260]])
+    return result
+
 def translate_topic_title_to_ru(
     *,
     api_key: str,

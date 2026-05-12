@@ -10,7 +10,7 @@ from xml.etree import ElementTree as ET
 
 import requests
 from bs4 import BeautifulSoup
-from bot.topic_scoring import normalize_topic_title, score_topic
+from bot.topic_scoring import humanize_topic_reason_ru, normalize_topic_title, score_topic
 
 
 @dataclass
@@ -23,7 +23,10 @@ class TopicItem:
     score: int = 0
     reason: str = ""
     title_ru: str | None = None
+    summary_ru: str | None = None
+    angle_ru: str | None = None
     reason_ru: str | None = None
+    original_description: str | None = None
     normalized_title: str = ""
     source_group: str = "other"
 
@@ -72,7 +75,7 @@ def _with_scoring(topic: TopicItem) -> TopicItem:
     topic.score = score
     topic.category = category
     topic.reason = reason
-    topic.reason_ru = reason
+    topic.reason_ru = humanize_topic_reason_ru(category, score, topic.source_group, reason)
     if _contains_cyrillic(topic.title):
         topic.title_ru = topic.title
     topic.normalized_title = normalize_topic_title(topic.title)
@@ -114,23 +117,73 @@ def _parse_dt(raw: str) -> str | None:
         return None
 
 
+def _shorten(text: str, limit: int = 180) -> str:
+    cleaned = " ".join((text or "").split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: limit - 1].rstrip() + "…"
+
+
+def _repo_short_name(repo_name: str) -> str:
+    return repo_name.split("/")[-1].strip() if "/" in repo_name else repo_name.strip()
+
+
+def build_github_topic_ru_metadata(
+    repo_name: str, description: str | None = None, language: str | None = None, stars: str | None = None, stars_today: str | None = None
+) -> tuple[str, str, str]:
+    """Build deterministic Russian explanation for a GitHub Trending topic."""
+    repo_short = _repo_short_name(repo_name) or "GitHub-проект"
+    clean_description = _shorten(description or "")
+    tech_bits = [bit for bit in [language, stars, stars_today] if bit]
+    suffix = f" ({', '.join(tech_bits)})" if tech_bits else ""
+    if _contains_cyrillic(repo_name) and not clean_description:
+        title_ru = repo_name
+    elif clean_description:
+        title_ru = _shorten(f"{repo_short} - open-source проект: {clean_description}", 120)
+    else:
+        title_ru = f"{repo_short} - GitHub-проект по AI/разработке"
+
+    if clean_description:
+        summary_ru = _shorten(f"Репозиторий выглядит как AI/разработческий проект: {clean_description}{suffix}.", 220)
+    else:
+        summary_ru = "Похоже на GitHub-проект по AI/разработке. Лучше открыть ссылку и быстро проверить, есть ли там понятная польза для поста."
+    angle_ru = "Можно подать как пример того, какие AI-инструменты и open-source проекты сейчас быстро набирают внимание у разработчиков."
+    return title_ru, summary_ru, angle_ru
+
+
+def _extract_github_trending_metadata(article) -> tuple[str | None, str, str | None, str | None, str | None, str | None]:
+    repo_tag = article.select_one("h2 a")
+    if not repo_tag:
+        return None, "", None, None, None, None
+    repo_name = " ".join(repo_tag.get_text(" ", strip=True).split())
+    repo_path = repo_tag.get("href", "").strip()
+    description_tag = article.select_one("p")
+    description = " ".join(description_tag.get_text(" ", strip=True).split()) if description_tag else None
+    language_tag = article.select_one('[itemprop="programmingLanguage"]')
+    language = language_tag.get_text(" ", strip=True) if language_tag else None
+    star_links = [a.get_text(" ", strip=True) for a in article.select('a[href$="/stargazers"]')]
+    stars = star_links[0] if star_links else None
+    stars_today_tag = article.select_one("span.d-inline-block.float-sm-right")
+    stars_today = " ".join(stars_today_tag.get_text(" ", strip=True).split()) if stars_today_tag else None
+    return repo_name, repo_path, description, language, stars, stars_today
+
+
 def _fetch_github_trending_ai() -> list[TopicItem]:
     response = requests.get("https://github.com/trending", timeout=12)
     response.raise_for_status()
     soup = BeautifulSoup(response.text, "html.parser")
     topics: list[TopicItem] = []
     for article in soup.select("article.Box-row")[:20]:
-        repo_tag = article.select_one("h2 a")
-        if not repo_tag:
+        repo_name, repo_path, description, language, stars, stars_today = _extract_github_trending_metadata(article)
+        if not repo_name:
             continue
-        repo_name = " ".join(repo_tag.get_text(" ", strip=True).split())
         lower = repo_name.lower() + " " + article.get_text(" ", strip=True).lower()
         if "ai" not in lower and "llm" not in lower and "model" not in lower:
             continue
-        repo_path = repo_tag.get("href", "").strip()
         if not repo_path.startswith("/"):
             continue
-        topics.append(_with_scoring(TopicItem(title=f"GitHub Trending: {repo_name}", url=f"https://github.com{repo_path}", source="GitHub Trending AI", published_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), source_group="github")))
+        title_ru, summary_ru, angle_ru = build_github_topic_ru_metadata(repo_name, description, language, stars, stars_today)
+        topics.append(_with_scoring(TopicItem(title=f"GitHub Trending: {repo_name}", url=f"https://github.com{repo_path}", source="GitHub Trending AI", published_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), source_group="github", title_ru=title_ru, summary_ru=summary_ru, angle_ru=angle_ru, original_description=description)))
     return topics[:8]
 
 

@@ -1,4 +1,4 @@
-from bot.sources import _parse_rss, parse_custom_topic_feeds
+from bot.sources import _parse_rss, build_github_topic_ru_metadata, parse_custom_topic_feeds
 
 
 def run() -> None:
@@ -10,13 +10,29 @@ def run() -> None:
     items = _parse_rss(atom, "A", "community", max_items=5)
     assert len(items) == 1
     assert items[0].url == "https://example.com/1"
-    assert items[0].reason_ru == items[0].reason
+    assert "Тема набрала" in items[0].reason_ru
     assert items[0].title_ru is None
 
     rss = """<rss><channel><item><title>Новая модель OpenAI</title><link>https://example.com/ru</link></item></channel></rss>"""
     ru_items = _parse_rss(rss, "RU", "ru_tech", max_items=5)
     assert len(ru_items) == 1
     assert ru_items[0].title_ru == "Новая модель OpenAI"
+
+    title_ru, summary_ru, angle_ru = build_github_topic_ru_metadata(
+        "HKUDS / AI-Trader",
+        "A multi-agent framework for financial trading",
+        "Python",
+        "12,345",
+        "900 stars today",
+    )
+    assert "AI-Trader" in title_ru
+    assert "open-source" in title_ru
+    assert "financial trading" in summary_ru
+    assert "AI-инструменты" in angle_ru or "open-source" in angle_ru
+
+    cyr_title, cyr_summary, _ = build_github_topic_ru_metadata("owner / РусскийПроект", None)
+    assert "РусскийПроект" in cyr_title
+    assert "GitHub-проект" in cyr_summary
 
 
 if __name__ == "__main__":

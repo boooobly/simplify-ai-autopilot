@@ -62,7 +62,10 @@ class DraftDatabase:
             self._ensure_column(conn, "topic_candidates", "score", "INTEGER DEFAULT 0")
             self._ensure_column(conn, "topic_candidates", "reason", "TEXT")
             self._ensure_column(conn, "topic_candidates", "title_ru", "TEXT")
+            self._ensure_column(conn, "topic_candidates", "summary_ru", "TEXT")
+            self._ensure_column(conn, "topic_candidates", "angle_ru", "TEXT")
             self._ensure_column(conn, "topic_candidates", "reason_ru", "TEXT")
+            self._ensure_column(conn, "topic_candidates", "original_description", "TEXT")
             self._ensure_column(conn, "topic_candidates", "normalized_title", "TEXT")
             self._ensure_column(conn, "topic_candidates", "last_seen_at", "TIMESTAMP")
             self._ensure_column(conn, "topic_candidates", "source_group", "TEXT")
@@ -375,7 +378,10 @@ class DraftDatabase:
         normalized_title: str,
         source_group: str = "other",
         title_ru: str | None = None,
+        summary_ru: str | None = None,
+        angle_ru: str | None = None,
         reason_ru: str | None = None,
+        original_description: str | None = None,
     ) -> str:
         with self._connect() as conn:
             existing = conn.execute(
@@ -391,12 +397,15 @@ class DraftDatabase:
                         score = ?,
                         reason = ?,
                         title_ru = COALESCE(NULLIF(?, ''), title_ru),
+                        summary_ru = COALESCE(NULLIF(?, ''), summary_ru),
+                        angle_ru = COALESCE(NULLIF(?, ''), angle_ru),
                         reason_ru = COALESCE(NULLIF(?, ''), reason_ru),
+                        original_description = COALESCE(NULLIF(?, ''), original_description),
                         normalized_title = COALESCE(normalized_title, ?),
                         source_group = COALESCE(source_group, ?)
                     WHERE id = ?
                     """,
-                    (category, score, reason, title_ru, reason_ru, normalized_title, source_group, int(existing["id"])),
+                    (category, score, reason, title_ru, summary_ru, angle_ru, reason_ru, original_description, normalized_title, source_group, int(existing["id"])),
                 )
                 conn.commit()
                 return "existing_url"
@@ -414,27 +423,34 @@ class DraftDatabase:
             cursor = conn.execute(
                 """
                 INSERT INTO topic_candidates (
-                    title, url, source, published_at, status, category, score, reason, title_ru, reason_ru, normalized_title, source_group, created_at, last_seen_at
+                    title, url, source, published_at, status, category, score, reason, title_ru, summary_ru, angle_ru, reason_ru, original_description, normalized_title, source_group, created_at, last_seen_at
                 )
-                VALUES (?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """,
-                (title, url, source, published_at, category, score, reason, title_ru, reason_ru, normalized_title, source_group),
+                (title, url, source, published_at, category, score, reason, title_ru, summary_ru, angle_ru, reason_ru, original_description, normalized_title, source_group),
             )
             conn.commit()
             return "inserted" if cursor.rowcount > 0 else "existing_url"
 
     def update_topic_candidate_display_fields(
-        self, topic_id: int, title_ru: str | None = None, reason_ru: str | None = None
+        self,
+        topic_id: int,
+        title_ru: str | None = None,
+        summary_ru: str | None = None,
+        angle_ru: str | None = None,
+        reason_ru: str | None = None,
     ) -> bool:
         with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE topic_candidates
                 SET title_ru = COALESCE(NULLIF(?, ''), title_ru),
+                    summary_ru = COALESCE(NULLIF(?, ''), summary_ru),
+                    angle_ru = COALESCE(NULLIF(?, ''), angle_ru),
                     reason_ru = COALESCE(NULLIF(?, ''), reason_ru)
                 WHERE id = ?
                 """,
-                (title_ru, reason_ru, topic_id),
+                (title_ru, summary_ru, angle_ru, reason_ru, topic_id),
             )
             conn.commit()
             return cursor.rowcount > 0
@@ -454,10 +470,13 @@ class DraftDatabase:
         normalized_title: str,
         source_group: str = "other",
         title_ru: str | None = None,
+        summary_ru: str | None = None,
+        angle_ru: str | None = None,
         reason_ru: str | None = None,
+        original_description: str | None = None,
     ) -> bool:
         return self.upsert_topic_candidate_with_reason(
-            title, url, source, published_at, category, score, reason, normalized_title, source_group, title_ru, reason_ru
+            title, url, source, published_at, category, score, reason, normalized_title, source_group, title_ru, summary_ru, angle_ru, reason_ru, original_description
         ) == "inserted"
     def create_topic_candidate(self, title: str, url: str, source: str, published_at: str | None, source_group: str = "other") -> bool:
         return self.upsert_topic_candidate(

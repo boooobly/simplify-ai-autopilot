@@ -116,3 +116,47 @@ def score_topic(title: str, source: str, url: str, source_group: str = "other") 
     if not reason_parts:
         reason_parts.append("нейтральная тема")
     return score, category, ", ".join(reason_parts)
+
+
+def humanize_topic_reason_ru(category: str, score: int, source_group: str, reason: str) -> str:
+    """Convert technical scoring fragments into an admin-friendly Russian reason."""
+    category = (category or "other").strip().lower()
+    source_group = (source_group or "other").strip().lower()
+    reason_text = (reason or "").strip().lower()
+
+    score_label = "высокий вес" if score >= 75 else "хороший вес" if score >= 55 else "базовый вес"
+    source_bits = {
+        "github": "это open-source проект с GitHub",
+        "community": "тему обсуждают в сообществах",
+        "tools": "это похоже на инструмент, который можно показать на практике",
+        "official_ai": "это новость из официального AI-источника",
+        "tech_media": "это новость из техно-медиа",
+        "ru_tech": "это материал из русскоязычного техно-источника",
+        "custom": "это тема из добавленного вручную источника",
+    }
+    category_bits = {
+        "tool": "его можно быстро разобрать в формате короткого полезного поста",
+        "dev": "его можно показать разработчикам и тем, кто следит за AI-инструментами",
+        "agent": "это связано с AI-агентами и рабочими процессами",
+        "model": "это связано с моделями и может быть интересно аудитории, которая следит за новыми возможностями AI",
+        "creator": "из этого может получиться наглядный пост про создание контента",
+        "mobile": "это можно подать как практическую AI-возможность в приложении или расширении",
+        "drama": "в теме есть конфликт, риск или проблема, которую легко объяснить аудитории",
+        "meme": "в теме есть необычный или вирусный крючок",
+        "guide": "из этого можно сделать практичный мини-гайд",
+        "privacy": "здесь есть понятный угол про данные, приватность или безопасность",
+        "research": "это можно объяснить как важное исследование без лишней академичности",
+        "news": "это можно коротко пересказать как AI-новость с выводом для читателя",
+        "business": "тему стоит брать только если получится объяснить пользу для обычного читателя",
+        "other": "ее можно проверить и превратить в короткий пост, если есть понятная польза",
+    }
+
+    source_part = source_bits.get(source_group, "источник выглядит релевантным для AI-тематики")
+    category_part = category_bits.get(category, category_bits["other"])
+    if "open-source" in reason_text or "github" in reason_text:
+        source_part = "это open-source проект с GitHub"
+    if "бесплат" in reason_text:
+        category_part += ", а бесплатность может усилить интерес"
+    if "штраф" in reason_text and score < 55:
+        return f"Тема получила {score_label}: {source_part}, но выглядит суховато — перед постом стоит проверить, есть ли понятная польза."
+    return f"Тема набрала {score_label}, потому что {source_part}, и {category_part}."
