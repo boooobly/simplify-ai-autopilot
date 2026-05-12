@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from xml.etree import ElementTree as ET
 
@@ -117,12 +117,27 @@ def _parse_rss(xml_text: str, source_name: str, source_group: str, max_items: in
     return topics
 
 
+def _format_parsed_dt(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _parse_dt(raw: str) -> str | None:
     if not raw:
         return None
+    value = raw.strip()
+    if not value:
+        return None
     try:
-        return parsedate_to_datetime(raw).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        return _format_parsed_dt(parsedate_to_datetime(value))
     except Exception:
+        pass
+
+    iso_value = value.replace("Z", "+00:00")
+    try:
+        return _format_parsed_dt(datetime.fromisoformat(iso_value))
+    except ValueError:
         return None
 
 

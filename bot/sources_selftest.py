@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from bot.sources import _parse_rss, build_github_topic_ru_metadata, parse_custom_topic_feeds
+from bot.sources import _parse_dt, _parse_rss, build_github_topic_ru_metadata, parse_custom_topic_feeds
 
 
 def run() -> None:
@@ -8,11 +8,18 @@ def run() -> None:
     assert len(feeds) == 2
     assert feeds[0][1] == "custom"
 
+    assert _parse_dt("Tue, 12 May 2026 14:30:00 +0000") == "2026-05-12 14:30:00"
+    assert _parse_dt("2026-05-12T14:30:00Z") == "2026-05-12 14:30:00"
+    assert _parse_dt("2026-05-12T14:30:00+00:00") == "2026-05-12 14:30:00"
+    assert _parse_dt("2026-05-12") == "2026-05-12 00:00:00"
+    assert _parse_dt("not a date") is None
+
     recent = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     atom = f"""<?xml version='1.0'?><feed xmlns='http://www.w3.org/2005/Atom'><entry><title>T1</title><link href='https://example.com/1'/><updated>{recent}</updated></entry></feed>"""
     items = _parse_rss(atom, "A", "community", max_items=5)
     assert len(items) == 1
     assert items[0].url == "https://example.com/1"
+    assert items[0].published_at is not None
     assert items[0].reason_ru
     assert items[0].title_ru is None
 
