@@ -22,6 +22,8 @@ class TopicItem:
     category: str = "other"
     score: int = 0
     reason: str = ""
+    title_ru: str | None = None
+    reason_ru: str | None = None
     normalized_title: str = ""
     source_group: str = "other"
 
@@ -61,11 +63,18 @@ def parse_custom_topic_feeds(env_value: str | None) -> list[tuple[str, str, str]
     return feeds
 
 
+def _contains_cyrillic(text: str) -> bool:
+    return any("а" <= ch.lower() <= "я" or ch.lower() == "ё" for ch in text)
+
+
 def _with_scoring(topic: TopicItem) -> TopicItem:
     score, category, reason = score_topic(topic.title, topic.source, topic.url, topic.source_group)
     topic.score = score
     topic.category = category
     topic.reason = reason
+    topic.reason_ru = reason
+    if _contains_cyrillic(topic.title):
+        topic.title_ru = topic.title
     topic.normalized_title = normalize_topic_title(topic.title)
     return topic
 

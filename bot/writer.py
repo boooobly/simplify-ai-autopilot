@@ -70,6 +70,7 @@ def _generate_with_chat_completion(
     system_prompt: str,
     base_url: str | None = None,
     extra_headers: dict[str, str] | None = None,
+    max_tokens: int = 900,
 ) -> GenerationResult:
     client = _build_client(api_key=api_key, base_url=base_url)
     response = client.chat.completions.create(
@@ -78,7 +79,7 @@ def _generate_with_chat_completion(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        max_tokens=900,
+        max_tokens=max_tokens,
         extra_headers=extra_headers,
     )
     choice = response.choices[0]
@@ -120,6 +121,46 @@ def _generate_with_chat_completion(
         total_tokens=total_tokens,
         model=model,
     )
+
+
+def translate_topic_title_to_ru(
+    *,
+    api_key: str,
+    model: str,
+    title: str,
+    base_url: str | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> GenerationResult | None:
+    """Translate only a short topic title to Russian; return None on safe fallback."""
+    clean_title = title.strip()
+    if not clean_title:
+        return None
+    if any("а" <= ch.lower() <= "я" or ch.lower() == "ё" for ch in clean_title):
+        return GenerationResult(content=clean_title, model=model)
+    system_prompt = (
+        "Translate a topic title into short natural Russian. Preserve product names, "
+        "model names, company names, version numbers and brand names. Do not add facts. "
+        "Return only the translated title."
+    )
+    user_prompt = clean_title[:300]
+    try:
+        result = _generate_with_chat_completion(
+            api_key=api_key,
+            model=model,
+            user_prompt=user_prompt,
+            system_prompt=system_prompt,
+            base_url=base_url,
+            extra_headers=extra_headers,
+            max_tokens=80,
+        )
+    except Exception as exc:
+        logger.warning("Topic title translation failed: %s", exc)
+        return None
+    translated = result.content.strip().strip('\"“”')
+    if not translated:
+        return None
+    result.content = translated.replace("\n", " ")[:300]
+    return result
 
 
 def _limit_text_safely(text: str, limit: int) -> str:

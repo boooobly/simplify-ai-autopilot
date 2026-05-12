@@ -10,6 +10,13 @@ def run() -> None:
     items = _parse_rss(atom, "A", "community", max_items=5)
     assert len(items) == 1
     assert items[0].url == "https://example.com/1"
+    assert items[0].reason_ru == items[0].reason
+    assert items[0].title_ru is None
+
+    rss = """<rss><channel><item><title>Новая модель OpenAI</title><link>https://example.com/ru</link></item></channel></rss>"""
+    ru_items = _parse_rss(rss, "RU", "ru_tech", max_items=5)
+    assert len(ru_items) == 1
+    assert ru_items[0].title_ru == "Новая модель OpenAI"
 
 
 if __name__ == "__main__":

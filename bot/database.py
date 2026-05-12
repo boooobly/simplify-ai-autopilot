@@ -61,6 +61,8 @@ class DraftDatabase:
             self._ensure_column(conn, "topic_candidates", "category", "TEXT")
             self._ensure_column(conn, "topic_candidates", "score", "INTEGER DEFAULT 0")
             self._ensure_column(conn, "topic_candidates", "reason", "TEXT")
+            self._ensure_column(conn, "topic_candidates", "title_ru", "TEXT")
+            self._ensure_column(conn, "topic_candidates", "reason_ru", "TEXT")
             self._ensure_column(conn, "topic_candidates", "normalized_title", "TEXT")
             self._ensure_column(conn, "topic_candidates", "last_seen_at", "TIMESTAMP")
             self._ensure_column(conn, "topic_candidates", "source_group", "TEXT")
@@ -372,6 +374,8 @@ class DraftDatabase:
         reason: str,
         normalized_title: str,
         source_group: str = "other",
+        title_ru: str | None = None,
+        reason_ru: str | None = None,
     ) -> str:
         with self._connect() as conn:
             existing = conn.execute(
@@ -386,11 +390,13 @@ class DraftDatabase:
                         category = ?,
                         score = ?,
                         reason = ?,
+                        title_ru = COALESCE(NULLIF(?, ''), title_ru),
+                        reason_ru = COALESCE(NULLIF(?, ''), reason_ru),
                         normalized_title = COALESCE(normalized_title, ?),
                         source_group = COALESCE(source_group, ?)
                     WHERE id = ?
                     """,
-                    (category, score, reason, normalized_title, source_group, int(existing["id"])),
+                    (category, score, reason, title_ru, reason_ru, normalized_title, source_group, int(existing["id"])),
                 )
                 conn.commit()
                 return "existing_url"
@@ -408,14 +414,31 @@ class DraftDatabase:
             cursor = conn.execute(
                 """
                 INSERT INTO topic_candidates (
-                    title, url, source, published_at, status, category, score, reason, normalized_title, source_group, created_at, last_seen_at
+                    title, url, source, published_at, status, category, score, reason, title_ru, reason_ru, normalized_title, source_group, created_at, last_seen_at
                 )
-                VALUES (?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """,
-                (title, url, source, published_at, category, score, reason, normalized_title, source_group),
+                (title, url, source, published_at, category, score, reason, title_ru, reason_ru, normalized_title, source_group),
             )
             conn.commit()
             return "inserted" if cursor.rowcount > 0 else "existing_url"
+
+    def update_topic_candidate_display_fields(
+        self, topic_id: int, title_ru: str | None = None, reason_ru: str | None = None
+    ) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE topic_candidates
+                SET title_ru = COALESCE(NULLIF(?, ''), title_ru),
+                    reason_ru = COALESCE(NULLIF(?, ''), reason_ru)
+                WHERE id = ?
+                """,
+                (title_ru, reason_ru, topic_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
 
 
 
@@ -430,9 +453,11 @@ class DraftDatabase:
         reason: str,
         normalized_title: str,
         source_group: str = "other",
+        title_ru: str | None = None,
+        reason_ru: str | None = None,
     ) -> bool:
         return self.upsert_topic_candidate_with_reason(
-            title, url, source, published_at, category, score, reason, normalized_title, source_group
+            title, url, source, published_at, category, score, reason, normalized_title, source_group, title_ru, reason_ru
         ) == "inserted"
     def create_topic_candidate(self, title: str, url: str, source: str, published_at: str | None, source_group: str = "other") -> bool:
         return self.upsert_topic_candidate(
@@ -518,6 +543,11 @@ class DraftDatabase:
     def get_topic_candidate(self, topic_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM topic_candidates WHERE id = ?", (topic_id,)).fetchone()
+            return dict(row) if row else None
+
+    def find_topic_candidate_by_url(self, url: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM topic_candidates WHERE url = ?", (url,)).fetchone()
             return dict(row) if row else None
 
     def update_topic_status(self, topic_id: int, status: str) -> None:
