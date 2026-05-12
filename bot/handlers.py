@@ -18,6 +18,7 @@ from bot.media_utils import decode_media_items, encode_media_group, media_count
 from bot.publisher import publish_to_channel
 from bot.telegram_formatting import strip_quote_markers
 from bot.sources import SourceReport, collect_topics, collect_topics_with_diagnostics
+from bot.topic_display import topic_display_reason, topic_display_title, topic_original_title_line
 from bot.writer import (
     EmptyAIResponseError,
     GenerationResult,
@@ -26,6 +27,7 @@ from bot.writer import (
     generate_post_draft,
     generate_post_draft_from_page,
     normalize_url,
+    translate_topic_title_to_ru,
     polish_post_draft,
 )
 
@@ -206,14 +208,22 @@ def _failed_drafts_keyboard(drafts: list[dict]) -> InlineKeyboardMarkup:
 
 def _topic_card_text(topic: dict) -> str:
     score = int(topic.get("score") or 0)
-    return (
-        f"🧠 Тема #{topic['id']} - {score} - {_category_label(topic.get('category'))}\n"
-        f"Вес: {_score_label(score)}\n"
-        f"{topic['title']}\n"
-        f"Источник: {topic['source']} / {_source_group_label(topic.get('source_group'))}\n"
-        f"Почему: {topic.get('reason') or 'без пояснения'}\n"
-        f"URL: {topic['url']}"
+    lines = [
+        f"🧠 Тема #{topic['id']} - {score} - {_category_label(topic.get('category'))}",
+        f"Вес: {_score_label(score)}",
+        topic_display_title(topic),
+    ]
+    original_line = topic_original_title_line(topic)
+    if original_line:
+        lines.append(original_line)
+    lines.extend(
+        [
+            f"Источник: {topic['source']} / {_source_group_label(topic.get('source_group'))}",
+            f"Почему: {topic_display_reason(topic)}",
+            f"URL: {topic['url']}",
+        ]
     )
+    return "\n".join(lines)
 
 
 def _topic_actions_keyboard(topic_id: int) -> InlineKeyboardMarkup:
@@ -348,7 +358,7 @@ def _render_plan_text(day_name: str, slots: list[str], topics: list[dict]) -> st
         lines.extend(
             [
                 f"{slot} - тема #{topic['id']} - {_category_label(topic.get('category'))} - вес {score}",
-                str(topic.get("title") or "Без названия"),
+                topic_display_title(topic),
                 "",
             ]
         )
@@ -431,6 +441,40 @@ def _resolve_ai_provider(settings) -> tuple[str, str, str | None, dict[str, str]
             headers["HTTP-Referer"] = settings.openrouter_site_url
         return settings.openrouter_api_key, "openrouter", "https://openrouter.ai/api/v1", headers
     return settings.openai_api_key, "openai", None, None
+
+
+def _translate_topic_title_if_available(item, settings, db: DraftDatabase) -> None:
+    if item.title_ru or not settings or not getattr(settings, "has_ai_provider", False):
+        return
+    api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
+    if not api_key:
+        return
+    result = translate_topic_title_to_ru(
+        api_key=api_key,
+        model=settings.model_draft,
+        title=item.title,
+        base_url=base_url,
+        extra_headers=extra_headers,
+    )
+    if not result or not result.content.strip() or result.content.strip() == item.title.strip():
+        return
+    topic = db.find_topic_candidate_by_url(item.url)
+    if not topic:
+        return
+    item.title_ru = result.content.strip()
+    db.update_topic_candidate_display_fields(int(topic["id"]), title_ru=item.title_ru, reason_ru=item.reason_ru)
+    estimated_cost = estimate_ai_cost(provider, result.prompt_tokens, result.completion_tokens, settings)
+    db.record_ai_usage(
+        provider=provider,
+        model=result.model or settings.model_draft,
+        operation="topic_translate_title",
+        prompt_tokens=result.prompt_tokens,
+        completion_tokens=result.completion_tokens,
+        total_tokens=result.total_tokens,
+        estimated_cost_usd=estimated_cost,
+        source_url=item.url,
+        draft_id=None,
+    )
 
 
 def _moderation_keyboard(draft_id: int, status: str | None = None, has_media: bool = False) -> InlineKeyboardMarkup:
@@ -1680,11 +1724,13 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
 
 
 
-def _collect_topics_with_stats(db: DraftDatabase, items: list | None = None) -> tuple[TopicCollectStats, list, list]:
+def _collect_topics_with_stats(db: DraftDatabase, items: list | None = None, settings=None) -> tuple[TopicCollectStats, list, list]:
     if items is None:
         items = collect_topics()
     stats = TopicCollectStats(total=len(items))
     inserted = []
+    translated_count = 0
+    translation_limit = 5
     spam_words = ["casino", "porn", "xxx", "bet", "viagra"]
     for item in items:
         if len(item.title.strip()) < 8 or not item.url.strip() or not item.normalized_title.strip():
@@ -1697,11 +1743,16 @@ def _collect_topics_with_stats(db: DraftDatabase, items: list | None = None) -> 
             stats.low_score += 1
             continue
         result = db.upsert_topic_candidate_with_reason(
-            item.title, item.url, item.source, item.published_at, item.category, item.score, item.reason, item.normalized_title, item.source_group
+            item.title, item.url, item.source, item.published_at, item.category, item.score, item.reason, item.normalized_title, item.source_group, item.title_ru, item.reason_ru
         )
         if result == "inserted":
             stats.new += 1
             inserted.append(item)
+            if translated_count < translation_limit and item.score >= 75:
+                before_title_ru = item.title_ru
+                _translate_topic_title_if_available(item, settings, db)
+                if item.title_ru and item.title_ru != before_title_ru:
+                    translated_count += 1
         elif result == "existing_url":
             stats.existing += 1
         else:
@@ -1755,12 +1806,12 @@ def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list) 
     if inserted:
         top = sorted(inserted, key=lambda i: i.score, reverse=True)[:5]
         lines.append("Лучшие новые:")
-        lines.extend([f"- {it.score} - {_category_label(it.category)} - {it.title[:70]}" for it in top])
+        lines.extend([f"- {it.score} - {_category_label(it.category)} - {topic_display_title(it)[:70]}" for it in top])
     else:
         lines.append("Новых сильных тем нет. Посмотри старые через /topics_all или добавь источники в CUSTOM_TOPIC_FEEDS.")
     lively = [i for i in sorted(items, key=lambda i: i.score, reverse=True) if i.source_group in {"community","github","tools","custom"} or i.category in {"drama","meme","guide","creator"}][:5]
     lines.extend(["", "Живые темы:"])
-    lines.extend([f"- {it.score} - {_source_group_label(it.source_group)} - {it.title[:70]}" for it in lively])
+    lines.extend([f"- {it.score} - {_source_group_label(it.source_group)} - {topic_display_title(it)[:70]}" for it in lively])
     return "\n".join(lines)
 
 async def collect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1775,7 +1826,7 @@ async def collect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if update.message:
         await update.message.reply_text("Собираю свежие AI-темы из источников...")
 
-    stats, items, inserted = _collect_topics_with_stats(db)
+    stats, items, inserted = _collect_topics_with_stats(db, settings=settings)
 
     if update.message:
         await update.message.reply_text(_render_collect_text(stats, items, inserted))
@@ -1806,7 +1857,7 @@ async def collect_debug_command(update: Update, context: ContextTypes.DEFAULT_TY
     if update.message:
         await update.message.reply_text("Собираю темы с диагностикой...")
     items, reports = collect_topics_with_diagnostics()
-    stats, _all_items, inserted = _collect_topics_with_stats(db, items=items)
+    stats, _all_items, inserted = _collect_topics_with_stats(db, items=items, settings=settings)
     text = _render_collect_text(stats, items, inserted)
     ok = sum(1 for r in reports if r.status == "ok")
     empty = sum(1 for r in reports if r.status == "empty")
@@ -2549,7 +2600,7 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
         )
         await _edit_callback_message(query, "Что сделать с темами?", reply_markup=keyboard)
     elif data == "menu_collect":
-        stats, items, inserted = _collect_topics_with_stats(db)
+        stats, items, inserted = _collect_topics_with_stats(db, settings=settings)
         await _edit_callback_message(
             query,
             _render_collect_text(stats, items, inserted),
