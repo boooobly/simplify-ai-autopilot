@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -453,13 +454,45 @@ def _resolve_ai_provider(settings) -> tuple[str, str, str | None, dict[str, str]
     return settings.openai_api_key, "openai", None, None
 
 
-def _translate_topic_title_if_available(item, settings, db: DraftDatabase) -> None:
+async def _run_collect_topics():
+    return await asyncio.to_thread(collect_topics)
+
+
+async def _run_collect_topics_with_diagnostics():
+    return await asyncio.to_thread(collect_topics_with_diagnostics)
+
+
+async def _run_fetch_page_content(source_url: str):
+    return await asyncio.to_thread(fetch_page_content, source_url)
+
+
+async def _run_generate_post_draft(*args, **kwargs):
+    return await asyncio.to_thread(generate_post_draft, *args, **kwargs)
+
+
+async def _run_generate_post_draft_from_page(*args, **kwargs):
+    return await asyncio.to_thread(generate_post_draft_from_page, *args, **kwargs)
+
+
+async def _run_polish_post_draft(*args, **kwargs):
+    return await asyncio.to_thread(polish_post_draft, *args, **kwargs)
+
+
+async def _run_translate_topic_title_to_ru(*args, **kwargs):
+    return await asyncio.to_thread(translate_topic_title_to_ru, *args, **kwargs)
+
+
+async def _run_enrich_topic_metadata_ru(*args, **kwargs):
+    return await asyncio.to_thread(enrich_topic_metadata_ru, *args, **kwargs)
+
+
+async def _translate_topic_title_if_available(item, settings, db: DraftDatabase) -> None:
     if item.title_ru or not settings or not getattr(settings, "has_ai_provider", False):
         return
     api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
     if not api_key:
         return
-    result = translate_topic_title_to_ru(
+    result = await _run_translate_topic_title_to_ru(
         api_key=api_key,
         model=settings.model_draft,
         title=item.title,
@@ -487,7 +520,7 @@ def _translate_topic_title_if_available(item, settings, db: DraftDatabase) -> No
     )
 
 
-def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase) -> None:
+async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase) -> None:
     if not settings or not getattr(settings, "has_ai_provider", False):
         return
     if item.title_ru and item.summary_ru and item.angle_ru:
@@ -496,7 +529,7 @@ def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase) -> No
     if not api_key:
         return
     try:
-        result = enrich_topic_metadata_ru(
+        result = await _run_enrich_topic_metadata_ru(
             api_key=api_key,
             model=settings.model_draft,
             title=item.title,
@@ -867,7 +900,7 @@ async def _generate_url_draft_with_fallback(
     extra_headers: dict[str, str] | None = None,
 ) -> tuple[GenerationResult, bool, str]:
     try:
-        result = generate_post_draft_from_page(
+        result = await _run_generate_post_draft_from_page(
             api_key,
             model=settings.model_draft,
             source_url=source_url,
@@ -882,7 +915,7 @@ async def _generate_url_draft_with_fallback(
         fallback_model = (settings.model_polish or "").strip()
         if fallback_model and fallback_model != settings.model_draft:
             logger.warning("Trying fallback generation with MODEL_POLISH=%s", fallback_model)
-            result = generate_post_draft_from_page(
+            result = await _run_generate_post_draft_from_page(
                 api_key,
                 model=fallback_model,
                 source_url=source_url,
@@ -1327,7 +1360,7 @@ async def _create_draft_from_topic(
             return None, "ИИ-провайдер не настроен."
         api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
         logger.info("topic_generate provider=%s model=%s", provider, settings.model_draft)
-        title, page_text = fetch_page_content(topic["url"])
+        title, page_text = await _run_fetch_page_content(topic["url"])
         generation_result, used_fallback, _operation = await _generate_url_draft_with_fallback(
             api_key=api_key,
             settings=settings,
@@ -1701,7 +1734,7 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
                 return
             if message:
                 await message.reply_text("Нашёл ссылку. Читаю страницу и готовлю черновик...")
-            title, page_text = fetch_page_content(source_url)
+            title, page_text = await _run_fetch_page_content(source_url)
             generation_result, used_fallback, operation = await _generate_url_draft_with_fallback(
                 api_key=api_key,
                 settings=settings,
@@ -1714,7 +1747,7 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
         else:
             if message:
                 await message.reply_text("Генерирую черновик...")
-            generation_result = generate_post_draft(
+            generation_result = await _run_generate_post_draft(
                 api_key,
                 model=settings.model_draft,
                 source_url=None,
@@ -1787,9 +1820,9 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
 
 
 
-def _collect_topics_with_stats(db: DraftDatabase, items: list | None = None, settings=None) -> tuple[TopicCollectStats, list, list]:
+async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = None, settings=None) -> tuple[TopicCollectStats, list, list]:
     if items is None:
-        items = collect_topics()
+        items = await _run_collect_topics()
     stats = TopicCollectStats(total=len(items))
     inserted = []
     translated_count = 0
@@ -1813,7 +1846,7 @@ def _collect_topics_with_stats(db: DraftDatabase, items: list | None = None, set
             inserted.append(item)
             if translated_count < translation_limit and item.score >= 75:
                 before_title_ru = item.title_ru
-                _enrich_topic_metadata_if_available(item, settings, db)
+                await _enrich_topic_metadata_if_available(item, settings, db)
                 if item.title_ru and item.title_ru != before_title_ru:
                     translated_count += 1
         elif result == "existing_url":
@@ -1889,7 +1922,7 @@ async def collect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if update.message:
         await update.message.reply_text("Собираю свежие AI-темы из источников...")
 
-    stats, items, inserted = _collect_topics_with_stats(db, settings=settings)
+    stats, items, inserted = await _collect_topics_with_stats(db, settings=settings)
 
     if update.message:
         await update.message.reply_text(_render_collect_text(stats, items, inserted))
@@ -1904,7 +1937,7 @@ async def sources_status_command(update: Update, context: ContextTypes.DEFAULT_T
         return
     if update.message:
         await update.message.reply_text("Проверяю источники...")
-    _items, reports = collect_topics_with_diagnostics()
+    _items, reports = await _run_collect_topics_with_diagnostics()
     if update.message:
         await update.message.reply_text(_render_sources_status(reports), reply_markup=_admin_reply_keyboard())
 
@@ -1919,8 +1952,8 @@ async def collect_debug_command(update: Update, context: ContextTypes.DEFAULT_TY
         return
     if update.message:
         await update.message.reply_text("Собираю темы с диагностикой...")
-    items, reports = collect_topics_with_diagnostics()
-    stats, _all_items, inserted = _collect_topics_with_stats(db, items=items, settings=settings)
+    items, reports = await _run_collect_topics_with_diagnostics()
+    stats, _all_items, inserted = await _collect_topics_with_stats(db, items=items, settings=settings)
     text = _render_collect_text(stats, items, inserted)
     ok = sum(1 for r in reports if r.status == "ok")
     empty = sum(1 for r in reports if r.status == "empty")
@@ -2540,7 +2573,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await _edit_callback_message(query, "Улучшаю текст через Claude...")
             api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
             logger.info("polish provider=%s model=%s", provider, settings.model_polish)
-            polished = polish_post_draft(
+            polished = await _run_polish_post_draft(
                 api_key,
                 model=settings.model_polish,
                 draft_text=draft["content"],
@@ -2663,7 +2696,7 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
         )
         await _edit_callback_message(query, "Что сделать с темами?", reply_markup=keyboard)
     elif data == "menu_collect":
-        stats, items, inserted = _collect_topics_with_stats(db, settings=settings)
+        stats, items, inserted = await _collect_topics_with_stats(db, settings=settings)
         await _edit_callback_message(
             query,
             _render_collect_text(stats, items, inserted),
@@ -2681,7 +2714,7 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             keyboard = _topic_actions_keyboard(int(topic["id"]))
             await context.bot.send_message(chat_id=settings.admin_id, text=text, reply_markup=keyboard, link_preview_options=_disabled_link_preview_options())
     elif data == "menu_sources_status":
-        _items, reports = collect_topics_with_diagnostics()
+        _items, reports = await _run_collect_topics_with_diagnostics()
         await _edit_callback_message(query, _render_sources_status(reports), reply_markup=_back_to_menu_keyboard())
     elif data == "menu_queue":
         await _edit_callback_message(
@@ -2839,7 +2872,7 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text("Нашёл ссылку. Читаю страницу и готовлю черновик...")
 
     try:
-        title, page_text = fetch_page_content(source_url)
+        title, page_text = await _run_fetch_page_content(source_url)
         api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
         logger.info("url_generate provider=%s model=%s", provider, settings.model_draft)
         generation_result, used_fallback, operation = await _generate_url_draft_with_fallback(
