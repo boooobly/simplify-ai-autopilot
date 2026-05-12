@@ -35,6 +35,8 @@ def run() -> None:
 
     out = render_post_html('[[EMOJI:claude]] [[EMOJI:chatgpt]] [[EMOJI:deepseek]]', custom_emoji_aliases=aliases)
     assert '5208880957280522189' in out and '5208880957280522190' in out and '5208880957280522191' in out
+    assert '<tg-emoji emoji-id="5208880957280522189">🤖</tg-emoji>' in out
+    assert '[[EMOJI:' not in out
 
     out2 = render_post_html('[[EMOJI:github]] [[EMOJI:photoshop]] [[EMOJI:windows]]', custom_emoji_aliases=aliases)
     assert '6208880957280522191' in out2 and '6208880957280522192' in out2 and '6208880957280522193' in out2
@@ -43,11 +45,41 @@ def run() -> None:
     assert '<tg-emoji emoji-id="5208880957280522189">🤖</tg-emoji>' not in plain
     assert '<tg-emoji emoji-id="6208880957280522191">📱</tg-emoji>' not in plain
 
+    fallback = render_post_html('[[EMOJI:screen_card]] Tool [[EMOJI:link]]', custom_emoji_aliases=aliases)
+    assert '🖥 Tool 🔗' in fallback
+    assert '[[EMOJI:' not in fallback
+    assert '<tg-emoji' not in fallback
+
+    fallback_without_aliases = render_post_html('[[EMOJI:telegram]] channel')
+    assert fallback_without_aliases.startswith('✈️ channel')
+    assert '[[EMOJI:' not in fallback_without_aliases
+
     unknown = render_post_html('[[EMOJI:unknown]]<b>x</b>', custom_emoji_aliases=aliases)
     assert '<b>x</b>' not in unknown
+    assert '[[EMOJI:' not in unknown
+    assert unknown == '&lt;b&gt;x&lt;/b&gt;'
+
+    quote_list = render_post_html('[[QUOTE]]\n[[EMOJI:idea]] quoted [[EMOJI:nope]]\n[[/QUOTE]]\n- [[EMOJI:check]] one\n- [[EMOJI:mystery]] two')
+    assert '<blockquote>' in quote_list
+    assert '💡 quoted ' in quote_list
+    assert '➖ ✅ one' in quote_list
+    assert '[[EMOJI:' not in quote_list
+
+    linked = render_post_html('[[LINK:[[EMOJI:link]] тут|https://example.com]]')
+    assert '<a href="https://example.com">🔗 тут</a>' in linked
+    assert '[[EMOJI:' not in linked
 
     preview = strip_quote_markers('[[EMOJI:claude]] Claude update', custom_emoji_aliases=aliases)
     assert preview.startswith('🤖')
+    assert '[[EMOJI:' not in preview
+
+    preview_fallback = strip_quote_markers('[[EMOJI:fire]] Hot [[EMOJI:unknown]]')
+    assert preview_fallback == '🔥 Hot '
+    assert '[[EMOJI:' not in preview_fallback
+
+    preview_link_quote = strip_quote_markers('[[QUOTE]]\n[[EMOJI:idea]] [[LINK:read|https://example.com]] [[EMOJI:nope]]\n[[/QUOTE]]')
+    assert preview_link_quote == '💡 read '
+    assert '[[EMOJI:' not in preview_link_quote
 
     map_out = render_post_html('Огонь 🔥', custom_emoji_map={'🔥': '123456'})
     assert '<tg-emoji emoji-id="123456">🔥</tg-emoji>' in map_out

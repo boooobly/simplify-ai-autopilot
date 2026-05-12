@@ -1,6 +1,7 @@
 """Lightweight self-tests for safe Telegram caption preparation."""
 
-from bot.publisher import MEDIA_PREVIEW_CAPTION_LIMIT, _prepare_media_caption, _shorten_internal_text
+import bot.publisher as publisher
+from bot.publisher import MEDIA_PREVIEW_CAPTION_LIMIT, _prepare_media_caption, _render_or_plain, _shorten_internal_text
 
 
 ALIASES = {
@@ -40,6 +41,24 @@ def run() -> None:
     short_caption = _prepare_media_caption(short_post)
     assert short_caption.send_full_text_after is False
     assert '<a href="https://example.com">site</a>' in short_caption.text
+
+    fallback_caption = _prepare_media_caption("[[EMOJI:fire]] Hot [[EMOJI:unknown]]")
+    assert fallback_caption.text == "🔥 Hot "
+    assert "[[EMOJI:" not in fallback_caption.text
+
+    original_render = publisher.render_post_html
+
+    def _raise_render(*args, **kwargs):
+        raise RuntimeError("forced render failure")
+
+    try:
+        publisher.render_post_html = _raise_render
+        plain_text, parse_mode = _render_or_plain("[[EMOJI:idea]] Plain [[EMOJI:unknown]]")
+    finally:
+        publisher.render_post_html = original_render
+    assert parse_mode is None
+    assert plain_text == "💡 Plain "
+    assert "[[EMOJI:" not in plain_text
 
 
 if __name__ == "__main__":

@@ -12,6 +12,28 @@ LINK_MARKER_PATTERN = re.compile(r"\[\[LINK:(.+?)\|(.+?)\]\]")
 MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]\n]+)\]\(([^)\s]+)\)")
 SAFE_URL_PATTERN = re.compile(r"^(https?://|tg://)", re.IGNORECASE)
 EMOJI_ALIAS_PATTERN = re.compile(r"\[\[EMOJI:([a-zA-Z0-9_-]+)\]\]")
+SAFE_EMOJI_ALIAS_FALLBACKS = {
+    "screen_card": "🖥",
+    "lock": "🔒",
+    "web": "🌐",
+    "check": "✅",
+    "claude": "🤖",
+    "chatgpt": "🤖",
+    "deepseek": "🤖",
+    "edit_tool": "✏️",
+    "fire": "🔥",
+    "idea": "💡",
+    "link": "🔗",
+    "alert": "❗",
+    "bullet": "➖",
+    "thought": "💭",
+    "wow": "😮",
+    "google": "🔎",
+    "github": "🐙",
+    "photoshop": "🖼",
+    "windows": "🪟",
+    "telegram": "✈️",
+}
 
 
 LIST_PREFIXES = ("➖", "- ", "– ", "— ", "• ", "▌ ➖", "▌ -", "▌")
@@ -111,20 +133,22 @@ def _render_safe_links(text: str) -> str:
     return MARKDOWN_LINK_PATTERN.sub(_replace_md, rendered)
 
 
-def _apply_custom_emoji_aliases(text: str, custom_emoji_aliases: dict[str, tuple[str, str]] | None) -> str:
-    if not custom_emoji_aliases:
-        return text
+def _safe_emoji_alias_fallback(alias: str) -> str:
+    """Return a plain emoji fallback for a known internal alias, or remove it."""
 
+    return SAFE_EMOJI_ALIAS_FALLBACKS.get(alias, "")
+
+
+def _apply_custom_emoji_aliases(text: str, custom_emoji_aliases: dict[str, tuple[str, str]] | None) -> str:
     def _replace(match: re.Match[str]) -> str:
         alias = match.group(1)
-        emoji_data = custom_emoji_aliases.get(alias)
-        if not emoji_data:
-            return html.escape(match.group(0))
-        fallback, emoji_id = emoji_data
-        if not fallback or not str(emoji_id).isdigit():
-            return html.escape(match.group(0))
-        safe_fallback = html.escape(fallback)
-        return f'<tg-emoji emoji-id="{emoji_id}">{safe_fallback}</tg-emoji>'
+        emoji_data = custom_emoji_aliases.get(alias) if custom_emoji_aliases else None
+        if emoji_data:
+            fallback, emoji_id = emoji_data
+            if fallback and str(emoji_id).isdigit():
+                safe_fallback = html.escape(fallback)
+                return f'<tg-emoji emoji-id="{emoji_id}">{safe_fallback}</tg-emoji>'
+        return html.escape(_safe_emoji_alias_fallback(alias))
 
     return EMOJI_ALIAS_PATTERN.sub(_replace, text)
 
@@ -151,12 +175,10 @@ def _strip_emoji_aliases_for_preview(text: str, custom_emoji_aliases: dict[str, 
     def _replace(match: re.Match[str]) -> str:
         alias = match.group(1)
         if custom_emoji_aliases and alias in custom_emoji_aliases:
-            return custom_emoji_aliases[alias][0]
-        return ""
+            return custom_emoji_aliases[alias][0] or _safe_emoji_alias_fallback(alias)
+        return _safe_emoji_alias_fallback(alias)
 
     return EMOJI_ALIAS_PATTERN.sub(_replace, text)
-
-
 
 
 def _strip_quote_markers_render_only(text: str) -> str:
