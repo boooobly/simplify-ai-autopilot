@@ -27,6 +27,7 @@ class TopicItem:
     angle_ru: str | None = None
     reason_ru: str | None = None
     original_description: str | None = None
+    stars_today: str | None = None
     normalized_title: str = ""
     source_group: str = "other"
 
@@ -71,7 +72,15 @@ def _contains_cyrillic(text: str) -> bool:
 
 
 def _with_scoring(topic: TopicItem) -> TopicItem:
-    score, category, reason = score_topic(topic.title, topic.source, topic.url, topic.source_group)
+    score, category, reason = score_topic(
+        topic.title,
+        topic.source,
+        topic.url,
+        topic.source_group,
+        description=topic.original_description,
+        published_at=topic.published_at,
+        stars_today=topic.stars_today,
+    )
     topic.score = score
     topic.category = category
     topic.reason = reason
@@ -183,7 +192,7 @@ def _fetch_github_trending_ai() -> list[TopicItem]:
         if not repo_path.startswith("/"):
             continue
         title_ru, summary_ru, angle_ru = build_github_topic_ru_metadata(repo_name, description, language, stars, stars_today)
-        topics.append(_with_scoring(TopicItem(title=f"GitHub Trending: {repo_name}", url=f"https://github.com{repo_path}", source="GitHub Trending AI", published_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), source_group="github", title_ru=title_ru, summary_ru=summary_ru, angle_ru=angle_ru, original_description=description)))
+        topics.append(_with_scoring(TopicItem(title=f"GitHub Trending: {repo_name}", url=f"https://github.com{repo_path}", source="GitHub Trending AI", published_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), source_group="github", title_ru=title_ru, summary_ru=summary_ru, angle_ru=angle_ru, original_description=description, stars_today=stars_today)))
     return topics[:8]
 
 

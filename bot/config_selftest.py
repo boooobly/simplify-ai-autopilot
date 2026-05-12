@@ -5,6 +5,7 @@ from bot.config import (
     _parse_custom_emoji_aliases,
     _parse_custom_emoji_map,
     _parse_daily_post_slots,
+    _parse_int_range_env,
     _validate_channel_id,
     load_settings,
     startup_diagnostics,
@@ -26,6 +27,18 @@ def run() -> None:
     assert _parse_daily_post_slots('foo, 25:99') == ['10:00', '14:00', '18:00', '21:00']
     assert _parse_daily_post_slots(' 10:00 , 14:00 ') == ['10:00', '14:00']
     assert _parse_custom_emoji_map("🔥|123;bad;💭|456a;🧠|789") == {"🔥": "123", "🧠": "789"}
+
+    def _max_topic_age_parser() -> None:
+        os.environ["MAX_TOPIC_AGE_DAYS"] = "21"
+        assert _parse_int_range_env("MAX_TOPIC_AGE_DAYS", 14, 1, 60) == 21
+        os.environ["MAX_TOPIC_AGE_DAYS"] = "0"
+        assert _parse_int_range_env("MAX_TOPIC_AGE_DAYS", 14, 1, 60) == 14
+        os.environ["MAX_TOPIC_AGE_DAYS"] = "61"
+        assert _parse_int_range_env("MAX_TOPIC_AGE_DAYS", 14, 1, 60) == 14
+        os.environ["MAX_TOPIC_AGE_DAYS"] = "bad"
+        assert _parse_int_range_env("MAX_TOPIC_AGE_DAYS", 14, 1, 60) == 14
+
+    _with_env({}, _max_topic_age_parser)
 
     aliases = _parse_custom_emoji_aliases('claude|🤖|520;bad alias|🔥|111;chatgpt|🤖|abc;claude|🤖|521')
     assert aliases == {'claude': ('🤖', '521')}
@@ -61,7 +74,9 @@ def run() -> None:
         os.environ["CHANNEL_ID"] = "@simplify_ai"
         os.environ["OPENROUTER_API_KEY"] = "or-secret"
         os.environ["OPENAI_API_KEY"] = "oa-secret"
+        os.environ["MAX_TOPIC_AGE_DAYS"] = "7"
         settings = load_settings()
+        assert settings.max_topic_age_days == 7
         lines = startup_diagnostics(settings)
         text = "\n".join(lines)
         assert "bot-secret" not in text

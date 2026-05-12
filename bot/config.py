@@ -29,6 +29,7 @@ class Settings:
     schedule_timezone: str = "Europe/Moscow"
     post_max_chars: int = 1400
     post_soft_chars: int = 1100
+    max_topic_age_days: int = 14
     openrouter_input_cost_per_1m: float = 0.0
     openrouter_output_cost_per_1m: float = 0.0
     openai_input_cost_per_1m: float = 0.0
@@ -51,6 +52,13 @@ def _parse_int_env(name: str, default: int) -> int:
     except ValueError:
         return default
 
+
+
+def _parse_int_range_env(name: str, default: int, min_value: int, max_value: int) -> int:
+    value = _parse_int_env(name, default)
+    if value < min_value or value > max_value:
+        return default
+    return value
 
 def _parse_float_env(name: str, default: float) -> float:
     raw = os.getenv(name, "").strip()
@@ -150,6 +158,7 @@ def startup_diagnostics(settings: Settings) -> list[str]:
         f"schedule_timezone: {settings.schedule_timezone}",
         f"daily_post_slots: {', '.join(settings.daily_post_slots)}",
         f"post_soft_chars/post_max_chars: {settings.post_soft_chars}/{settings.post_max_chars}",
+        f"max_topic_age_days: {settings.max_topic_age_days}",
         f"DB_PATH: {settings.db_path}",
         f"CHANNEL_ID type: {channel_type}",
         f"custom emoji aliases count: {len(settings.custom_emoji_aliases)}",
@@ -186,6 +195,7 @@ def load_settings() -> Settings:
     daily_post_slots = _parse_daily_post_slots(daily_post_slots_raw)
     custom_emoji_map = _parse_custom_emoji_map(os.getenv("CUSTOM_EMOJI_MAP", ""))
     custom_emoji_aliases = _parse_custom_emoji_aliases(os.getenv("CUSTOM_EMOJI_ALIASES", ""))
+    max_topic_age_days = _parse_int_range_env("MAX_TOPIC_AGE_DAYS", 14, 1, 60)
 
     post_max_chars = _parse_int_env("POST_MAX_CHARS", 1400)
     post_soft_chars = _parse_int_env("POST_SOFT_CHARS", 1100)
@@ -228,6 +238,7 @@ def load_settings() -> Settings:
         schedule_timezone=schedule_timezone,
         post_max_chars=post_max_chars,
         post_soft_chars=post_soft_chars,
+        max_topic_age_days=max_topic_age_days,
         openrouter_input_cost_per_1m=openrouter_input_cost_per_1m,
         openrouter_output_cost_per_1m=openrouter_output_cost_per_1m,
         openai_input_cost_per_1m=openai_input_cost_per_1m,

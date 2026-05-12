@@ -90,9 +90,37 @@ class TopicCollectStats:
     existing: int = 0
     near_duplicate: int = 0
     low_score: int = 0
+    low_quality: int = 0
+    stale: int = 0
+    missing_date: int = 0
     invalid: int = 0
     spam: int = 0
 
+
+
+def _topic_published_datetime(published_at: str | None) -> datetime | None:
+    if not published_at:
+        return None
+    raw = str(published_at).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            parsed = datetime.strptime(raw, fmt)
+            return parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _is_stale_topic(item, max_topic_age_days: int) -> bool:
+    published = _topic_published_datetime(getattr(item, "published_at", None))
+    if published is None:
+        return False
+    age = datetime.now(timezone.utc) - published.astimezone(timezone.utc)
+    return age > timedelta(days=max_topic_age_days)
 
 def _category_label(value: str | None) -> str:
     return CATEGORY_LABELS.get((value or "other").strip().lower(), CATEGORY_LABELS["other"])
@@ -1827,16 +1855,23 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
     inserted = []
     translated_count = 0
     translation_limit = 5
-    spam_words = ["casino", "porn", "xxx", "bet", "viagra"]
+    spam_words = ["casino", "porn", "xxx", "bet", "viagra", "airdrop", "token presale"]
+    max_topic_age_days = int(getattr(settings, "max_topic_age_days", 14) or 14)
     for item in items:
         if len(item.title.strip()) < 8 or not item.url.strip() or not item.normalized_title.strip():
             stats.invalid += 1
             continue
+        if _is_stale_topic(item, max_topic_age_days):
+            stats.stale += 1
+            continue
+        if not getattr(item, "published_at", None):
+            stats.missing_date += 1
         if any(w in item.title.lower() for w in spam_words):
             stats.spam += 1
             continue
-        if item.score < 20 and item.source_group != "custom":
+        if item.score < 50 and item.source_group != "custom":
             stats.low_score += 1
+            stats.low_quality += 1
             continue
         result = db.upsert_topic_candidate_with_reason(
             item.title, item.url, item.source, item.published_at, item.category, item.score, item.reason, item.normalized_title, item.source_group, item.title_ru, item.summary_ru, item.angle_ru, item.reason_ru, item.original_description
@@ -1894,7 +1929,9 @@ def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list) 
         f"Новых: {stats.new}",
         f"Уже были: {stats.existing}",
         f"Дубли по смыслу: {stats.near_duplicate}",
-        f"Низкий вес: {stats.low_score}",
+        f"Старые: {stats.stale}",
+        f"Без даты: {stats.missing_date}",
+        f"Низкое качество: {stats.low_quality or stats.low_score}",
         f"Мусор/спам: {stats.spam}",
         f"Некорректные: {stats.invalid}",
         "",
@@ -1905,7 +1942,7 @@ def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list) 
         lines.extend([f"- {it.score} - {_category_label(it.category)} - {topic_display_title(it)[:70]}" for it in top])
     else:
         lines.append("Новых сильных тем нет. Посмотри старые через /topics_all или добавь источники в CUSTOM_TOPIC_FEEDS.")
-    lively = [i for i in sorted(items, key=lambda i: i.score, reverse=True) if i.source_group in {"community","github","tools","custom"} or i.category in {"drama","meme","guide","creator"}][:5]
+    lively = [i for i in sorted(items, key=lambda i: i.score, reverse=True) if i.score >= 50 and (i.source_group in {"community","github","tools","custom"} or i.category in {"drama","meme","guide","creator"})][:5]
     lines.extend(["", "Живые темы:"])
     lines.extend([f"- {it.score} - {_source_group_label(it.source_group)} - {topic_display_title(it)[:70]}" for it in lively])
     return "\n".join(lines)
@@ -1961,6 +1998,7 @@ async def collect_debug_command(update: Update, context: ContextTypes.DEFAULT_TY
     problems = [r for r in reports if r.status in {"error", "empty"}][:12]
     problem_lines = [f"- {r.name}: {r.error or 'empty'}" if r.status == "error" else f"- {r.name}: empty" for r in problems]
     combined = text.replace("🧠 Темы собраны", "🧠 Темы собраны с диагностикой")
+    combined += f"\n\nСвежесть: пропущено старых тем: {stats.stale} (лимит {getattr(settings, 'max_topic_age_days', 14)} дн.)"
     combined += f"\n\nИсточники:\nРаботают: {ok}\nПустые: {empty}\nОшибки: {errors}"
     if problem_lines:
         combined += "\n\nПроблемы:\n" + "\n".join(problem_lines)

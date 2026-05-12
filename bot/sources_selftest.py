@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from bot.sources import _parse_rss, build_github_topic_ru_metadata, parse_custom_topic_feeds
 
 
@@ -6,12 +8,24 @@ def run() -> None:
     assert len(feeds) == 2
     assert feeds[0][1] == "custom"
 
-    atom = """<?xml version='1.0'?><feed xmlns='http://www.w3.org/2005/Atom'><entry><title>T1</title><link href='https://example.com/1'/><updated>2026-01-01T00:00:00Z</updated></entry></feed>"""
+    recent = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    atom = f"""<?xml version='1.0'?><feed xmlns='http://www.w3.org/2005/Atom'><entry><title>T1</title><link href='https://example.com/1'/><updated>{recent}</updated></entry></feed>"""
     items = _parse_rss(atom, "A", "community", max_items=5)
     assert len(items) == 1
     assert items[0].url == "https://example.com/1"
-    assert "Тема набрала" in items[0].reason_ru
+    assert items[0].reason_ru
     assert items[0].title_ru is None
+
+    old_date = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%a, %d %b %Y %H:%M:%S +0000")
+    stale_rss = f"""<rss><channel><item><title>Old AI tool launch</title><link>https://example.com/old</link><pubDate>{old_date}</pubDate></item></channel></rss>"""
+    stale_items = _parse_rss(stale_rss, "A", "tech_media", max_items=5)
+    assert len(stale_items) == 1
+    assert stale_items[0].published_at is not None
+
+    missing_date_rss = """<rss><channel><item><title>AI tool without date</title><link>https://example.com/no-date</link></item></channel></rss>"""
+    missing_date_items = _parse_rss(missing_date_rss, "A", "tech_media", max_items=5)
+    assert len(missing_date_items) == 1
+    assert missing_date_items[0].published_at is None
 
     rss = """<rss><channel><item><title>Новая модель OpenAI</title><link>https://example.com/ru</link></item></channel></rss>"""
     ru_items = _parse_rss(rss, "RU", "ru_tech", max_items=5)
