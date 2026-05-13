@@ -24,6 +24,8 @@ REQUIRED_KEYS = {
     'CUSTOM_EMOJI_ALIASES',
     'CUSTOM_TOPIC_FEEDS',
     'MAX_TOPIC_AGE_DAYS',
+    'TOPIC_AI_ENRICH_LIMIT',
+    'TOPIC_AI_TRANSLATE_LIMIT',
 }
 
 
@@ -34,6 +36,7 @@ REQUIRED_HINTS = [
     'CUSTOM_EMOJI_ALIASES format: alias|fallback_emoji|custom_emoji_id;...',
     'CUSTOM_TOPIC_FEEDS format: name|group|url,name|group|url',
     'MAX_TOPIC_AGE_DAYS controls freshness filter for RSS topics (1..60 days).',
+    'AI enrichment limits for topic metadata during /collect (0..30). Lower values make collection faster.',
     'Daily schedule slots, format: HH:MM,HH:MM,HH:MM',
 ]
 

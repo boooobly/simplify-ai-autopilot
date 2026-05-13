@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -48,7 +49,7 @@ from bot.queue_helpers import (
 )
 from bot.telegram_formatting import strip_quote_markers
 from bot.sources import SourceReport, collect_topics, collect_topics_with_diagnostics
-from bot.topic_display import related_sources_summary, topic_angle_ru, topic_display_reason, topic_display_title, topic_original_title_line, topic_summary_ru
+from bot.topic_display import related_sources_summary, topic_angle_ru, topic_compact_preview_ru, topic_display_reason, topic_display_title, topic_original_title_line, topic_summary_ru
 from bot.writer import (
     EmptyAIResponseError,
     GenerationResult,
@@ -150,6 +151,12 @@ class TopicCollectStats:
     missing_date: int = 0
     invalid: int = 0
     spam: int = 0
+    source_seconds: float = 0.0
+    store_seconds: float = 0.0
+    ai_seconds: float = 0.0
+    total_seconds: float = 0.0
+    ai_enriched: int = 0
+    ai_enrich_limit: int = 0
 
 
 
@@ -338,6 +345,77 @@ def _topic_actions_keyboard(topic_id: int, source_url: str | None = None) -> Inl
         rows.append([InlineKeyboardButton("🔗 Открыть источник", url=source_url)])
     rows.append([InlineKeyboardButton("❌ Отклонить тему", callback_data=f"reject_topic:{topic_id}")])
     return InlineKeyboardMarkup(rows)
+
+
+def _topics_hub_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🔥 Горячие", callback_data="topics_hot:0"), InlineKeyboardButton("🆕 Новые", callback_data="topics_new:0")],
+            [InlineKeyboardButton("🛠 Инструменты", callback_data="topics_tools:0"), InlineKeyboardButton("📰 Новости", callback_data="topics_news:0")],
+            [InlineKeyboardButton("😄 Живые", callback_data="topics_fun:0")],
+            [InlineKeyboardButton("🔄 Собрать темы", callback_data="menu_collect")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")],
+        ]
+    )
+
+
+def _collect_result_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🧠 Открыть темы", callback_data="menu_topics")],
+            [InlineKeyboardButton("🔥 Горячие", callback_data="topics_hot:0"), InlineKeyboardButton("🆕 Лучшие новые", callback_data="topics_new:0")],
+            [InlineKeyboardButton("🔄 Собрать ещё", callback_data="menu_collect")],
+        ]
+    )
+
+
+def _topics_for_kind(db: DraftDatabase, kind: str, limit: int = 10) -> list[dict]:
+    if kind == "hot":
+        return db.list_topic_candidates_min_score(limit=limit, status="new", min_score=75)
+    if kind == "tools":
+        return db.list_topic_candidates_filtered(limit=limit, status="new", categories=["tool", "creator", "guide", "dev", "mobile"])
+    if kind == "news":
+        return db.list_topic_candidates_filtered(limit=limit, status="new", categories=["news", "model", "agent", "research", "business", "privacy"])
+    if kind == "fun":
+        topics_by_category = db.list_topic_candidates_filtered(limit=20, status="new", categories=["drama", "meme"])
+        topics_by_group = db.list_topic_candidates_filtered(limit=20, status="new", source_groups=["community", "github", "custom"])
+        merged: dict[int, dict] = {}
+        for topic in topics_by_category + topics_by_group:
+            merged[int(topic["id"])] = topic
+        return sorted(merged.values(), key=lambda t: (int(t.get("score") or 0), str(t.get("created_at") or "")), reverse=True)[:limit]
+    return db.list_topic_candidates(limit=limit, status="new", order_by_score=True)
+
+
+def _topic_count(db: DraftDatabase, kind: str) -> int:
+    return len(_topics_for_kind(db, kind, limit=1000))
+
+
+def _render_topics_hub_text(db: DraftDatabase) -> str:
+    return "\n".join(
+        [
+            "🧠 Темы",
+            f"Горячие: {_topic_count(db, 'hot')}",
+            f"Новые: {_topic_count(db, 'new')}",
+            f"Инструменты: {_topic_count(db, 'tools')}",
+            f"Новости: {_topic_count(db, 'news')}",
+            f"Мемное/живое: {_topic_count(db, 'fun')}",
+        ]
+    )
+
+
+def _topic_preview_line(topic: dict) -> str:
+    score = int(topic.get("score") or 0)
+    first, *_rest = topic_compact_preview_ru(topic, max_len=120).splitlines()
+    return f"- {score} - {_category_label(topic.get('category'))} - {first}"
+
+
+def _render_topic_preview_list(title: str, topics: list[dict]) -> str:
+    lines = [title, ""]
+    if not topics:
+        lines.append("Тем пока нет. Запусти /collect или /collect_debug.")
+    else:
+        lines.extend(_topic_preview_line(topic) for topic in topics[:5])
+    return "\n".join(lines)
 
 
 def _is_admin(user_id: int | None, admin_id: int) -> bool:
@@ -1267,7 +1345,7 @@ async def _handle_navigation_text(update: Update, context: ContextTypes.DEFAULT_
         await drafts_command(update, context)
         return True
     if text == NAV_TOPICS:
-        await topics_hot_command(update, context)
+        await topics_menu_command(update, context)
         return True
     if text == NAV_SOURCES:
         await sources_status_command(update, context)
@@ -1981,14 +2059,18 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
 
 
 async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = None, settings=None) -> tuple[TopicCollectStats, list, list]:
+    total_started = time.monotonic()
+    source_started = time.monotonic()
     if items is None:
         items = await _run_collect_topics()
-    stats = TopicCollectStats(total=len(items))
+    source_seconds = time.monotonic() - source_started if items is not None else 0.0
+
+    stats = TopicCollectStats(total=len(items), source_seconds=source_seconds)
     inserted = []
-    translated_count = 0
-    translation_limit = 5
+    enrichment_candidates = []
     spam_words = ["casino", "porn", "xxx", "bet", "viagra", "airdrop", "token presale"]
     max_topic_age_days = int(getattr(settings, "max_topic_age_days", 14) or 14)
+    store_started = time.monotonic()
     for item in items:
         if len(item.title.strip()) < 8 or not item.url.strip() or not item.normalized_title.strip():
             stats.invalid += 1
@@ -2011,17 +2093,36 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
         if result == "inserted":
             stats.new += 1
             inserted.append(item)
-            if translated_count < translation_limit and item.score >= 75:
-                before_title_ru = item.title_ru
-                await _enrich_topic_metadata_if_available(item, settings, db)
-                if item.title_ru and item.title_ru != before_title_ru:
-                    translated_count += 1
         elif result == "existing_url":
             stats.existing += 1
         elif result == "merged_story":
             stats.merged_story += 1
         else:
             stats.near_duplicate += 1
+        if result in {"inserted", "existing_url", "merged_story"} and item.score >= 50 and not (item.title_ru and item.summary_ru and item.angle_ru):
+            stored_topic = db.find_topic_candidate_by_url(item.url)
+            if not stored_topic or str(stored_topic.get("status") or "new") == "new":
+                enrichment_candidates.append(item)
+    stats.store_seconds = time.monotonic() - store_started
+
+    enrich_limit = int(getattr(settings, "topic_ai_enrich_limit", 8) or 0)
+    translate_limit = int(getattr(settings, "topic_ai_translate_limit", 8) or 0)
+    stats.ai_enrich_limit = max(0, min(30, enrich_limit, translate_limit))
+    ai_started = time.monotonic()
+    if stats.ai_enrich_limit > 0 and settings and getattr(settings, "has_ai_provider", False):
+        enrichment_candidates = sorted(enrichment_candidates, key=lambda i: i.score, reverse=True)[: stats.ai_enrich_limit]
+        for item in enrichment_candidates:
+            try:
+                before = (item.title_ru, item.summary_ru, item.angle_ru)
+                await _enrich_topic_metadata_if_available(item, settings, db)
+                after = (item.title_ru, item.summary_ru, item.angle_ru)
+                if after != before and any(after):
+                    stats.ai_enriched += 1
+            except Exception as exc:
+                logger.warning("Topic enrichment skipped after error: %s", exc)
+                continue
+    stats.ai_seconds = time.monotonic() - ai_started
+    stats.total_seconds = time.monotonic() - total_started
     return stats, items, inserted
 
 
@@ -2055,7 +2156,16 @@ def _render_sources_status(reports: list[SourceReport]) -> str:
     return "\n".join(lines)[:3900]
 
 
-def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list) -> str:
+def _render_collect_topic_line(topic) -> list[str]:
+    preview = topic_compact_preview_ru(topic, max_len=160).splitlines()
+    score = int(getattr(topic, "score", 0) or 0) if not isinstance(topic, dict) else int(topic.get("score") or 0)
+    category = getattr(topic, "category", None) if not isinstance(topic, dict) else topic.get("category")
+    title = preview[0] if preview else topic_display_title(topic)
+    details = preview[1:] or [f"  О чем: {topic_summary_ru(topic)}"]
+    return [f"- {score} - {_category_label(category)} - {title}", *details]
+
+
+def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list, debug: bool = False) -> str:
     lines = [
         "🧠 Темы собраны",
         "",
@@ -2069,18 +2179,35 @@ def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list) 
         f"Низкое качество: {stats.low_quality or stats.low_score}",
         f"Мусор/спам: {stats.spam}",
         f"Некорректные: {stats.invalid}",
+        f"Время: {int(round(stats.total_seconds))} сек. Обогащено AI: {stats.ai_enriched} тем.",
         "",
     ]
+    if debug:
+        lines.extend(
+            [
+                f"Источники: {stats.source_seconds:.1f} сек",
+                f"Сохранение/скоринг: {stats.store_seconds:.1f} сек",
+                f"AI-обогащение: {stats.ai_seconds:.1f} сек",
+                f"AI-обогащено: {stats.ai_enriched} / {stats.ai_enrich_limit}",
+                "",
+            ]
+        )
     if inserted:
         top = sorted(inserted, key=lambda i: i.score, reverse=True)[:5]
         lines.append("Лучшие новые:")
-        lines.extend([f"- {it.score} - {_category_label(it.category)} - {topic_display_title(it)[:70]}" for it in top])
+        for item in top:
+            lines.extend(_render_collect_topic_line(item))
     else:
         lines.append("Новых сильных тем нет. Посмотри старые через /topics_all или добавь источники в CUSTOM_TOPIC_FEEDS.")
     lively = [i for i in sorted(items, key=lambda i: i.score, reverse=True) if i.score >= 50 and (i.source_group in {"community","github","tools","custom"} or i.category in {"drama","meme","guide","creator"})][:5]
     lines.extend(["", "Живые темы:"])
-    lines.extend([f"- {it.score} - {_source_group_label(it.source_group)} - {topic_display_title(it)[:70]}" for it in lively])
+    if lively:
+        for item in lively:
+            lines.extend(_render_collect_topic_line(item))
+    else:
+        lines.append("- пока нет")
     return "\n".join(lines)
+
 
 async def collect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = context.bot_data["settings"]
@@ -2091,13 +2218,21 @@ async def collect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await update.message.reply_text("Нет доступа.")
         return
 
+    progress_message = None
     if update.message:
-        await update.message.reply_text("Собираю свежие AI-темы из источников...")
+        progress_message = await update.message.reply_text("🔄 Собираю темы... Это может занять до пары минут.")
 
     stats, items, inserted = await _collect_topics_with_stats(db, settings=settings)
 
     if update.message:
-        await update.message.reply_text(_render_collect_text(stats, items, inserted))
+        text = _render_collect_text(stats, items, inserted)
+        if progress_message:
+            try:
+                await progress_message.edit_text(text, reply_markup=_collect_result_keyboard())
+                return
+            except Exception as exc:
+                logger.warning("Failed to edit collect progress message: %s", exc)
+        await update.message.reply_text(text, reply_markup=_collect_result_keyboard())
 
 
 async def sources_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2122,11 +2257,16 @@ async def collect_debug_command(update: Update, context: ContextTypes.DEFAULT_TY
         if update.message:
             await update.message.reply_text("Нет доступа.")
         return
+    progress_message = None
     if update.message:
-        await update.message.reply_text("Собираю темы с диагностикой...")
+        progress_message = await update.message.reply_text("🔄 Собираю темы... Это может занять до пары минут.")
+    debug_started = time.monotonic()
     items, reports = await _run_collect_topics_with_diagnostics()
+    source_seconds = time.monotonic() - debug_started
     stats, _all_items, inserted = await _collect_topics_with_stats(db, items=items, settings=settings)
-    text = _render_collect_text(stats, items, inserted)
+    stats.source_seconds = source_seconds
+    stats.total_seconds = source_seconds + stats.store_seconds + stats.ai_seconds
+    text = _render_collect_text(stats, items, inserted, debug=True)
     ok = sum(1 for r in reports if r.status == "ok")
     empty = sum(1 for r in reports if r.status == "empty")
     errors = sum(1 for r in reports if r.status == "error")
@@ -2140,7 +2280,54 @@ async def collect_debug_command(update: Update, context: ContextTypes.DEFAULT_TY
     if len([r for r in reports if r.status in {'error', 'empty'}]) > 12:
         combined += "\nПоказаны первые 12 проблем."
     if update.message:
-        await update.message.reply_text(combined[:3900], reply_markup=_admin_reply_keyboard())
+        if progress_message:
+            try:
+                await progress_message.edit_text(combined[:3900], reply_markup=_collect_result_keyboard())
+                return
+            except Exception as exc:
+                logger.warning("Failed to edit collect debug progress message: %s", exc)
+        await update.message.reply_text(combined[:3900], reply_markup=_collect_result_keyboard())
+
+
+
+async def _send_topic_cards(context: ContextTypes.DEFAULT_TYPE, settings, topics: list[dict]) -> None:
+    for topic in topics:
+        await context.bot.send_message(
+            chat_id=settings.admin_id,
+            text=_topic_card_text(topic),
+            reply_markup=_topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")),
+            link_preview_options=_disabled_link_preview_options(),
+        )
+
+
+async def topics_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_admin(user_id, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+    hot_topics = _topics_for_kind(db, "hot", limit=5)
+    new_topics = _topics_for_kind(db, "new", limit=5)
+    if not hot_topics and not new_topics:
+        text = _render_topics_hub_text(db) + "\n\nТем пока нет. Запусти /collect или /collect_debug."
+        if update.message:
+            await update.message.reply_text(text, reply_markup=_topics_hub_keyboard())
+        return
+    if update.message:
+        await update.message.reply_text(_render_topics_hub_text(db), reply_markup=_topics_hub_keyboard())
+    if hot_topics:
+        if update.message:
+            await update.message.reply_text(_render_topic_preview_list("🔥 Лучшие горячие", hot_topics), reply_markup=_topics_hub_keyboard())
+    else:
+        if update.message:
+            await update.message.reply_text(
+                "Горячих тем пока нет, но есть свежие темы. Показываю лучшие новые.",
+                reply_markup=_topics_hub_keyboard(),
+            )
+            await update.message.reply_text(_render_topic_preview_list("🆕 Лучшие новые", new_topics), reply_markup=_topics_hub_keyboard())
+
 
 
 async def topics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2282,9 +2469,15 @@ async def topics_hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     limit = _parse_topic_limit(context, default=15)
     topics = db.list_topic_candidates_min_score(limit=limit, status="new", min_score=75)
     if not topics:
-        if update.message:
-            await update.message.reply_text("Горячих тем пока нет. Запусти /collect")
-        return
+        fallback_topics = db.list_topic_candidates(limit=limit, status="new", order_by_score=True)
+        if fallback_topics:
+            if update.message:
+                await update.message.reply_text("Горячих тем пока нет, но есть свежие темы. Показываю лучшие новые.", reply_markup=_topics_hub_keyboard())
+            topics = fallback_topics
+        else:
+            if update.message:
+                await update.message.reply_text("Тем пока нет. Запусти /collect или /collect_debug.", reply_markup=_topics_hub_keyboard())
+            return
     for topic in topics:
         await context.bot.send_message(chat_id=settings.admin_id, text=_topic_card_text(topic), reply_markup=_topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")), link_preview_options=_disabled_link_preview_options())
     if update.message:
@@ -2383,6 +2576,40 @@ async def emoji_ids_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text("\n\n".join(lines), reply_markup=_admin_reply_keyboard())
 
 
+
+async def _handle_topics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    query = update.callback_query
+    if not query:
+        return
+    kind = data.split(":", 1)[0].removeprefix("topics_")
+    titles = {
+        "hot": "🔥 Горячие темы",
+        "new": "🆕 Лучшие новые темы",
+        "tools": "🛠 Инструменты",
+        "news": "📰 Новости",
+        "fun": "😄 Живые темы",
+    }
+    topics = _topics_for_kind(db, kind, limit=10)
+    if kind == "hot" and not topics:
+        topics = _topics_for_kind(db, "new", limit=10)
+        text = "Горячих тем пока нет, но есть свежие темы. Показываю лучшие новые."
+    else:
+        text = _render_topic_preview_list(titles.get(kind, "🧠 Темы"), topics)
+    if not topics:
+        text = "Тем пока нет. Запусти /collect или /collect_debug."
+    await _edit_callback_message(query, text, reply_markup=_topics_hub_keyboard())
+    for topic in topics[:5]:
+        await context.bot.send_message(
+            chat_id=settings.admin_id,
+            text=_topic_card_text(topic),
+            reply_markup=_topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")),
+            link_preview_options=_disabled_link_preview_options(),
+        )
+
+
+
 async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle Publish/Reject/Rewrite button clicks."""
 
@@ -2402,6 +2629,9 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     data = query.data or ""
     if data.startswith("menu_"):
         await _handle_menu_callback(update, context, data)
+        return
+    if data.startswith("topics_"):
+        await _handle_topics_callback(update, context, data)
         return
 
     try:
@@ -3107,21 +3337,23 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 link_preview_options=_disabled_link_preview_options(),
             )
     elif data == "menu_topics":
-        keyboard = InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("🔎 Собрать свежие темы", callback_data="menu_collect")],
-                [InlineKeyboardButton("📋 Показать найденные темы", callback_data="menu_show_topics")],
-                [InlineKeyboardButton("📡 Источники", callback_data="menu_sources_status")],
-                [InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")],
-            ]
-        )
-        await _edit_callback_message(query, "Что сделать с темами?", reply_markup=keyboard)
+        hot_topics = _topics_for_kind(db, "hot", limit=5)
+        new_topics = _topics_for_kind(db, "new", limit=5)
+        hub_text = _render_topics_hub_text(db)
+        if not hot_topics and not new_topics:
+            hub_text += "\n\nТем пока нет. Запусти /collect или /collect_debug."
+        elif not hot_topics:
+            hub_text += "\n\nГорячих тем пока нет, но есть свежие темы. Показываю лучшие новые.\n\n" + "\n".join(_topic_preview_line(t) for t in new_topics[:5])
+        else:
+            hub_text += "\n\n" + "\n".join(_topic_preview_line(t) for t in hot_topics[:5])
+        await _edit_callback_message(query, hub_text, reply_markup=_topics_hub_keyboard())
     elif data == "menu_collect":
+        await _edit_callback_message(query, "🔄 Собираю темы... Это может занять до пары минут.")
         stats, items, inserted = await _collect_topics_with_stats(db, settings=settings)
         await _edit_callback_message(
             query,
             _render_collect_text(stats, items, inserted),
-            reply_markup=_back_to_menu_keyboard(),
+            reply_markup=_collect_result_keyboard(),
         )
     elif data == "menu_show_topics":
         limit = _parse_topic_limit(context, default=10)

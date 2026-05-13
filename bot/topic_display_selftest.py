@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from bot.handlers import _render_plan_text, _topic_card_text
-from bot.topic_display import topic_display_reason, topic_display_title
+from bot.topic_display import topic_compact_preview_ru, topic_display_reason, topic_display_title
 
 
 def run() -> None:
@@ -66,6 +66,15 @@ def run() -> None:
     github_card = _topic_card_text(github_fallback)
     assert "Похоже на GitHub-проект по AI/разработке" in github_card
     assert "URL: https://github.com/owner/repo" in github_card
+
+    compact = topic_compact_preview_ru(topic)
+    assert compact.startswith("OpenAI выпустила новую модель")
+    assert "О чем:" in compact
+    assert "Коротко объясняет" in compact
+
+    compact_missing_ru = topic_compact_preview_ru(fallback_topic)
+    assert compact_missing_ru.startswith("Нужна проверка: English fallback title")
+    assert "О чем:" in compact_missing_ru
 
     plan = _render_plan_text("сегодня", ["10:00"], [topic])
     assert "OpenAI выпустила новую модель" in plan
