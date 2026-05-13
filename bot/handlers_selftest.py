@@ -560,6 +560,20 @@ async def _run_topic_403_fallback_and_failure_selftest() -> None:
         assert failed_draft_id is None
         assert error and "Не удалось создать черновик" in error
         assert db_fail.get_topic_candidate(failed_topic_id)["status"] == "new"
+
+        async def empty_metadata(*args, **kwargs):
+            return GenerationResult(content="   ", prompt_tokens=1, completion_tokens=0, total_tokens=1, model="draft-model")
+
+        handlers._run_generate_post_draft_from_topic_metadata = empty_metadata
+        db_empty = DraftDatabase(f"{tmp.name}/topic-reddit-empty.db")
+        context_empty = SimpleNamespace(bot_data={"settings": settings, "db": db_empty}, bot=_FakeBot(), user_data={})
+        reddit_topic_id = _insert_topic(db_empty, url="https://www.reddit.com/r/LocalLLaMA/comments/test/empty/")
+        empty_draft_id, empty_error = await handlers._create_draft_from_topic(
+            context=context_empty, settings=settings, db=db_empty, topic_id=reddit_topic_id
+        )
+        assert empty_draft_id is None
+        assert empty_error == handlers.REDDIT_METADATA_EMPTY_REPLY_TEXT
+        assert db_empty.get_topic_candidate(reddit_topic_id)["status"] == "new"
     finally:
         handlers._run_fetch_page_content_details = original_fetch
         handlers._run_generate_post_draft_from_topic_metadata = original_metadata

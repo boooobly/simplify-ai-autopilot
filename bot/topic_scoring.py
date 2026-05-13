@@ -29,10 +29,11 @@ _SOURCE_GROUP_BOOST = {
     "tools": 14,
     "community": 14,
     "github": 8,
+    "x": 10,
     "custom": 8,
 }
 
-_UNRELIABLE_DATE_GROUPS = {"github", "tools", "community"}
+_UNRELIABLE_DATE_GROUPS = {"github", "tools", "community", "x"}
 _PRACTICAL_KEYWORDS = [
     "tool", "service", "app", "extension", "browser", "editor", "image", "video", "audio", "voice",
     "design", "creator", "prompt", "workflow", "automation", "agent", "local", "open-source", "open source",

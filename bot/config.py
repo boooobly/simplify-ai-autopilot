@@ -32,6 +32,11 @@ class Settings:
     max_topic_age_days: int = 14
     topic_ai_enrich_limit: int = 8
     topic_ai_translate_limit: int = 8
+    enable_reddit_sources: bool = False
+    enable_x_sources: bool = False
+    x_api_bearer_token: str = ""
+    x_accounts: list[str] = field(default_factory=list)
+    x_max_posts_per_account: int = 5
     openrouter_input_cost_per_1m: float = 0.0
     openrouter_output_cost_per_1m: float = 0.0
     openai_input_cost_per_1m: float = 0.0
@@ -43,6 +48,32 @@ class Settings:
     @property
     def has_ai_provider(self) -> bool:
         return bool(self.openrouter_api_key or self.openai_api_key)
+
+
+TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+
+
+def _parse_bool_env(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name, "").strip().casefold()
+    if not raw:
+        return default
+    return raw in TRUE_ENV_VALUES
+
+
+def _parse_csv_env(name: str) -> list[str]:
+    raw = os.getenv(name, "")
+    values: list[str] = []
+    seen: set[str] = set()
+    for part in raw.split(","):
+        value = part.strip().lstrip("@").strip()
+        if not value:
+            continue
+        key = value.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        values.append(value)
+    return values
 
 
 def _parse_int_env(name: str, default: int) -> int:
@@ -163,6 +194,10 @@ def startup_diagnostics(settings: Settings) -> list[str]:
         f"max_topic_age_days: {settings.max_topic_age_days}",
         f"topic_ai_enrich_limit: {settings.topic_ai_enrich_limit}",
         f"topic_ai_translate_limit: {settings.topic_ai_translate_limit}",
+        f"enable_reddit_sources: {settings.enable_reddit_sources}",
+        f"enable_x_sources: {settings.enable_x_sources}",
+        f"x_accounts count: {len(settings.x_accounts)}",
+        f"x_max_posts_per_account: {settings.x_max_posts_per_account}",
         f"DB_PATH: {settings.db_path}",
         f"CHANNEL_ID type: {channel_type}",
         f"custom emoji aliases count: {len(settings.custom_emoji_aliases)}",
@@ -202,6 +237,11 @@ def load_settings() -> Settings:
     max_topic_age_days = _parse_int_range_env("MAX_TOPIC_AGE_DAYS", 14, 1, 60)
     topic_ai_enrich_limit = _parse_int_range_env("TOPIC_AI_ENRICH_LIMIT", 8, 0, 30)
     topic_ai_translate_limit = _parse_int_range_env("TOPIC_AI_TRANSLATE_LIMIT", 8, 0, 30)
+    enable_reddit_sources = _parse_bool_env("ENABLE_REDDIT_SOURCES", False)
+    enable_x_sources = _parse_bool_env("ENABLE_X_SOURCES", False)
+    x_api_bearer_token = os.getenv("X_API_BEARER_TOKEN", "").strip()
+    x_accounts = _parse_csv_env("X_ACCOUNTS")
+    x_max_posts_per_account = _parse_int_range_env("X_MAX_POSTS_PER_ACCOUNT", 5, 1, 20)
 
     post_max_chars = _parse_int_env("POST_MAX_CHARS", 1400)
     post_soft_chars = _parse_int_env("POST_SOFT_CHARS", 1100)
@@ -247,6 +287,11 @@ def load_settings() -> Settings:
         max_topic_age_days=max_topic_age_days,
         topic_ai_enrich_limit=topic_ai_enrich_limit,
         topic_ai_translate_limit=topic_ai_translate_limit,
+        enable_reddit_sources=enable_reddit_sources,
+        enable_x_sources=enable_x_sources,
+        x_api_bearer_token=x_api_bearer_token,
+        x_accounts=x_accounts,
+        x_max_posts_per_account=x_max_posts_per_account,
         openrouter_input_cost_per_1m=openrouter_input_cost_per_1m,
         openrouter_output_cost_per_1m=openrouter_output_cost_per_1m,
         openai_input_cost_per_1m=openai_input_cost_per_1m,
