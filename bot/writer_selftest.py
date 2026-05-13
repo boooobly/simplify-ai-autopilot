@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 import bot.writer as writer
-from bot.writer import GenerationResult, _ensure_custom_emoji_markers, fetch_page_content, fetch_page_content_details, generate_post_draft_from_page, generate_post_draft_from_topic_metadata, rewrite_post_draft
+from bot.writer import GenerationResult, _ensure_custom_emoji_markers, enrich_topic_metadata_ru, fetch_page_content, fetch_page_content_details, generate_post_draft_from_page, generate_post_draft_from_topic_metadata, rewrite_post_draft
 
 
 class _Response:
@@ -161,6 +161,66 @@ def _assert_topic_metadata_generation() -> None:
     assert result.model == "model-x"
 
 
+def _assert_topic_metadata_enrichment() -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fake_generate(api_key, model, user_prompt, system_prompt, base_url=None, extra_headers=None, max_tokens=900):
+        calls.append((user_prompt, system_prompt))
+        return GenerationResult(
+            content=(
+                "TITLE: LLMs-from-scratch - пошаговая сборка ChatGPT-подобной модели на PyTorch\n"
+                "SUMMARY: Репозиторий показывает, как с нуля собрать ChatGPT-подобную LLM на PyTorch.\n"
+                "ANGLE: Можно подать как полезный open-source проект для тех, кто хочет понять, как LLM устроены изнутри."
+            ),
+            prompt_tokens=10,
+            completion_tokens=20,
+            total_tokens=30,
+            model=model,
+        )
+
+    original = writer._generate_with_chat_completion
+    writer._generate_with_chat_completion = fake_generate
+    try:
+        result = enrich_topic_metadata_ru(
+            api_key="key",
+            model="model-x",
+            title="LLMs-from-scratch - Implement a ChatGPT-like LLM in PyTorch from scratch, step by step",
+            source="GitHub Trending AI",
+            description="Implement a ChatGPT-like LLM in PyTorch from scratch, step by step",
+        )
+    finally:
+        writer._generate_with_chat_completion = original
+
+    assert result is not None
+    lines = result.content.splitlines()
+    assert lines[0] == "LLMs-from-scratch - пошаговая сборка ChatGPT-подобной модели на PyTorch"
+    assert "PyTorch" in result.content and "ChatGPT" in result.content and "LLM" in result.content
+    assert "Implement a ChatGPT-like LLM" not in lines[0]
+    assert "Jupyter Notebook" in calls[0][1]
+    assert "Пример плохого TITLE" in calls[0][0]
+
+    def bad_generate(api_key, model, user_prompt, system_prompt, base_url=None, extra_headers=None, max_tokens=900):
+        return GenerationResult(
+            content=(
+                "TITLE: LLMs-from-scratch - open-source проект: Implement a ChatGPT-like LLM in PyTorch from scratch, step by step\n"
+                "SUMMARY: Репозиторий показывает LLM.\n"
+                "ANGLE: Можно подать как проект."
+            ),
+            model=model,
+        )
+
+    writer._generate_with_chat_completion = bad_generate
+    try:
+        assert enrich_topic_metadata_ru(
+            api_key="key",
+            model="model-x",
+            title="LLMs-from-scratch - Implement a ChatGPT-like LLM in PyTorch from scratch, step by step",
+            source="GitHub Trending AI",
+        ) is None
+    finally:
+        writer._generate_with_chat_completion = original
+
+
 def _assert_cta_cleanup_after_generation() -> None:
     calls: list[tuple[str, str]] = []
 
@@ -219,6 +279,7 @@ def main() -> None:
     _assert_preview_extraction()
     _assert_rewrite_prompts()
     _assert_topic_metadata_generation()
+    _assert_topic_metadata_enrichment()
     _assert_cta_cleanup_after_generation()
 
     out = _ensure_custom_emoji_markers("🤖 MiniMax-M1: миллион токенов", title="MiniMax-M1")
