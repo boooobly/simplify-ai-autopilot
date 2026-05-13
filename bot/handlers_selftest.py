@@ -1,4 +1,6 @@
+import ast
 import asyncio
+import inspect
 from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -44,6 +46,22 @@ def _keyboard_texts(markup) -> list[str]:
 
 def _keyboard_buttons(markup):
     return [button for row in markup.inline_keyboard for button in row]
+
+
+def _moderation_callback_actions() -> set[str]:
+    tree = ast.parse(inspect.getsource(handlers.moderation_callback))
+    actions: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare):
+            continue
+        if not isinstance(node.left, ast.Name) or node.left.id != "action":
+            continue
+        if not any(isinstance(op, ast.Eq) for op in node.ops):
+            continue
+        for comparator in node.comparators:
+            if isinstance(comparator, ast.Constant) and isinstance(comparator.value, str):
+                actions.add(comparator.value)
+    return actions
 
 
 def _settings(slots: list[str], timezone_name: str = "UTC") -> SimpleNamespace:
