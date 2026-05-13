@@ -47,12 +47,24 @@ def _assert_database_settings(db: DraftDatabase) -> None:
         assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1
         assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
         topic_columns = {row["name"] for row in conn.execute("PRAGMA table_info(topic_candidates)").fetchall()}
+        draft_columns = {row["name"] for row in conn.execute("PRAGMA table_info(drafts)").fetchall()}
+        assert "source_image_url" in draft_columns
         assert {"title_ru", "summary_ru", "angle_ru", "reason_ru", "original_description"} <= topic_columns
 
 
 def _assert_basic_draft_flow(db: DraftDatabase) -> None:
-    draft_id = db.create_draft("test", "https://example.com/post")
-    assert db.find_by_source_url("https://example.com/post")["id"] == draft_id
+    draft_id = db.create_draft(
+        "test",
+        "https://example.com/post",
+        source_image_url="https://example.com/preview.jpg",
+    )
+    stored = db.find_by_source_url("https://example.com/post")
+    assert stored["id"] == draft_id
+    assert stored["source_image_url"] == "https://example.com/preview.jpg"
+    db.update_draft_source_image_url(draft_id, "https://example.com/preview-2.jpg")
+    assert db.get_draft(draft_id)["source_image_url"] == "https://example.com/preview-2.jpg"
+    db.update_draft_source_image_url(draft_id, None)
+    assert db.get_draft(draft_id)["source_image_url"] is None
 
     db.schedule_draft(draft_id, "2000-01-01 00:00:00")
     scheduled = db.get_draft(draft_id)

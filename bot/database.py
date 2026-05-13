@@ -56,6 +56,7 @@ class DraftDatabase:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     content TEXT NOT NULL,
                     source_url TEXT,
+                    source_image_url TEXT,
                     media_url TEXT,
                     media_type TEXT,
                     status TEXT NOT NULL DEFAULT 'draft',
@@ -66,6 +67,7 @@ class DraftDatabase:
                 """
             )
             self._ensure_column(conn, "drafts", "source_url", "TEXT")
+            self._ensure_column(conn, "drafts", "source_image_url", "TEXT")
             self._ensure_column(conn, "drafts", "scheduled_at", "TIMESTAMP")
             self._ensure_column(conn, "drafts", "media_url", "TEXT")
             self._ensure_column(conn, "drafts", "media_type", "TEXT")
@@ -161,11 +163,19 @@ class DraftDatabase:
                 f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql_type}"
             )
 
-    def create_draft(self, content: str, source_url: str | None = None) -> int:
+    def create_draft(
+        self,
+        content: str,
+        source_url: str | None = None,
+        source_image_url: str | None = None,
+    ) -> int:
         with self._connect() as conn:
             cursor = conn.execute(
-                "INSERT INTO drafts (content, source_url, status) VALUES (?, ?, 'draft')",
-                (content, source_url),
+                """
+                INSERT INTO drafts (content, source_url, source_image_url, status)
+                VALUES (?, ?, ?, 'draft')
+                """,
+                (content, source_url, source_image_url),
             )
             conn.commit()
             return int(cursor.lastrowid)
@@ -198,6 +208,18 @@ class DraftDatabase:
                 WHERE id = ?
                 """,
                 (content, draft_id),
+            )
+            conn.commit()
+
+    def update_draft_source_image_url(self, draft_id: int, source_image_url: str | None) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE drafts
+                SET source_image_url = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (source_image_url, draft_id),
             )
             conn.commit()
 
