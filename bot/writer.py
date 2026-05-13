@@ -334,6 +334,30 @@ def _ensure_custom_emoji_markers(text: str, source_url: str | None = None, title
                 lines[idx] = re.sub(r"^(\s*)(❗️|❗)\s*", r"\1[[EMOJI:alert]] ", line, count=1)
     return "\n".join(lines).strip()
 
+
+
+REWRITE_POST_DRAFT_MODE_INSTRUCTIONS: dict[str, str] = {
+    "remove_fluff": (
+        "Режим: убрать воду. Удали филлер, повторы, generic AI wording и лишние объяснения. "
+        "Сохрани смысл, факты, структуру и полезные акценты."
+    ),
+    "shorten": (
+        "Режим: сделать короче. Сделай пост заметно короче: цель примерно 60-70% текущей длины. "
+        "Сохрани главную мысль, важные факты, CTA и source/link markers."
+    ),
+    "neutralize_ads": (
+        "Режим: убрать рекламный тон. Удали маркетинговый тон, хайп, salesy claims и обещания. "
+        "Сохрани полезные преимущества, но сформулируй их спокойно, как человеческий Telegram-пост, а не рекламу."
+    ),
+}
+
+
+def _rewrite_post_draft_instruction(mode: str) -> str:
+    try:
+        return REWRITE_POST_DRAFT_MODE_INSTRUCTIONS[mode]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported rewrite mode: {mode}") from exc
+
 def generate_post_draft(
     api_key: str,
     model: str,
@@ -412,6 +436,51 @@ def polish_post_draft(
         f"Текущий черновик:\n{_strip_source_lines(draft_text)}"
     )
     logger.info("Полировка черновика: model=%s", model)
+    result = _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
+    final_text = _limit_text_safely(_strip_source_lines(result.content), limit=max_chars)
+    if not _has_meaningful_body(final_text, source_url=source_url):
+        raise EmptyAIResponseError("AI model returned empty content")
+    result.content = _ensure_custom_emoji_markers(final_text, source_url=source_url, title=None)
+    return result
+
+
+def rewrite_post_draft(
+    api_key: str,
+    model: str,
+    draft_text: str,
+    source_url: str | None = None,
+    mode: str = "remove_fluff",
+    max_chars: int = 1400,
+    soft_chars: int = 1100,
+    base_url: str | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> GenerationResult:
+    """Rewrite an existing Telegram draft in a narrow cleanup mode."""
+    mode_instruction = _rewrite_post_draft_instruction(mode)
+    cleaned_draft = _strip_source_lines(draft_text)
+    style = _load_style_prompt() + "\n\n" + SIMPLIFY_AI_STYLE_GUIDE + "\n\n" + SIMPLIFY_AI_EMOJI_ALIAS_GUIDE
+    user_prompt = (
+        "Перепиши существующий черновик поста для @simplify_ai в указанном режиме. "
+        "Это точечный cleanup-pass, а не генерация нового поста. "
+        "Соблюдай стиль-гайд и humanizer-правила ниже. "
+        "Сохраняй факты и смысл. Не добавляй новые факты, даты, цифры, выводы или ссылки. "
+        "Сохраняй полезные маркеры ссылок вида [[LINK:text|url]]. "
+        "Сохраняй существующие [[EMOJI:alias]] маркеры, когда это возможно и уместно. "
+        "Не добавляй строку Источник: или Source:. Ссылка хранится отдельно в модерации. "
+        "Верни только финальный текст поста без комментариев, без отчёта, без markdown-блоков и без HTML. "
+        "Если в тексте есть raw URL, не выдумывай новые ссылки; полезный URL можно оставить только как [[LINK:text|url]]. "
+        "Не используй markdown blockquote. Для списков можно оставить строки с ➖ и существующие [[QUOTE]]...[[/QUOTE]], если они уже помогают структуре. "
+        "Без AI-клише, без эм-даша, без кавычек-ёлочек. "
+        "Избегай штампов: 'не про..., а про...', 'главный вывод простой', 'важно отметить', 'давайте разберем', 'в заключение'. "
+        "Пост должен быть цельным и не обрываться посередине. "
+        f"{mode_instruction} "
+        f"Желательная длина до {soft_chars} символов. Жёсткий максимум {max_chars} символов. "
+        "Перед возвратом молча проверь, что текст не пустой, не содержит строки Источник:, сохраняет полезные [[LINK:...]] и [[EMOJI:...]] маркеры.\n\n"
+        f"Дополнительные humanizer-правила:\n{HUMANIZER_RULES_FOR_SIMPLIFY_AI}\n\n"
+        f"Источник (только контекст модерации, не добавлять в пост): {source_url or 'не указан'}\n\n"
+        f"Текущий черновик:\n{cleaned_draft}"
+    )
+    logger.info("Переписывание черновика: mode=%s model=%s", mode, model)
     result = _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
     final_text = _limit_text_safely(_strip_source_lines(result.content), limit=max_chars)
     if not _has_meaningful_body(final_text, source_url=source_url):

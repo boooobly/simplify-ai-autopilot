@@ -15,6 +15,7 @@ BLOCKING_HELPERS = {
     "generate_post_draft",
     "generate_post_draft_from_page",
     "polish_post_draft",
+    "rewrite_post_draft",
     "translate_topic_title_to_ru",
     "enrich_topic_metadata_ru",
 }
@@ -27,6 +28,7 @@ EXPECTED_WRAPPERS = {
     "_run_generate_post_draft": "generate_post_draft",
     "_run_generate_post_draft_from_page": "generate_post_draft_from_page",
     "_run_polish_post_draft": "polish_post_draft",
+    "_run_rewrite_post_draft": "rewrite_post_draft",
     "_run_translate_topic_title_to_ru": "translate_topic_title_to_ru",
     "_run_enrich_topic_metadata_ru": "enrich_topic_metadata_ru",
 }

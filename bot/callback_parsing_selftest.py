@@ -11,6 +11,9 @@ def run() -> None:
     assert _parse_callback_data("unschedule:42") == ("unschedule", 42, None)
     assert _parse_callback_data("restore_draft:42") == ("restore_draft", 42, None)
     assert _parse_callback_data("reject_topic:42") == ("reject_topic", 42, None)
+    assert _parse_callback_data("rewrite_remove_fluff:42") == ("rewrite_remove_fluff", 42, None)
+    assert _parse_callback_data("rewrite_shorten:42") == ("rewrite_shorten", 42, None)
+    assert _parse_callback_data("rewrite_neutralize_ads:42") == ("rewrite_neutralize_ads", 42, None)
     assert _status_guard_message("schedule", "published") == "Опубликованный черновик уже нельзя планировать."
     assert _status_guard_message("schedule", "rejected") == "Отклонённый черновик нельзя планировать."
 

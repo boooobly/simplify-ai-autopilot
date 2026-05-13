@@ -23,6 +23,7 @@ from bot.handlers import (
     _queue_keyboard,
     _render_collect_text,
     _render_queue_day_text,
+    _rewrite_action_config,
     _schedule_draft_to_local_slot,
     _schedule_draft_to_nearest_slot,
     _topic_actions_keyboard,
@@ -254,6 +255,9 @@ def _run_keyboard_selftest() -> None:
     draft_buttons = _keyboard_buttons(draft_keyboard)
     draft_texts = _keyboard_texts(draft_keyboard)
     assert "📅 В ближайший слот" in draft_texts
+    assert "🧹 Убрать воду" in draft_texts
+    assert "📉 Сделать короче" in draft_texts
+    assert "😐 Без рекламного тона" in draft_texts
     assert "♻️ Перегенерировать" in draft_texts
     assert "🖼 Прикрепить картинку источника" not in draft_texts
     assert any(button.text == "🔗 Открыть источник" and button.url == "https://example.com/source" for button in draft_buttons)
@@ -296,6 +300,9 @@ def _run_keyboard_selftest() -> None:
         )
     )
     assert "📅 В ближайший слот" in approved_texts
+    assert "🧹 Убрать воду" in approved_texts
+    assert "📉 Сделать короче" in approved_texts
+    assert "😐 Без рекламного тона" in approved_texts
     assert "♻️ Перегенерировать" in approved_texts
     assert "🖼 Прикрепить картинку источника" in approved_texts
 
@@ -309,8 +316,33 @@ def _run_keyboard_selftest() -> None:
             )
         )
         assert "📅 В ближайший слот" not in texts
+        assert "🧹 Убрать воду" not in texts
+        assert "📉 Сделать короче" not in texts
+        assert "😐 Без рекламного тона" not in texts
         assert "♻️ Перегенерировать" not in texts
         assert "🖼 Прикрепить картинку источника" not in texts
+
+
+    rewrite_expectations = {
+        "rewrite_remove_fluff:5": ("rewrite_remove_fluff", "remove_fluff", "rewrite_remove_fluff", "🧹 Убираю воду из черновика #5..."),
+        "rewrite_shorten:5": ("rewrite_shorten", "shorten", "rewrite_shorten", "📉 Сокращаю черновик #5..."),
+        "rewrite_neutralize_ads:5": ("rewrite_neutralize_ads", "neutralize_ads", "rewrite_neutralize_ads", "😐 Убираю рекламный тон из черновика #5..."),
+    }
+    for callback, expected in rewrite_expectations.items():
+        action, parsed_draft_id, slot = _parse_callback_data(callback)
+        config = _rewrite_action_config(action)
+        assert parsed_draft_id == 5
+        assert slot is None
+        assert action == expected[0]
+        assert config["mode"] == expected[1]
+        assert config["operation"] == expected[2]
+        assert config["progress"].format(draft_id=5) == expected[3]
+
+    rewrite_buttons = [button for button in draft_buttons if (button.callback_data or "").startswith("rewrite_")]
+    assert {button.callback_data for button in rewrite_buttons} == set(rewrite_expectations)
+    forbidden = ("Shorts", "Reels", "TikTok", "video", "Видео", "видео")
+    assert not any(word in button.text for button in rewrite_buttons for word in forbidden)
+    assert not any(word in (button.callback_data or "") for button in rewrite_buttons for word in forbidden)
 
     no_source_texts = _keyboard_texts(_moderation_keyboard(5, "draft"))
     assert "♻️ Перегенерировать" not in no_source_texts
