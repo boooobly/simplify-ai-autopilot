@@ -37,6 +37,10 @@ def run() -> None:
         assert _parse_int_range_env("MAX_TOPIC_AGE_DAYS", 14, 1, 60) == 14
         os.environ["MAX_TOPIC_AGE_DAYS"] = "bad"
         assert _parse_int_range_env("MAX_TOPIC_AGE_DAYS", 14, 1, 60) == 14
+        os.environ["TOPIC_AI_ENRICH_LIMIT"] = "0"
+        assert _parse_int_range_env("TOPIC_AI_ENRICH_LIMIT", 8, 0, 30) == 0
+        os.environ["TOPIC_AI_ENRICH_LIMIT"] = "31"
+        assert _parse_int_range_env("TOPIC_AI_ENRICH_LIMIT", 8, 0, 30) == 8
 
     _with_env({}, _max_topic_age_parser)
 
@@ -75,8 +79,12 @@ def run() -> None:
         os.environ["OPENROUTER_API_KEY"] = "or-secret"
         os.environ["OPENAI_API_KEY"] = "oa-secret"
         os.environ["MAX_TOPIC_AGE_DAYS"] = "7"
+        os.environ["TOPIC_AI_ENRICH_LIMIT"] = "3"
+        os.environ["TOPIC_AI_TRANSLATE_LIMIT"] = "4"
         settings = load_settings()
         assert settings.max_topic_age_days == 7
+        assert settings.topic_ai_enrich_limit == 3
+        assert settings.topic_ai_translate_limit == 4
         lines = startup_diagnostics(settings)
         text = "\n".join(lines)
         assert "bot-secret" not in text

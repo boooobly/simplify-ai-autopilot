@@ -14,13 +14,16 @@ from bot.handlers import (
     _failed_drafts_keyboard,
     _render_failed_drafts_text,
     _send_moderation_preview,
+    _collect_result_keyboard,
     _collect_topics_with_stats,
     _moderation_keyboard,
     _parse_callback_data,
     _render_cleanup_preview_text,
     _render_collect_text,
+    _render_topics_hub_text,
     _rewrite_action_config,
     _topic_actions_keyboard,
+    _topics_hub_keyboard,
 )
 
 
@@ -299,11 +302,106 @@ async def _run_collect_stats_selftest() -> None:
     assert stats.merged_story == 1
     assert any(item.url == "https://example.com/fresh" for item in inserted)
     assert all_items == items
+    inserted[0].title_ru = "Свежий AI-инструмент для субтитров"
+    inserted[0].summary_ru = "Инструмент помогает быстрее подготовить подписи к ролику."
     summary = _render_collect_text(stats, all_items, inserted)
-    tmp.cleanup()
     assert "Старые: 1" in summary
     assert "Без даты: 1" in summary
     assert "Объединено с похожими: 1" in summary
+    assert "Свежий AI-инструмент" in summary
+    assert "О чем:" in summary
+    assert "Fresh AI tool app for video captions" not in summary
+    assert "Время:" in summary
+    assert "Обогащено AI:" in summary
+
+    collect_texts = _keyboard_texts(_collect_result_keyboard())
+    assert "🧠 Открыть темы" in collect_texts
+    assert "🔥 Горячие" in collect_texts
+    assert "🆕 Лучшие новые" in collect_texts
+    assert not any("Shorts" in text or "Reels" in text or "TikTok" in text or "Видео" in text for text in collect_texts)
+
+    hub_texts = _keyboard_texts(_topics_hub_keyboard())
+    assert "🔥 Горячие" in hub_texts
+    assert "🆕 Новые" in hub_texts
+    assert "🔄 Собрать темы" in hub_texts
+    assert not any("Shorts" in text or "Reels" in text or "TikTok" in text or "Видео" in text for text in hub_texts)
+    hub_summary = _render_topics_hub_text(db)
+    assert "🧠 Темы" in hub_summary
+    assert "Горячие:" in hub_summary
+    assert "Новые:" in hub_summary
+
+    calls: list[str] = []
+    original = handlers._enrich_topic_metadata_if_available
+
+    async def fake_enrich(item, settings, db):
+        calls.append(item.url)
+        item.title_ru = f"RU {len(calls)}"
+        item.summary_ru = "Русское описание"
+        item.angle_ru = "Русский угол"
+
+    handlers._enrich_topic_metadata_if_available = fake_enrich
+    try:
+        db_limited = DraftDatabase(f"{tmp.name}/topics-limit.db")
+        limit_items = [
+            _with_scoring(TopicItem(f"OpenAI launches useful model update {idx}", f"https://example.com/limit-{idx}", "OpenAI blog", fresh_date, source_group="official_ai"))
+            for idx in range(5)
+        ]
+        stats_limited, _items_limited, _inserted_limited = await _collect_topics_with_stats(
+            db_limited,
+            items=limit_items,
+            settings=SimpleNamespace(max_topic_age_days=14, has_ai_provider=True, topic_ai_enrich_limit=2, topic_ai_translate_limit=2),
+        )
+        assert len(calls) == 2
+        assert stats_limited.ai_enriched == 2
+        assert stats_limited.ai_enrich_limit == 2
+
+        calls.clear()
+        db_zero = DraftDatabase(f"{tmp.name}/topics-zero.db")
+        await _collect_topics_with_stats(
+            db_zero,
+            items=limit_items,
+            settings=SimpleNamespace(max_topic_age_days=14, has_ai_provider=True, topic_ai_enrich_limit=0, topic_ai_translate_limit=8),
+        )
+        assert calls == []
+    finally:
+        handlers._enrich_topic_metadata_if_available = original
+        tmp.cleanup()
+
+
+class _FakeBot:
+    def __init__(self) -> None:
+        self.messages: list[dict] = []
+
+    async def send_message(self, **kwargs) -> None:
+        self.messages.append(kwargs)
+
+
+class _FakeMessage:
+    def __init__(self) -> None:
+        self.replies: list[tuple[str, object]] = []
+
+    async def reply_text(self, text: str, reply_markup=None, **kwargs):
+        self.replies.append((text, reply_markup))
+        return SimpleNamespace(edit_text=lambda *args, **kwargs: None)
+
+
+async def _run_topics_menu_fallback_selftest() -> None:
+    tmp = TemporaryDirectory()
+    db = DraftDatabase(f"{tmp.name}/topics-menu.db")
+    fresh_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    item = _with_scoring(TopicItem("A modest AI helper for summarizing tabs", "https://example.com/menu", "Test", fresh_date, source_group="tools"))
+    item.score = 60
+    item.title_ru = "AI-помощник для кратких пересказов вкладок"
+    item.summary_ru = "Новая утилита помогает быстро понять открытые страницы."
+    await _collect_topics_with_stats(db, items=[item], settings=SimpleNamespace(max_topic_age_days=14, has_ai_provider=False, topic_ai_enrich_limit=0, topic_ai_translate_limit=0))
+    message = _FakeMessage()
+    context = SimpleNamespace(bot_data={"settings": SimpleNamespace(admin_id=123), "db": db}, bot=_FakeBot(), args=[])
+    update = SimpleNamespace(effective_user=SimpleNamespace(id=123), message=message)
+    await handlers.topics_menu_command(update, context)
+    combined = "\n".join(text for text, _markup in message.replies)
+    assert "Горячих тем пока нет, но есть свежие темы. Показываю лучшие новые." in combined
+    assert "AI-помощник" in combined
+    tmp.cleanup()
 
 
 def run() -> None:
@@ -378,6 +476,7 @@ def run() -> None:
     asyncio.run(_run_moderation_media_attach_callback_selftest())
     asyncio.run(_run_cleanup_callback_selftest())
     asyncio.run(_run_collect_stats_selftest())
+    asyncio.run(_run_topics_menu_fallback_selftest())
 
     print("OK")
 

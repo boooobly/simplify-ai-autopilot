@@ -30,6 +30,8 @@ class Settings:
     post_max_chars: int = 1400
     post_soft_chars: int = 1100
     max_topic_age_days: int = 14
+    topic_ai_enrich_limit: int = 8
+    topic_ai_translate_limit: int = 8
     openrouter_input_cost_per_1m: float = 0.0
     openrouter_output_cost_per_1m: float = 0.0
     openai_input_cost_per_1m: float = 0.0
@@ -159,6 +161,8 @@ def startup_diagnostics(settings: Settings) -> list[str]:
         f"daily_post_slots: {', '.join(settings.daily_post_slots)}",
         f"post_soft_chars/post_max_chars: {settings.post_soft_chars}/{settings.post_max_chars}",
         f"max_topic_age_days: {settings.max_topic_age_days}",
+        f"topic_ai_enrich_limit: {settings.topic_ai_enrich_limit}",
+        f"topic_ai_translate_limit: {settings.topic_ai_translate_limit}",
         f"DB_PATH: {settings.db_path}",
         f"CHANNEL_ID type: {channel_type}",
         f"custom emoji aliases count: {len(settings.custom_emoji_aliases)}",
@@ -196,6 +200,8 @@ def load_settings() -> Settings:
     custom_emoji_map = _parse_custom_emoji_map(os.getenv("CUSTOM_EMOJI_MAP", ""))
     custom_emoji_aliases = _parse_custom_emoji_aliases(os.getenv("CUSTOM_EMOJI_ALIASES", ""))
     max_topic_age_days = _parse_int_range_env("MAX_TOPIC_AGE_DAYS", 14, 1, 60)
+    topic_ai_enrich_limit = _parse_int_range_env("TOPIC_AI_ENRICH_LIMIT", 8, 0, 30)
+    topic_ai_translate_limit = _parse_int_range_env("TOPIC_AI_TRANSLATE_LIMIT", 8, 0, 30)
 
     post_max_chars = _parse_int_env("POST_MAX_CHARS", 1400)
     post_soft_chars = _parse_int_env("POST_SOFT_CHARS", 1100)
@@ -239,6 +245,8 @@ def load_settings() -> Settings:
         post_max_chars=post_max_chars,
         post_soft_chars=post_soft_chars,
         max_topic_age_days=max_topic_age_days,
+        topic_ai_enrich_limit=topic_ai_enrich_limit,
+        topic_ai_translate_limit=topic_ai_translate_limit,
         openrouter_input_cost_per_1m=openrouter_input_cost_per_1m,
         openrouter_output_cost_per_1m=openrouter_output_cost_per_1m,
         openai_input_cost_per_1m=openai_input_cost_per_1m,

@@ -63,6 +63,22 @@ def topic_angle_ru(topic: object) -> str:
 
 
 
+def _shorten_text(value: str, max_len: int) -> str:
+    text = " ".join(_clean_text(value).split())
+    if len(text) <= max_len:
+        return text
+    return text[: max(1, max_len - 1)].rstrip() + "…"
+
+
+def topic_compact_preview_ru(topic: object, max_len: int = 160) -> str:
+    """Return a compact Russian preview for collection summaries."""
+    title_ru = _clean_text(_topic_value(topic, "title_ru"))
+    original = _clean_text(_topic_value(topic, "title"))
+    title = title_ru or (f"Нужна проверка: {original}" if original else "Нужна проверка: без названия")
+    summary = topic_summary_ru(topic)
+    return f"{_shorten_text(title, 90)}\n  О чем: {_shorten_text(summary, max_len)}"
+
+
 def _split_related_values(value: object) -> list[str]:
     seen: set[str] = set()
     values: list[str] = []
