@@ -62,6 +62,36 @@ def topic_angle_ru(topic: object) -> str:
     return "Можно сделать короткий пост с объяснением сути темы и одним выводом для аудитории @simplify_ai."
 
 
+
+def _split_related_values(value: object) -> list[str]:
+    seen: set[str] = set()
+    values: list[str] = []
+    for raw in _clean_text(value).split("\n"):
+        item = raw.strip()
+        if item and item not in seen:
+            seen.add(item)
+            values.append(item)
+    return values
+
+
+def related_sources_summary(topic: object, limit: int = 3) -> str | None:
+    """Return compact Russian summary of related sources for a topic card."""
+    try:
+        related_count = int(_topic_value(topic, "related_count") or 1)
+    except (TypeError, ValueError):
+        related_count = 1
+    if related_count <= 1:
+        return None
+    source = _clean_text(_topic_value(topic, "source"))
+    sources = [s for s in _split_related_values(_topic_value(topic, "related_sources")) if s != source]
+    lines = [f"Повторы: еще {max(0, related_count - 1)} источника"]
+    if sources:
+        shown = sources[: max(1, limit)]
+        suffix = "" if len(sources) <= len(shown) else f" и еще {len(sources) - len(shown)}"
+        lines.append(f"Также встречалось: {', '.join(shown)}{suffix}")
+    return "\n".join(lines)
+
+
 def topic_original_title_line(topic: object) -> str | None:
     """Return a compact original-title line when Russian display differs."""
     original = _clean_text(_topic_value(topic, "title"))

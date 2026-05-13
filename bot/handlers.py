@@ -19,7 +19,7 @@ from bot.media_utils import decode_media_items, encode_media_group, media_count
 from bot.publisher import publish_to_channel
 from bot.telegram_formatting import strip_quote_markers
 from bot.sources import SourceReport, collect_topics, collect_topics_with_diagnostics
-from bot.topic_display import topic_angle_ru, topic_display_reason, topic_display_title, topic_original_title_line, topic_summary_ru
+from bot.topic_display import related_sources_summary, topic_angle_ru, topic_display_reason, topic_display_title, topic_original_title_line, topic_summary_ru
 from bot.writer import (
     EmptyAIResponseError,
     GenerationResult,
@@ -89,6 +89,7 @@ class TopicCollectStats:
     new: int = 0
     existing: int = 0
     near_duplicate: int = 0
+    merged_story: int = 0
     low_score: int = 0
     low_quality: int = 0
     stale: int = 0
@@ -253,6 +254,9 @@ def _topic_card_text(topic: dict) -> str:
     original_line = topic_original_title_line(topic)
     if original_line:
         lines.extend(["", original_line])
+    related_line = related_sources_summary(topic)
+    if related_line:
+        lines.extend(["", related_line])
     lines.extend(
         [
             f"Источник: {topic['source']} / {_source_group_label(topic.get('source_group'))}",
@@ -1886,6 +1890,8 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
                     translated_count += 1
         elif result == "existing_url":
             stats.existing += 1
+        elif result == "merged_story":
+            stats.merged_story += 1
         else:
             stats.near_duplicate += 1
     return stats, items, inserted
@@ -1929,6 +1935,7 @@ def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list) 
         f"Новых: {stats.new}",
         f"Уже были: {stats.existing}",
         f"Дубли по смыслу: {stats.near_duplicate}",
+        f"Объединено с похожими: {stats.merged_story}",
         f"Старые: {stats.stale}",
         f"Без даты: {stats.missing_date}",
         f"Низкое качество: {stats.low_quality or stats.low_score}",

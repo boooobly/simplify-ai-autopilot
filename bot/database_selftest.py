@@ -138,7 +138,7 @@ def _assert_topic_candidates(db: DraftDatabase) -> None:
     r3 = db.upsert_topic_candidate_with_reason(
         "T3", "https://b", "S", None, "news", 55, "r", "same title", "other"
     )
-    assert r3 == "near_duplicate"
+    assert r3 == "merged_story"
 
     candidates = db.list_topic_candidates(limit=5)
     assert len(candidates) == 1
@@ -148,6 +148,10 @@ def _assert_topic_candidates(db: DraftDatabase) -> None:
     assert candidates[0]["angle_ru"] == "Идея поста"
     assert candidates[0]["reason_ru"] == "русская причина"
     assert candidates[0]["original_description"] == "Original description"
+    assert candidates[0]["canonical_key"] == "t1"
+    assert candidates[0]["related_sources"] == "S"
+    assert candidates[0]["related_urls"] == "https://a\nhttps://b"
+    assert candidates[0]["related_count"] == 2
     row_by_url = db.find_topic_candidate_by_url("https://a")
     assert row_by_url is not None
     assert row_by_url["title_ru"] == "Русский T1"
@@ -156,6 +160,68 @@ def _assert_topic_candidates(db: DraftDatabase) -> None:
     assert updated["title_ru"] == "Обновленный T1"
     assert updated["summary_ru"] == "Обновленное о чем"
     assert updated["angle_ru"] == "Обновленная идея"
+    merged_model = db.upsert_topic_candidate_with_reason(
+        "OpenAI launches GPT-5.1 for ChatGPT",
+        "https://official/model",
+        "OpenAI blog",
+        None,
+        "model",
+        70,
+        "official",
+        "openai gpt 5 1 chatgpt",
+        "official_ai",
+    )
+    assert merged_model == "inserted"
+    merged_model = db.upsert_topic_candidate_with_reason(
+        "OpenAI unveils GPT-5.1 with ChatGPT update",
+        "https://verge/model",
+        "The Verge AI",
+        None,
+        "model",
+        82,
+        "media",
+        "openai gpt 5 1 chatgpt update",
+        "tech_media",
+        title_ru="GPT-5.1 в ChatGPT",
+    )
+    assert merged_model == "merged_story"
+    model_row = db.find_topic_candidate_by_url("https://official/model")
+    assert model_row is not None
+    assert model_row["score"] == 82
+    assert model_row["title_ru"] == "GPT-5.1 в ChatGPT"
+    assert model_row["related_sources"] == "OpenAI blog\nThe Verge AI"
+    assert model_row["related_urls"] == "https://official/model\nhttps://verge/model"
+    assert model_row["related_count"] == 2
+    repeat_merge = db.upsert_topic_candidate_with_reason(
+        "OpenAI unveils GPT-5.1 with ChatGPT update",
+        "https://verge/model",
+        "The Verge AI",
+        None,
+        "model",
+        80,
+        "media",
+        "openai gpt 5 1 chatgpt update",
+        "tech_media",
+    )
+    assert repeat_merge == "merged_story"
+    model_row = db.find_topic_candidate_by_url("https://official/model")
+    assert model_row["related_sources"] == "OpenAI blog\nThe Verge AI"
+    assert model_row["related_urls"] == "https://official/model\nhttps://verge/model"
+    assert model_row["related_count"] == 2
+
+    separate = db.upsert_topic_candidate_with_reason(
+        "OpenAI changes ChatGPT privacy controls",
+        "https://privacy",
+        "TechCrunch AI",
+        None,
+        "privacy",
+        75,
+        "privacy",
+        "openai chatgpt privacy controls",
+        "tech_media",
+    )
+    assert separate == "inserted"
+
     assert db.create_topic_candidate("English fallback title", "https://fallback", "S", None) is True
     fallback = db.find_topic_candidate_by_url("https://fallback")
     assert fallback is not None
@@ -164,7 +230,7 @@ def _assert_topic_candidates(db: DraftDatabase) -> None:
     assert fallback["summary_ru"] is None
     assert fallback["angle_ru"] is None
     hot_candidates = db.list_topic_candidates_min_score(limit=5, min_score=50)
-    assert [candidate["url"] for candidate in hot_candidates] == ["https://a"]
+    assert "https://official/model" in [candidate["url"] for candidate in hot_candidates]
 
 
 def _assert_ai_usage_summary(db: DraftDatabase) -> None:

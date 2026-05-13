@@ -1,4 +1,4 @@
-from bot.topic_scoring import normalize_topic_title, score_topic
+from bot.topic_scoring import canonical_topic_key, is_similar_topic_key, normalize_topic_title, score_topic
 
 
 def run() -> None:
@@ -67,7 +67,20 @@ def run() -> None:
     missing_date, _, reason = score_topic("AI tool for prompts", "Blog", "https://example.com", "tech_media")
     assert "нет даты" in reason
 
-    assert normalize_topic_title("The new GPT-5 release!!!") == "gpt 5 release"
+    assert normalize_topic_title("The new GPT-5 release!!!") == "gpt 5"
+
+    assert canonical_topic_key("OpenAI: announces new GPT-5.1!!!", "official_ai") == "gpt 5.1"
+    assert canonical_topic_key("GitHub Trending: owner / Sora video agent", "github") == "owner sora video agent"
+    assert canonical_topic_key("Anthropic представила новый Claude 3.0", "official_ai") == "anthropic claude 3.0"
+    assert is_similar_topic_key(
+        canonical_topic_key("OpenAI launches GPT-5.1 for ChatGPT"),
+        canonical_topic_key("The Verge: OpenAI unveils GPT-5.1 with ChatGPT update"),
+    )
+    assert not is_similar_topic_key(
+        canonical_topic_key("OpenAI changes ChatGPT privacy controls"),
+        canonical_topic_key("OpenAI releases Sora video editing tools"),
+    )
+    assert not is_similar_topic_key("openai chatgpt", "openai chatgpt plus")
 
 
 if __name__ == "__main__":
