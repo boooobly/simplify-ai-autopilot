@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from bot.handlers import _render_plan_text, _topic_card_text
-from bot.topic_display import MANUAL_REVIEW_NOTE_RU, topic_compact_preview_ru, topic_display_reason, topic_display_title
+from bot.topic_display import MANUAL_REVIEW_NOTE_RU, is_weak_topic_metadata, topic_compact_preview_ru, topic_display_reason, topic_display_title
 
 
 def run() -> None:
@@ -77,6 +77,25 @@ def run() -> None:
     assert compact_missing_ru.startswith("Нужна проверка: English fallback title")
     assert MANUAL_REVIEW_NOTE_RU in compact_missing_ru
 
+    assert is_weak_topic_metadata(
+        "agentmemory - #1 Persistent memory for AI coding AI-агенты based on real-world benchmarks",
+        "Репозиторий выглядит как проект про Persistent memory for AI coding agents.",
+        "Можно подать как GitHub-проект.",
+        original_title="agentmemory - #1 Persistent memory for AI coding agents based on real-world benchmarks",
+    )
+    assert is_weak_topic_metadata(
+        "Personal_AI_Infrastructure - Agentic AI Infrastructure for magnifying HUMAN capabilities",
+        "Репозиторий выглядит как проект про Agentic AI Infrastructure.",
+        "Можно подать как GitHub-проект.",
+        original_title="Personal_AI_Infrastructure - Agentic AI Infrastructure for magnifying HUMAN capabilities",
+    )
+    assert not is_weak_topic_metadata(
+        "LLMs-from-scratch - пошаговая сборка ChatGPT-подобной модели на PyTorch",
+        "Репозиторий показывает, как с нуля собрать ChatGPT-подобную LLM на PyTorch.",
+        "Можно подать как полезный open-source проект.",
+        original_title="GitHub Trending: rasbt / LLMs-from-scratch",
+    )
+
     ru_preview_topic = {
         "title": "GitHub Trending: rasbt / LLMs-from-scratch",
         "title_ru": "LLMs-from-scratch - пошаговая сборка ChatGPT-подобной модели на PyTorch",
@@ -89,6 +108,18 @@ def run() -> None:
     assert collect_preview.startswith("LLMs-from-scratch - пошаговая сборка")
     assert "Репозиторий показывает" in collect_preview
     assert "GitHub Trending:" not in collect_preview
+
+    ai_card_topic = {
+        **ru_preview_topic,
+        "id": 10,
+        "source": "GitHub Trending AI",
+        "source_group": "github",
+        "reason": "разработка/GitHub",
+        "url": "https://github.com/rasbt/LLMs-from-scratch",
+    }
+    ai_card = _topic_card_text(ai_card_topic)
+    assert "LLMs-from-scratch - пошаговая сборка ChatGPT-подобной модели на PyTorch" in ai_card.split("О чем:", 1)[0]
+    assert "Оригинал: GitHub Trending: rasbt / LLMs-from-scratch" in ai_card
 
     plan = _render_plan_text("сегодня", ["10:00"], [topic])
     assert "OpenAI выпустила новую модель" in plan

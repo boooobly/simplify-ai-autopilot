@@ -50,7 +50,7 @@ from bot.queue_helpers import (
 )
 from bot.telegram_formatting import strip_quote_markers
 from bot.sources import SourceReport, collect_topics, collect_topics_with_diagnostics
-from bot.topic_display import related_sources_summary, topic_angle_ru, topic_compact_preview_ru, topic_display_reason, topic_display_title, topic_original_title_line, topic_summary_ru
+from bot.topic_display import is_weak_topic_metadata, related_sources_summary, topic_angle_ru, topic_compact_preview_ru, topic_display_reason, topic_display_title, topic_original_title_line, topic_summary_ru
 from bot.writer import (
     EmptyAIResponseError,
     GenerationResult,
@@ -866,7 +866,34 @@ async def _reenrich_topic_candidate_display_metadata(
 async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase) -> None:
     if not settings or not getattr(settings, "has_ai_provider", False):
         return
-    if item.title_ru and item.summary_ru and item.angle_ru:
+    topic = db.find_topic_candidate_by_url(item.url)
+    db_title_ru = str(topic.get("title_ru") or "") if topic else ""
+    db_summary_ru = str(topic.get("summary_ru") or "") if topic else ""
+    db_angle_ru = str(topic.get("angle_ru") or "") if topic else ""
+    existing_title_ru = db_title_ru or (item.title_ru or "")
+    existing_summary_ru = db_summary_ru or (item.summary_ru or "")
+    existing_angle_ru = db_angle_ru or (item.angle_ru or "")
+    existing_reason_ru = (str(topic.get("reason_ru") or "") if topic else "") or (item.reason_ru or "")
+    existing_is_complete = bool(existing_title_ru and existing_summary_ru and existing_angle_ru)
+    existing_is_weak = is_weak_topic_metadata(
+        existing_title_ru,
+        existing_summary_ru,
+        existing_angle_ru,
+        original_title=item.title,
+    )
+    is_github_topic = (getattr(item, "source_group", "") or (str(topic.get("source_group") or "") if topic else "")) == "github"
+    github_existing_matches_item = bool(
+        is_github_topic
+        and existing_title_ru
+        and existing_title_ru == (item.title_ru or "")
+        and existing_summary_ru == (item.summary_ru or "")
+        and existing_angle_ru == (item.angle_ru or "")
+    )
+    if existing_is_complete and not existing_is_weak and not github_existing_matches_item:
+        item.title_ru = existing_title_ru
+        item.summary_ru = existing_summary_ru
+        item.angle_ru = existing_angle_ru
+        item.reason_ru = existing_reason_ru or item.reason_ru
         return
     api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
     if not api_key:
@@ -893,21 +920,42 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
         _apply_topic_enrichment_fallback(item, db)
         return
     title_ru, summary_ru, angle_ru, reason_ru = parsed
-    topic = db.find_topic_candidate_by_url(item.url)
+    if not all([title_ru, summary_ru, angle_ru, reason_ru]) or is_weak_topic_metadata(
+        title_ru, summary_ru, angle_ru, original_title=item.title
+    ):
+        _apply_topic_enrichment_fallback(item, db)
+        return
+    if not topic:
+        topic = db.find_topic_candidate_by_url(item.url)
     if not topic:
         _apply_topic_enrichment_fallback(item, db)
         return
-    item.title_ru = item.title_ru or title_ru
-    item.summary_ru = item.summary_ru or summary_ru
-    item.angle_ru = item.angle_ru or angle_ru
-    item.reason_ru = item.reason_ru or reason_ru
-    db.update_topic_candidate_display_fields(
-        int(topic["id"]),
-        title_ru=item.title_ru,
-        summary_ru=item.summary_ru,
-        angle_ru=item.angle_ru,
-        reason_ru=item.reason_ru,
-    )
+
+    should_force_update = existing_is_weak or github_existing_matches_item
+    if should_force_update:
+        item.title_ru = title_ru
+        item.summary_ru = summary_ru
+        item.angle_ru = angle_ru
+        item.reason_ru = reason_ru
+        db.force_update_topic_candidate_display_fields(
+            int(topic["id"]),
+            title_ru=title_ru,
+            summary_ru=summary_ru,
+            angle_ru=angle_ru,
+            reason_ru=reason_ru,
+        )
+    else:
+        item.title_ru = existing_title_ru or title_ru
+        item.summary_ru = existing_summary_ru or summary_ru
+        item.angle_ru = existing_angle_ru or angle_ru
+        item.reason_ru = existing_reason_ru or reason_ru
+        db.update_topic_candidate_display_fields(
+            int(topic["id"]),
+            title_ru=title_ru,
+            summary_ru=summary_ru,
+            angle_ru=angle_ru,
+            reason_ru=reason_ru,
+        )
     estimated_cost = estimate_ai_cost(provider, result.prompt_tokens, result.completion_tokens, settings)
     db.record_ai_usage(
         provider=provider,
@@ -2302,9 +2350,28 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
             stats.merged_story += 1
         else:
             stats.near_duplicate += 1
-        if result in {"inserted", "existing_url", "merged_story"} and item.score >= 50 and not (item.title_ru and item.summary_ru and item.angle_ru):
+        if result in {"inserted", "existing_url", "merged_story"} and item.score >= 50:
             stored_topic = db.find_topic_candidate_by_url(item.url)
-            if not stored_topic or str(stored_topic.get("status") or "new") == "new":
+            stored_title_ru = str(stored_topic.get("title_ru") or "") if stored_topic else (item.title_ru or "")
+            stored_summary_ru = str(stored_topic.get("summary_ru") or "") if stored_topic else (item.summary_ru or "")
+            stored_angle_ru = str(stored_topic.get("angle_ru") or "") if stored_topic else (item.angle_ru or "")
+            needs_enrichment = not (stored_title_ru and stored_summary_ru and stored_angle_ru) or is_weak_topic_metadata(
+                stored_title_ru,
+                stored_summary_ru,
+                stored_angle_ru,
+                original_title=item.title,
+            )
+            if (
+                item.source_group == "github"
+                and stored_title_ru
+                and stored_summary_ru
+                and stored_angle_ru
+                and stored_title_ru == (item.title_ru or "")
+                and stored_summary_ru == (item.summary_ru or "")
+                and stored_angle_ru == (item.angle_ru or "")
+            ):
+                needs_enrichment = True
+            if needs_enrichment and (not stored_topic or str(stored_topic.get("status") or "new") == "new"):
                 enrichment_candidates.append(item)
     stats.store_seconds = time.monotonic() - store_started
 

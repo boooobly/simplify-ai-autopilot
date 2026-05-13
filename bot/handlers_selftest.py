@@ -760,6 +760,190 @@ async def _run_topic_model_routing_selftest() -> None:
     assert "_run_rewrite_post_draft" in callback_source
 
 
+async def _run_weak_topic_metadata_overwrite_selftest() -> None:
+    tmp = TemporaryDirectory()
+    db = DraftDatabase(f"{tmp.name}/weak-topic.db")
+    settings = _topic_settings()
+    fresh_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    item = _with_scoring(
+        TopicItem(
+            "GitHub Trending: owner / agentmemory",
+            "https://github.com/owner/agentmemory",
+            "GitHub Trending AI",
+            fresh_date,
+            source_group="github",
+            title_ru="agentmemory - #1 Persistent memory for AI coding AI-агенты based on real-world benchmarks",
+            summary_ru="Репозиторий выглядит как проект про Persistent memory for AI coding agents based on real-world benchmarks.",
+            angle_ru="Можно подать как GitHub-проект.",
+            reason_ru="GitHub без автотопа",
+            original_description="#1 Persistent memory for AI coding agents based on real-world benchmarks",
+        )
+    )
+    db.upsert_topic_candidate_with_reason(
+        item.title,
+        item.url,
+        item.source,
+        item.published_at,
+        item.category,
+        item.score,
+        item.reason,
+        item.normalized_title,
+        item.source_group,
+        item.title_ru,
+        item.summary_ru,
+        item.angle_ru,
+        item.reason_ru,
+        item.original_description,
+    )
+    original_enrich = handlers._run_enrich_topic_metadata_ru
+
+    async def fake_enrich(**kwargs):
+        return GenerationResult(
+            content=(
+                "agentmemory - память для AI-агентов в кодинге\n"
+                "Репозиторий предлагает persistent memory для AI-агентов и оценивает её на практических бенчмарках.\n"
+                "Можно показать как пример инфраструктуры для более полезных coding agents.\n"
+                "Важно из-за фокуса на памяти агентов и проверке на бенчмарках."
+            ),
+            prompt_tokens=10,
+            completion_tokens=20,
+            total_tokens=30,
+            model=kwargs["model"],
+        )
+
+    handlers._run_enrich_topic_metadata_ru = fake_enrich
+    try:
+        await handlers._enrich_topic_metadata_if_available(item, settings, db)
+    finally:
+        handlers._run_enrich_topic_metadata_ru = original_enrich
+
+    stored = db.find_topic_candidate_by_url(item.url)
+    assert stored is not None
+    assert stored["title_ru"] == "agentmemory - память для AI-агентов в кодинге"
+    assert "Persistent memory for AI coding" not in stored["title_ru"]
+    assert item.title_ru == stored["title_ru"]
+    tmp.cleanup()
+
+
+async def _run_good_topic_metadata_no_overwrite_selftest() -> None:
+    tmp = TemporaryDirectory()
+    db = DraftDatabase(f"{tmp.name}/good-topic.db")
+    settings = _topic_settings()
+    fresh_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    item = _with_scoring(
+        TopicItem(
+            "OpenAI launches a useful model update",
+            "https://example.com/good-topic",
+            "OpenAI blog",
+            fresh_date,
+            source_group="official_ai",
+            title_ru="OpenAI представила полезное обновление модели",
+            summary_ru="Обновление добавляет практичные возможности для пользователей и разработчиков.",
+            angle_ru="Можно спокойно объяснить, кому это пригодится и что изменится.",
+            reason_ru="Официальный AI-релиз с высоким сигналом.",
+        )
+    )
+    db.upsert_topic_candidate_with_reason(
+        item.title,
+        item.url,
+        item.source,
+        item.published_at,
+        item.category,
+        item.score,
+        item.reason,
+        item.normalized_title,
+        item.source_group,
+        item.title_ru,
+        item.summary_ru,
+        item.angle_ru,
+        item.reason_ru,
+        item.original_description,
+    )
+    original_enrich = handlers._run_enrich_topic_metadata_ru
+    calls = 0
+
+    async def fake_enrich(**kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("Good Russian metadata should not be enriched again")
+
+    handlers._run_enrich_topic_metadata_ru = fake_enrich
+    try:
+        await handlers._enrich_topic_metadata_if_available(item, settings, db)
+    finally:
+        handlers._run_enrich_topic_metadata_ru = original_enrich
+
+    stored = db.find_topic_candidate_by_url(item.url)
+    assert stored is not None
+    assert stored["title_ru"] == "OpenAI представила полезное обновление модели"
+    assert calls == 0
+    tmp.cleanup()
+
+
+async def _run_github_metadata_ai_preferred_selftest() -> None:
+    tmp = TemporaryDirectory()
+    db = DraftDatabase(f"{tmp.name}/github-topic.db")
+    settings = _topic_settings()
+    fresh_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    item = _with_scoring(
+        TopicItem(
+            "GitHub Trending: owner / Personal_AI_Infrastructure",
+            "https://github.com/owner/Personal_AI_Infrastructure",
+            "GitHub Trending AI",
+            fresh_date,
+            source_group="github",
+            title_ru="Personal_AI_Infrastructure - Agentic AI Infrastructure for magnifying HUMAN capabilities",
+            summary_ru="Репозиторий выглядит как проект про Agentic AI Infrastructure for magnifying HUMAN capabilities.",
+            angle_ru="Можно подать как GitHub-проект.",
+            reason_ru="GitHub без автотопа",
+            original_description="Agentic AI Infrastructure for magnifying HUMAN capabilities",
+        )
+    )
+    db.upsert_topic_candidate_with_reason(
+        item.title,
+        item.url,
+        item.source,
+        item.published_at,
+        item.category,
+        item.score,
+        item.reason,
+        item.normalized_title,
+        item.source_group,
+        item.title_ru,
+        item.summary_ru,
+        item.angle_ru,
+        item.reason_ru,
+        item.original_description,
+    )
+    original_enrich = handlers._run_enrich_topic_metadata_ru
+
+    async def fake_enrich(**kwargs):
+        return GenerationResult(
+            content=(
+                "Personal_AI_Infrastructure - инфраструктура для персональных AI-агентов\n"
+                "Репозиторий собирает компоненты для агентной AI-инфраструктуры вокруг задач пользователя.\n"
+                "Можно обсудить как такие проекты пытаются превратить AI в личный рабочий слой.\n"
+                "Важно как пример интереса к персональной AI-инфраструктуре."
+            ),
+            prompt_tokens=7,
+            completion_tokens=14,
+            total_tokens=21,
+            model=kwargs["model"],
+        )
+
+    handlers._run_enrich_topic_metadata_ru = fake_enrich
+    try:
+        await handlers._enrich_topic_metadata_if_available(item, settings, db)
+    finally:
+        handlers._run_enrich_topic_metadata_ru = original_enrich
+
+    stored = db.find_topic_candidate_by_url(item.url)
+    assert stored is not None
+    assert stored["title_ru"] == "Personal_AI_Infrastructure - инфраструктура для персональных AI-агентов"
+    assert "Agentic AI Infrastructure" not in stored["title_ru"]
+    tmp.cleanup()
+
+
 async def _run_topic_enrichment_failure_fallback_selftest() -> None:
     tmp = TemporaryDirectory()
     db = DraftDatabase(f"{tmp.name}/fallback.db")
@@ -869,6 +1053,9 @@ def run() -> None:
     asyncio.run(_run_topic_metadata_fallback_selftest())
     asyncio.run(_run_topic_reenrich_callback_selftest())
     asyncio.run(_run_topic_model_routing_selftest())
+    asyncio.run(_run_weak_topic_metadata_overwrite_selftest())
+    asyncio.run(_run_good_topic_metadata_no_overwrite_selftest())
+    asyncio.run(_run_github_metadata_ai_preferred_selftest())
     asyncio.run(_run_topic_enrichment_failure_fallback_selftest())
     asyncio.run(_run_topic_403_fallback_and_failure_selftest())
     asyncio.run(_run_topic_callback_warning_selftest())
