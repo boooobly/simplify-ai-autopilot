@@ -1,4 +1,6 @@
+import ast
 import asyncio
+import inspect
 from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -16,6 +18,7 @@ from bot.handlers import (
     _find_nearest_available_slot,
     _latest_actionable_drafts,
     _moderation_keyboard,
+    _parse_callback_data,
     _queue_day_slots,
     _queue_keyboard,
     _render_collect_text,
@@ -43,6 +46,22 @@ def _keyboard_texts(markup) -> list[str]:
 
 def _keyboard_buttons(markup):
     return [button for row in markup.inline_keyboard for button in row]
+
+
+def _moderation_callback_actions() -> set[str]:
+    tree = ast.parse(inspect.getsource(handlers.moderation_callback))
+    actions: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare):
+            continue
+        if not isinstance(node.left, ast.Name) or node.left.id != "action":
+            continue
+        if not any(isinstance(op, ast.Eq) for op in node.ops):
+            continue
+        for comparator in node.comparators:
+            if isinstance(comparator, ast.Constant) and isinstance(comparator.value, str):
+                actions.add(comparator.value)
+    return actions
 
 
 def _settings(slots: list[str], timezone_name: str = "UTC") -> SimpleNamespace:
@@ -238,6 +257,14 @@ def _run_keyboard_selftest() -> None:
     assert "♻️ Перегенерировать" in draft_texts
     assert "🖼 Прикрепить картинку источника" not in draft_texts
     assert any(button.text == "🔗 Открыть источник" and button.url == "https://example.com/source" for button in draft_buttons)
+    manual_media_buttons = [button for button in draft_buttons if button.text == "📎 Прикрепить медиа"]
+    assert len(manual_media_buttons) == 1
+    manual_media_callback = manual_media_buttons[0].callback_data
+    assert manual_media_callback == "attach_media_flow:5"
+    manual_media_action, manual_media_draft_id, manual_media_slot = _parse_callback_data(manual_media_callback)
+    assert manual_media_draft_id == 5
+    assert manual_media_slot is None
+    assert manual_media_action in _moderation_callback_actions()
 
     source_image_texts = _keyboard_texts(
         _moderation_keyboard(

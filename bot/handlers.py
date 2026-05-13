@@ -912,7 +912,7 @@ def _moderation_keyboard(
         if has_media:
             rows.append([InlineKeyboardButton("🗑 Убрать медиа", callback_data=f"remove_media:{draft_id}")])
         else:
-            rows.append([InlineKeyboardButton("📎 Прикрепить медиа", callback_data=f"attach_media:{draft_id}")])
+            rows.append([InlineKeyboardButton("📎 Прикрепить медиа", callback_data=f"attach_media_flow:{draft_id}")])
         rows.append([InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")])
         return InlineKeyboardMarkup(rows)
     return InlineKeyboardMarkup([[InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")]])
