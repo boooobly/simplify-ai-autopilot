@@ -108,16 +108,54 @@ def _run_keyboard_selftest() -> None:
     draft_texts = _keyboard_texts(draft_keyboard)
     assert "📅 В ближайший слот" in draft_texts
     assert "♻️ Перегенерировать" in draft_texts
+    assert "🖼 Прикрепить картинку источника" not in draft_texts
     assert any(button.text == "🔗 Открыть источник" and button.url == "https://example.com/source" for button in draft_buttons)
 
-    approved_texts = _keyboard_texts(_moderation_keyboard(5, "approved", source_url="https://example.com/source"))
+    source_image_texts = _keyboard_texts(
+        _moderation_keyboard(
+            5,
+            "draft",
+            source_url="https://example.com/source",
+            source_image_url="https://example.com/preview.jpg",
+        )
+    )
+    assert "🖼 Прикрепить картинку источника" in source_image_texts
+
+    media_texts = _keyboard_texts(
+        _moderation_keyboard(
+            5,
+            "draft",
+            has_media=True,
+            source_url="https://example.com/source",
+            source_image_url="https://example.com/preview.jpg",
+        )
+    )
+    assert "🖼 Прикрепить картинку источника" not in media_texts
+
+    approved_texts = _keyboard_texts(
+        _moderation_keyboard(
+            5,
+            "approved",
+            source_url="https://example.com/source",
+            source_image_url="https://example.com/preview.jpg",
+        )
+    )
     assert "📅 В ближайший слот" in approved_texts
     assert "♻️ Перегенерировать" in approved_texts
+    assert "🖼 Прикрепить картинку источника" in approved_texts
 
     for status in ["scheduled", "published", "rejected", "failed"]:
-        texts = _keyboard_texts(_moderation_keyboard(5, status, source_url="https://example.com/source"))
+        texts = _keyboard_texts(
+            _moderation_keyboard(
+                5,
+                status,
+                source_url="https://example.com/source",
+                source_image_url="https://example.com/preview.jpg",
+            )
+        )
         assert "📅 В ближайший слот" not in texts
         assert "♻️ Перегенерировать" not in texts
+        assert "🖼 Прикрепить картинку источника" not in texts
 
     no_source_texts = _keyboard_texts(_moderation_keyboard(5, "draft"))
     assert "♻️ Перегенерировать" not in no_source_texts
@@ -165,6 +203,15 @@ def run() -> None:
         custom_emoji_aliases=aliases,
     )
     assert "🤖" in moderation
+    assert "Картинка источника: нет" in moderation
+    moderation_with_image = _build_moderation_text(
+        draft_id=1,
+        content=text,
+        source_url="https://example.com",
+        source_image_url="https://example.com/preview.jpg",
+        custom_emoji_aliases=aliases,
+    )
+    assert "Картинка источника: есть" in moderation_with_image
 
     caption = _build_media_preview_caption(
         draft_id=2,

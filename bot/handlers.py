@@ -24,6 +24,7 @@ from bot.writer import (
     EmptyAIResponseError,
     GenerationResult,
     fetch_page_content,
+    fetch_page_content_details,
     find_first_url,
     generate_post_draft,
     generate_post_draft_from_page,
@@ -546,6 +547,10 @@ async def _run_fetch_page_content(source_url: str):
     return await asyncio.to_thread(fetch_page_content, source_url)
 
 
+async def _run_fetch_page_content_details(source_url: str):
+    return await asyncio.to_thread(fetch_page_content_details, source_url)
+
+
 async def _run_generate_post_draft(*args, **kwargs):
     return await asyncio.to_thread(generate_post_draft, *args, **kwargs)
 
@@ -658,6 +663,7 @@ def _moderation_keyboard(
     status: str | None = None,
     has_media: bool = False,
     source_url: str | None = None,
+    source_image_url: str | None = None,
 ) -> InlineKeyboardMarkup:
     if status == "scheduled":
         rows = [
@@ -685,12 +691,23 @@ def _moderation_keyboard(
             [InlineKeyboardButton("✨ Улучшить Claude", callback_data=f"polish:{draft_id}")],
             [InlineKeyboardButton("✏️ Редактировать текст", callback_data=f"edit_text:{draft_id}")],
             [InlineKeyboardButton("📎 Прикрепить медиа", callback_data=f"attach_media_flow:{draft_id}")],
+            *([[InlineKeyboardButton("🖼 Прикрепить картинку источника", callback_data=f"attach_source_image:{draft_id}")]] if source_image_url and not has_media else []),
             *([[InlineKeyboardButton("🗑 Убрать медиа", callback_data=f"remove_media:{draft_id}")]] if has_media else []),
             [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")],
         ]
     if source_url:
         rows.append([InlineKeyboardButton("🔗 Открыть источник", url=source_url)])
     return InlineKeyboardMarkup(rows)
+
+
+def _moderation_keyboard_for_draft(draft_id: int, draft: dict[str, object]) -> InlineKeyboardMarkup:
+    return _moderation_keyboard(
+        draft_id,
+        str(draft.get("status") or ""),
+        has_media=media_count(draft.get("media_url"), draft.get("media_type")) > 0,
+        source_url=draft.get("source_url"),
+        source_image_url=draft.get("source_image_url"),
+    )
 
 
 def _set_pending_edit(context: ContextTypes.DEFAULT_TYPE, draft_id: int) -> None:
@@ -841,6 +858,7 @@ def _build_moderation_text(
     source_url: str | None = None,
     media_type: str | None = None,
     media_url: str | None = None,
+    source_image_url: str | None = None,
     custom_emoji_aliases: dict[str, tuple[str, str]] | None = None,
 ) -> str:
     source = source_url or "не указан"
@@ -855,6 +873,7 @@ def _build_moderation_text(
     return (
         f"📝 Черновик #{draft_id}\n"
         f"Источник: {source}\n"
+        f"Картинка источника: {'есть' if source_image_url else 'нет'}\n"
         f"Медиа: {media}\n\n"
         f"Пост:\n{body}\n\n"
         "Выбери действие:"
@@ -904,6 +923,7 @@ def _build_media_preview_caption(
     content: str,
     source_url: str | None = None,
     media_type: str | None = None,
+    source_image_url: str | None = None,
     custom_emoji_aliases: dict[str, tuple[str, str]] | None = None,
 ) -> str:
     source = source_url or "не указан"
@@ -913,6 +933,7 @@ def _build_media_preview_caption(
     caption = (
         f"📝 Черновик #{draft_id}\n"
         f"Источник: {source}\n"
+        f"Картинка источника: {'есть' if source_image_url else 'нет'}\n"
         f"Медиа: {media}\n\n"
         f"Пост:\n{snippet}"
     )
@@ -955,6 +976,7 @@ def _full_draft_text(draft: dict[str, object]) -> str:
         f"📝 Черновик #{draft['id']}\n"
         f"Статус: {draft.get('status')}\n"
         f"Источник: {draft.get('source_url') or 'не указан'}\n"
+        f"Картинка источника: {'есть' if draft.get('source_image_url') else 'нет'}\n"
         f"Тип медиа: {draft.get('media_type') or 'нет'}\n"
         f"URL медиа: {media_url if media_url else 'нет'}\n"
         f"Запланирован: {scheduled_at if scheduled_at else 'нет'}\n"
@@ -1032,7 +1054,7 @@ async def _regenerate_draft_from_source(
         return None, "AI-провайдер не настроен."
 
     try:
-        title, page_text = await _run_fetch_page_content(source_url)
+        details = await _run_fetch_page_content_details(source_url)
     except Exception as exc:
         logger.exception("Failed to fetch source for draft #%s from %s: %s", draft_id, source_url, exc)
         return None, "Не удалось снова прочитать источник. Возможно, сайт закрыл доступ или страница изменилась."
@@ -1043,8 +1065,8 @@ async def _regenerate_draft_from_source(
             api_key=api_key,
             settings=settings,
             source_url=source_url,
-            title=title,
-            page_text=page_text,
+            title=details.title,
+            page_text=details.text,
             base_url=base_url,
             extra_headers=extra_headers,
         )
@@ -1071,6 +1093,8 @@ async def _regenerate_draft_from_source(
         draft_id=draft_id,
     )
     db.update_draft_content(draft_id, content)
+    if details.preview_image_url:
+        db.update_draft_source_image_url(draft_id, details.preview_image_url)
     db.update_status(draft_id, "draft")
     return content, None
 
@@ -1086,6 +1110,7 @@ async def _send_moderation_preview(
     source_url: str | None = None,
     media_url: str | None = None,
     media_type: str | None = None,
+    source_image_url: str | None = None,
 ) -> None:
     settings = context.bot_data["settings"]
     custom_emoji_aliases = getattr(settings, "custom_emoji_aliases", {})
@@ -1095,10 +1120,11 @@ async def _send_moderation_preview(
         source_url,
         media_type,
         media_url,
+        source_image_url=source_image_url,
         custom_emoji_aliases=custom_emoji_aliases,
     )
     has_media = media_count(media_url, media_type) > 0
-    keyboard = _moderation_keyboard(draft_id, status="draft", has_media=has_media, source_url=source_url)
+    keyboard = _moderation_keyboard(draft_id, status="draft", has_media=has_media, source_url=source_url, source_image_url=source_image_url)
     items = decode_media_items(media_url, media_type)
     if len(items) == 1:
         short_caption = _build_media_preview_caption(
@@ -1106,6 +1132,7 @@ async def _send_moderation_preview(
             content,
             source_url,
             media_type,
+            source_image_url=source_image_url,
             custom_emoji_aliases=custom_emoji_aliases,
         )
         if items[0]["type"] == "photo":
@@ -1175,6 +1202,7 @@ async def _handle_pending_text_edit(update: Update, context: ContextTypes.DEFAUL
         source_url=draft.get("source_url"),
         media_url=draft.get("media_url"),
         media_type=draft.get("media_type"),
+        source_image_url=draft.get("source_image_url"),
     )
     return True
 
@@ -1378,7 +1406,7 @@ async def draft_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"Черновик #{draft_id} не найден.")
         return
 
-    reply_markup = _moderation_keyboard(draft_id, str(draft.get("status") or ""), source_url=draft.get("source_url"))
+    reply_markup = _moderation_keyboard_for_draft(draft_id, draft)
     await update.message.reply_text(
         _full_draft_text(draft),
         reply_markup=reply_markup,
@@ -1506,19 +1534,23 @@ async def _create_draft_from_topic(
             return None, "ИИ-провайдер не настроен."
         api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
         logger.info("topic_generate provider=%s model=%s", provider, settings.model_draft)
-        title, page_text = await _run_fetch_page_content(topic["url"])
+        details = await _run_fetch_page_content_details(topic["url"])
         generation_result, used_fallback, _operation = await _generate_url_draft_with_fallback(
             api_key=api_key,
             settings=settings,
             source_url=topic["url"],
-            title=title,
-            page_text=page_text,
+            title=details.title,
+            page_text=details.text,
             base_url=base_url,
             extra_headers=extra_headers,
         )
         if not generation_result.content.strip():
             return None, EMPTY_AI_REPLY_TEXT
-        new_draft_id = db.create_draft(generation_result.content, source_url=topic["url"])
+        new_draft_id = db.create_draft(
+            generation_result.content,
+            source_url=topic["url"],
+            source_image_url=details.preview_image_url,
+        )
         estimated_cost = estimate_ai_cost(provider, generation_result.prompt_tokens, generation_result.completion_tokens, settings)
         db.record_ai_usage(
             provider=provider,
@@ -1542,7 +1574,14 @@ async def _create_draft_from_topic(
             estimated_cost,
         )
         db.update_topic_status(topic_id, "used")
-        await _send_moderation_preview(context, settings.admin_id, new_draft_id, generation_result.content, topic["url"])
+        await _send_moderation_preview(
+            context,
+            settings.admin_id,
+            new_draft_id,
+            generation_result.content,
+            topic["url"],
+            source_image_url=details.preview_image_url,
+        )
         if used_fallback:
             logger.info(
                 "Topic draft created with fallback model: topic_id=%s draft_id=%s source_url=%s",
@@ -1863,6 +1902,7 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
         api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
         logger.info("/generate provider=%s model=%s", provider, settings.model_draft)
         source_url = None
+        source_image_url = None
         if source_url_arg:
             source_url_raw = find_first_url(source_url_arg)
             if not source_url_raw:
@@ -1880,13 +1920,14 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
                 return
             if message:
                 await message.reply_text("Нашёл ссылку. Читаю страницу и готовлю черновик...")
-            title, page_text = await _run_fetch_page_content(source_url)
+            details = await _run_fetch_page_content_details(source_url)
+            source_image_url = details.preview_image_url
             generation_result, used_fallback, operation = await _generate_url_draft_with_fallback(
                 api_key=api_key,
                 settings=settings,
                 source_url=source_url,
-                title=title,
-                page_text=page_text,
+                title=details.title,
+                page_text=details.text,
                 base_url=base_url,
                 extra_headers=extra_headers,
             )
@@ -1924,7 +1965,7 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
         if message:
             await message.reply_text(EMPTY_AI_REPLY_TEXT)
         return
-    draft_id = db.create_draft(content, source_url=source_url)
+    draft_id = db.create_draft(content, source_url=source_url, source_image_url=source_image_url)
     estimated_cost = estimate_ai_cost(
         provider,
         generation_result.prompt_tokens,
@@ -1952,7 +1993,14 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
         generation_result.total_tokens,
         estimated_cost,
     )
-    await _send_moderation_preview(context, settings.admin_id, draft_id, content, source_url)
+    await _send_moderation_preview(
+        context,
+        settings.admin_id,
+        draft_id,
+        content,
+        source_url,
+        source_image_url=source_image_url,
+    )
 
     if message:
         await message.reply_text(f"Черновик #{draft_id} создан и отправлен на модерацию.")
@@ -2555,6 +2603,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     refreshed.get("source_url"),
                     refreshed.get("media_type"),
                     refreshed.get("media_url"),
+                    source_image_url=refreshed.get("source_image_url"),
                     custom_emoji_aliases=settings.custom_emoji_aliases,
                 ),
                 reply_markup=_moderation_keyboard(
@@ -2562,6 +2611,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     "draft",
                     has_media=media_count(refreshed.get("media_url"), refreshed.get("media_type")) > 0,
                     source_url=refreshed.get("source_url"),
+                    source_image_url=refreshed.get("source_image_url"),
                 ),
             )
 
@@ -2597,6 +2647,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     refreshed.get("source_url"),
                     refreshed.get("media_type"),
                     refreshed.get("media_url"),
+                    source_image_url=refreshed.get("source_image_url"),
                     custom_emoji_aliases=settings.custom_emoji_aliases,
                 ),
                 reply_markup=_moderation_keyboard(
@@ -2604,6 +2655,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     str(refreshed.get("status") or ""),
                     has_media=media_count(refreshed.get("media_url"), refreshed.get("media_type")) > 0,
                     source_url=refreshed.get("source_url"),
+                    source_image_url=refreshed.get("source_image_url"),
                 ),
             )
 
@@ -2635,6 +2687,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     refreshed.get("source_url"),
                     refreshed.get("media_type"),
                     refreshed.get("media_url"),
+                    source_image_url=refreshed.get("source_image_url"),
                     custom_emoji_aliases=settings.custom_emoji_aliases,
                 ),
                 reply_markup=_moderation_keyboard(
@@ -2642,6 +2695,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     str(refreshed.get("status") or ""),
                     has_media=media_count(refreshed.get("media_url"), refreshed.get("media_type")) > 0,
                     source_url=refreshed.get("source_url"),
+                    source_image_url=refreshed.get("source_image_url"),
                 ),
             )
 
@@ -2655,7 +2709,13 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await _edit_callback_message(
                 query,
                 _build_moderation_text(draft_id, rewritten, draft.get("source_url"), custom_emoji_aliases=settings.custom_emoji_aliases),
-                reply_markup=_moderation_keyboard(draft_id, "draft", source_url=draft.get("source_url")),
+                reply_markup=_moderation_keyboard(
+                    draft_id,
+                    "draft",
+                    has_media=media_count(draft.get("media_url"), draft.get("media_type")) > 0,
+                    source_url=draft.get("source_url"),
+                    source_image_url=draft.get("source_image_url"),
+                ),
             )
 
         elif action == "edit_text":
@@ -2672,6 +2732,36 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton("❌ Отменить редактирование", callback_data=f"edit_cancel:{draft_id}")]]
                 ),
+            )
+
+        elif action == "attach_source_image":
+            status = str(draft.get("status") or "")
+            if not _can_edit(status):
+                await _edit_callback_message(query, _status_guard_message("edit", status))
+                return
+            source_image_url = str(draft.get("source_image_url") or "").strip()
+            if not source_image_url:
+                await _edit_callback_message(query, "У черновика нет сохранённой картинки источника.")
+                return
+            if media_count(draft.get("media_url"), draft.get("media_type")) > 0:
+                await _edit_callback_message(
+                    query,
+                    "У черновика уже есть медиа. Сначала убери его, потом прикрепи картинку источника.",
+                )
+                return
+            db.attach_media(draft_id, source_image_url, "photo")
+            db.update_status(draft_id, "draft")
+            refreshed = db.get_draft(draft_id) or draft
+            await _edit_callback_message(query, f"Картинка источника прикреплена к черновику #{draft_id}.")
+            await _send_moderation_preview(
+                context,
+                settings.admin_id,
+                draft_id,
+                str(refreshed.get("content") or ""),
+                source_url=refreshed.get("source_url"),
+                media_url=refreshed.get("media_url"),
+                media_type=refreshed.get("media_type"),
+                source_image_url=refreshed.get("source_image_url"),
             )
 
         elif action == "attach_media_flow":
@@ -2715,7 +2805,16 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             _clear_pending_media(context)
             await _edit_callback_message(query, f"Готово. Медиа прикреплено к черновику #{draft_id}: {len(items)} файл(ов).")
             refreshed = db.get_draft(draft_id) or draft
-            await _send_moderation_preview(context, settings.admin_id, draft_id, str(refreshed.get('content') or ''), source_url=refreshed.get("source_url"), media_url=refreshed.get("media_url"), media_type=refreshed.get("media_type"))
+            await _send_moderation_preview(
+                context,
+                settings.admin_id,
+                draft_id,
+                str(refreshed.get('content') or ''),
+                source_url=refreshed.get("source_url"),
+                media_url=refreshed.get("media_url"),
+                media_type=refreshed.get("media_type"),
+                source_image_url=refreshed.get("source_image_url"),
+            )
 
         elif action == "attach_media_cancel":
             _clear_pending_media(context)
@@ -2730,6 +2829,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     draft.get("source_url"),
                     draft.get("media_type"),
                     draft.get("media_url"),
+                    source_image_url=draft.get("source_image_url"),
                     custom_emoji_aliases=settings.custom_emoji_aliases,
                 ),
                 reply_markup=_moderation_keyboard(
@@ -2737,6 +2837,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     str(draft.get("status") or ""),
                     has_media=media_count(draft.get("media_url"), draft.get("media_type")) > 0,
                     source_url=draft.get("source_url"),
+                    source_image_url=draft.get("source_image_url"),
                 ),
             )
             if query.message:
@@ -2755,6 +2856,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 draft_id,
                 str(refreshed.get("content") or ""),
                 source_url=refreshed.get("source_url"),
+                source_image_url=refreshed.get("source_image_url"),
             )
 
         elif action == "edit_cancel":
@@ -2770,9 +2872,10 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     draft.get("source_url"),
                     draft.get("media_type"),
                     draft.get("media_url"),
+                    source_image_url=draft.get("source_image_url"),
                     custom_emoji_aliases=settings.custom_emoji_aliases,
                 ),
-                reply_markup=_moderation_keyboard(draft_id, str(draft.get("status") or ""), source_url=draft.get("source_url")),
+                reply_markup=_moderation_keyboard_for_draft(draft_id, draft),
             )
             if query.message:
                 await query.message.reply_text("Редактирование отменено.")
@@ -2814,13 +2917,20 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     draft.get("source_url"),
                     draft.get("media_type"),
                     draft.get("media_url"),
+                    source_image_url=draft.get("source_image_url"),
                     custom_emoji_aliases=settings.custom_emoji_aliases,
                 ),
-                reply_markup=_moderation_keyboard(draft_id, "draft", source_url=draft.get("source_url")),
+                reply_markup=_moderation_keyboard(
+                    draft_id,
+                    "draft",
+                    has_media=media_count(draft.get("media_url"), draft.get("media_type")) > 0,
+                    source_url=draft.get("source_url"),
+                    source_image_url=draft.get("source_image_url"),
+                ),
             )
 
         elif action == "draft_info":
-            reply_markup = _moderation_keyboard(draft_id, str(draft.get("status") or ""), source_url=draft.get("source_url"))
+            reply_markup = _moderation_keyboard_for_draft(draft_id, draft)
             await _edit_callback_message(
                 query,
                 _full_draft_text(draft),
@@ -3086,15 +3196,15 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text("Нашёл ссылку. Читаю страницу и готовлю черновик...")
 
     try:
-        title, page_text = await _run_fetch_page_content(source_url)
+        details = await _run_fetch_page_content_details(source_url)
         api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
         logger.info("url_generate provider=%s model=%s", provider, settings.model_draft)
         generation_result, used_fallback, operation = await _generate_url_draft_with_fallback(
             api_key=api_key,
             settings=settings,
             source_url=source_url,
-            title=title,
-            page_text=page_text,
+            title=details.title,
+            page_text=details.text,
             base_url=base_url,
             extra_headers=extra_headers,
         )
@@ -3113,7 +3223,7 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if not content.strip():
             await update.message.reply_text(EMPTY_AI_REPLY_TEXT)
             return
-        draft_id = db.create_draft(content, source_url=source_url)
+        draft_id = db.create_draft(content, source_url=source_url, source_image_url=details.preview_image_url)
         estimated_cost = estimate_ai_cost(provider, generation_result.prompt_tokens, generation_result.completion_tokens, settings)
         db.record_ai_usage(
             provider=provider, model=generation_result.model or settings.model_draft, operation=operation,
@@ -3121,7 +3231,14 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             total_tokens=generation_result.total_tokens, estimated_cost_usd=estimated_cost, source_url=source_url, draft_id=draft_id
         )
         logger.info("AI usage provider=%s model=%s operation=%s prompt=%s completion=%s total=%s cost=%s", provider, generation_result.model or settings.model_draft, operation, generation_result.prompt_tokens, generation_result.completion_tokens, generation_result.total_tokens, estimated_cost)
-        await _send_moderation_preview(context, settings.admin_id, draft_id, content, source_url)
+        await _send_moderation_preview(
+            context,
+            settings.admin_id,
+            draft_id,
+            content,
+            source_url,
+            source_image_url=details.preview_image_url,
+        )
         await update.message.reply_text(f"Черновик #{draft_id} создан и отправлен на модерацию.")
         if used_fallback:
             logger.info(

@@ -6,7 +6,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -26,6 +26,13 @@ ARTICLE_SELECTORS = ["article", "main", '[role="main"]', ".post", ".article", ".
 
 class EmptyAIResponseError(RuntimeError):
     pass
+
+
+@dataclass
+class PageContent:
+    title: str
+    text: str
+    preview_image_url: str | None = None
 
 
 @dataclass
@@ -452,13 +459,45 @@ def _clean_lines(lines: list[str]) -> str:
     return "\n".join(cleaned).strip()[:12000]
 
 
-def fetch_page_content(source_url: str, timeout_seconds: int = 12) -> tuple[str, str]:
+def _normalize_preview_image_url(source_url: str, image_url: str | None) -> str | None:
+    candidate = (image_url or "").strip()
+    if not candidate:
+        return None
+    lower = candidate.lower()
+    if lower.startswith(("data:", "javascript:", "blob:")):
+        return None
+    try:
+        absolute_url = urljoin(source_url, candidate)
+        parsed = urlsplit(absolute_url)
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return absolute_url
+
+
+def _extract_preview_image_url(soup: BeautifulSoup, source_url: str) -> str | None:
+    selectors = [
+        {"property": "og:image"},
+        {"name": "twitter:image"},
+        {"name": "twitter:image:src"},
+    ]
+    for attrs in selectors:
+        tag = soup.find("meta", attrs=attrs)
+        normalized = _normalize_preview_image_url(source_url, tag.get("content") if tag else None)
+        if normalized:
+            return normalized
+    return None
+
+
+def fetch_page_content_details(source_url: str, timeout_seconds: int = 12) -> PageContent:
     headers = {"User-Agent": "Mozilla/5.0 (compatible; simplify-ai-autopilot/1.0; +https://t.me/simplify_ai)"}
     response = requests.get(source_url, timeout=timeout_seconds, headers=headers)
     response.raise_for_status()
     if "text/html" not in response.headers.get("Content-Type", ""):
         raise ValueError("URL не содержит HTML-страницу.")
     soup = BeautifulSoup(response.text, "html.parser")
+    preview_image_url = _extract_preview_image_url(soup, source_url)
     for tag in soup(["script", "style", "noscript", "svg", "iframe", "form", "button", "input", "nav", "footer", "header", "aside"]):
         tag.decompose()
     title = (soup.title.string or "").strip() if soup.title else ""
@@ -470,7 +509,12 @@ def fetch_page_content(source_url: str, timeout_seconds: int = 12) -> tuple[str,
     text = _clean_lines(container.get_text("\n").splitlines())
     if len(text) < 700:
         raise ValueError("На странице слишком мало полезного текста.")
-    return title, text
+    return PageContent(title=title, text=text, preview_image_url=preview_image_url)
+
+
+def fetch_page_content(source_url: str, timeout_seconds: int = 12) -> tuple[str, str]:
+    details = fetch_page_content_details(source_url, timeout_seconds=timeout_seconds)
+    return details.title, details.text
 
 
 def generate_post_draft_from_page(api_key: str, model: str, source_url: str, title: str, page_text: str, max_chars: int = 1400, soft_chars: int = 1100, base_url: str | None = None, extra_headers: dict[str, str] | None = None) -> GenerationResult:
