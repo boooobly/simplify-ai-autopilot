@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 import bot.writer as writer
-from bot.writer import _ensure_custom_emoji_markers, fetch_page_content, fetch_page_content_details
+from bot.writer import GenerationResult, _ensure_custom_emoji_markers, fetch_page_content, fetch_page_content_details, rewrite_post_draft
 
 
 class _Response:
@@ -64,8 +64,60 @@ def _assert_preview_extraction() -> None:
         assert len(text) >= 700
 
 
+def _assert_rewrite_prompts() -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fake_generate(api_key, model, user_prompt, system_prompt, base_url=None, extra_headers=None, max_tokens=900):
+        calls.append((user_prompt, system_prompt))
+        return GenerationResult(
+            content="[[EMOJI:screen_card]] Обновлённый черновик с фактами.\n\n[[EMOJI:link]] Детали: [[LINK:источник|https://example.com]]",
+            prompt_tokens=10,
+            completion_tokens=20,
+            total_tokens=30,
+            model=model,
+        )
+
+    original = writer._generate_with_chat_completion
+    writer._generate_with_chat_completion = fake_generate
+    try:
+        results = {}
+        for mode in ("remove_fluff", "shorten", "neutralize_ads"):
+            result = rewrite_post_draft(
+                "key",
+                "model-x",
+                "Источник: https://example.com\n[[EMOJI:screen_card]] Текст с фактами и [[LINK:источником|https://example.com]]",
+                source_url="https://example.com",
+                mode=mode,
+                max_chars=500,
+                soft_chars=350,
+            )
+            results[mode] = result.content
+    finally:
+        writer._generate_with_chat_completion = original
+
+    assert len(calls) == 3
+    prompts = [call[0] for call in calls]
+    assert "Режим: убрать воду" in prompts[0]
+    assert "Режим: сделать короче" in prompts[1]
+    assert "60-70%" in prompts[1]
+    assert "Режим: убрать рекламный тон" in prompts[2]
+    assert all("Не добавляй строку Источник" in prompt for prompt in prompts)
+    assert all("Сохраняй полезные маркеры ссылок" in prompt for prompt in prompts)
+    assert all("Сохраняй существующие [[EMOJI:alias]]" in prompt for prompt in prompts)
+    assert all("Источник:" not in content for content in results.values())
+    assert all("[[LINK:источник|https://example.com]]" in content for content in results.values())
+    assert len(set(prompts)) == 3
+
+    try:
+        rewrite_post_draft("key", "model-x", "Достаточно длинный осмысленный текст черновика", mode="bad_mode")
+        raise AssertionError("unsupported rewrite mode must fail")
+    except ValueError:
+        pass
+
+
 def main() -> None:
     _assert_preview_extraction()
+    _assert_rewrite_prompts()
 
     out = _ensure_custom_emoji_markers("🤖 MiniMax-M1: миллион токенов", title="MiniMax-M1")
     assert out.startswith("[[EMOJI:screen_card]]")

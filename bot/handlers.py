@@ -32,6 +32,7 @@ from bot.writer import (
     translate_topic_title_to_ru,
     enrich_topic_metadata_ru,
     polish_post_draft,
+    rewrite_post_draft,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,30 @@ ACTIONABLE_DRAFT_STATUSES = {"draft", "approved"}
 TELEGRAM_CAPTION_LIMIT = 1024
 SHORT_MEDIA_PREVIEW_LIMIT = 850
 EMPTY_AI_REPLY_TEXT = "Модель вернула пустой ответ. Черновик не создан. Попробуй ещё раз или смени MODEL_DRAFT."
+REWRITE_DRAFT_ACTIONS = {
+    "rewrite_remove_fluff": {
+        "mode": "remove_fluff",
+        "operation": "rewrite_remove_fluff",
+        "progress": "🧹 Убираю воду из черновика #{draft_id}...",
+    },
+    "rewrite_shorten": {
+        "mode": "shorten",
+        "operation": "rewrite_shorten",
+        "progress": "📉 Сокращаю черновик #{draft_id}...",
+    },
+    "rewrite_neutralize_ads": {
+        "mode": "neutralize_ads",
+        "operation": "rewrite_neutralize_ads",
+        "progress": "😐 Убираю рекламный тон из черновика #{draft_id}...",
+    },
+}
+
+
+def _rewrite_action_config(action: str) -> dict[str, str]:
+    try:
+        return REWRITE_DRAFT_ACTIONS[action]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported rewrite action: {action}") from exc
 
 
 
@@ -803,6 +828,10 @@ async def _run_polish_post_draft(*args, **kwargs):
     return await asyncio.to_thread(polish_post_draft, *args, **kwargs)
 
 
+async def _run_rewrite_post_draft(*args, **kwargs):
+    return await asyncio.to_thread(rewrite_post_draft, *args, **kwargs)
+
+
 async def _run_translate_topic_title_to_ru(*args, **kwargs):
     return await asyncio.to_thread(translate_topic_title_to_ru, *args, **kwargs)
 
@@ -933,6 +962,11 @@ def _moderation_keyboard(
                 [InlineKeyboardButton("🗓️ Запланировать", callback_data=f"schedule:{draft_id}")],
                 [InlineKeyboardButton("📅 В ближайший слот", callback_data=f"schedule_nearest:{draft_id}")],
                 [InlineKeyboardButton("✨ Улучшить", callback_data=f"polish:{draft_id}")],
+                [
+                    InlineKeyboardButton("🧹 Убрать воду", callback_data=f"rewrite_remove_fluff:{draft_id}"),
+                    InlineKeyboardButton("📉 Сделать короче", callback_data=f"rewrite_shorten:{draft_id}"),
+                ],
+                [InlineKeyboardButton("😐 Без рекламного тона", callback_data=f"rewrite_neutralize_ads:{draft_id}")],
                 [InlineKeyboardButton("✏️ Редактировать текст", callback_data=f"edit_text:{draft_id}")],
             ]
         )
@@ -3048,6 +3082,81 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             if query.message:
                 await query.message.reply_text("Редактирование отменено.")
+
+        elif action in REWRITE_DRAFT_ACTIONS:
+            status = str(draft.get("status") or "")
+            if status not in ACTIONABLE_DRAFT_STATUSES:
+                await _edit_callback_message(query, _status_guard_message("edit", status))
+                return
+            if not settings.has_ai_provider:
+                await _edit_callback_message(query, "AI-провайдер не настроен.")
+                return
+            config = _rewrite_action_config(action)
+            await _edit_callback_message(query, config["progress"].format(draft_id=draft_id))
+            api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
+            logger.info("rewrite provider=%s model=%s mode=%s", provider, settings.model_polish, config["mode"])
+            try:
+                rewritten = await _run_rewrite_post_draft(
+                    api_key,
+                    model=settings.model_polish,
+                    draft_text=draft["content"],
+                    source_url=draft.get("source_url"),
+                    mode=config["mode"],
+                    max_chars=settings.post_max_chars,
+                    soft_chars=settings.post_soft_chars,
+                    base_url=base_url,
+                    extra_headers=extra_headers,
+                )
+            except EmptyAIResponseError:
+                await _edit_callback_message(
+                    query,
+                    EMPTY_AI_REPLY_TEXT.replace("Черновик не создан", "Черновик не обновлён"),
+                )
+                return
+            estimated_cost = estimate_ai_cost(provider, rewritten.prompt_tokens, rewritten.completion_tokens, settings)
+            db.record_ai_usage(
+                provider=provider,
+                model=rewritten.model or settings.model_polish,
+                operation=config["operation"],
+                prompt_tokens=rewritten.prompt_tokens,
+                completion_tokens=rewritten.completion_tokens,
+                total_tokens=rewritten.total_tokens,
+                estimated_cost_usd=estimated_cost,
+                source_url=draft.get("source_url"),
+                draft_id=draft_id,
+            )
+            logger.info(
+                "AI usage provider=%s model=%s operation=%s prompt=%s completion=%s total=%s cost=%s",
+                provider,
+                rewritten.model or settings.model_polish,
+                config["operation"],
+                rewritten.prompt_tokens,
+                rewritten.completion_tokens,
+                rewritten.total_tokens,
+                estimated_cost,
+            )
+            db.update_draft_content(draft_id, rewritten.content)
+            db.update_status(draft_id, "draft")
+            refreshed = db.get_draft(draft_id) or draft
+            await _edit_callback_message(
+                query,
+                _build_moderation_text(
+                    draft_id,
+                    rewritten.content,
+                    refreshed.get("source_url"),
+                    refreshed.get("media_type"),
+                    refreshed.get("media_url"),
+                    source_image_url=refreshed.get("source_image_url"),
+                    custom_emoji_aliases=settings.custom_emoji_aliases,
+                ),
+                reply_markup=_moderation_keyboard(
+                    draft_id,
+                    "draft",
+                    has_media=media_count(refreshed.get("media_url"), refreshed.get("media_type")) > 0,
+                    source_url=refreshed.get("source_url"),
+                    source_image_url=refreshed.get("source_image_url"),
+                ),
+            )
 
         elif action == "polish":
             if not _can_edit(draft.get("status")):
