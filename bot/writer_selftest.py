@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 import bot.writer as writer
-from bot.writer import GenerationResult, _ensure_custom_emoji_markers, fetch_page_content, fetch_page_content_details, generate_post_draft_from_topic_metadata, rewrite_post_draft
+from bot.writer import GenerationResult, _ensure_custom_emoji_markers, fetch_page_content, fetch_page_content_details, generate_post_draft_from_page, generate_post_draft_from_topic_metadata, rewrite_post_draft
 
 
 class _Response:
@@ -70,7 +70,7 @@ def _assert_rewrite_prompts() -> None:
     def fake_generate(api_key, model, user_prompt, system_prompt, base_url=None, extra_headers=None, max_tokens=900):
         calls.append((user_prompt, system_prompt))
         return GenerationResult(
-            content="[[EMOJI:screen_card]] Обновлённый черновик с фактами.\n\n[[EMOJI:link]] Детали: [[LINK:источник|https://example.com]]",
+            content="[[EMOJI:screen_card]] Обновлённый черновик с фактами.\n\n[[EMOJI:link]] Детали: [[LINK:источник|https://github.com/example/project]]",
             prompt_tokens=10,
             completion_tokens=20,
             total_tokens=30,
@@ -86,7 +86,7 @@ def _assert_rewrite_prompts() -> None:
                 "key",
                 "model-x",
                 "Источник: https://example.com\n[[EMOJI:screen_card]] Текст с фактами и [[LINK:источником|https://example.com]]",
-                source_url="https://example.com",
+                source_url="https://github.com/example/project",
                 mode=mode,
                 max_chars=500,
                 soft_chars=350,
@@ -102,10 +102,10 @@ def _assert_rewrite_prompts() -> None:
     assert "60-70%" in prompts[1]
     assert "Режим: убрать рекламный тон" in prompts[2]
     assert all("Не добавляй строку Источник" in prompt for prompt in prompts)
-    assert all("Сохраняй полезные маркеры ссылок" in prompt for prompt in prompts)
+    assert all("Сохраняй только полезные маркеры ссылок" in prompt for prompt in prompts)
     assert all("Сохраняй существующие [[EMOJI:alias]]" in prompt for prompt in prompts)
     assert all("Источник:" not in content for content in results.values())
-    assert all("[[LINK:источник|https://example.com]]" in content for content in results.values())
+    assert all("[[LINK:источник|https://github.com/example/project]]" in content for content in results.values())
     assert len(set(prompts)) == 3
 
     try:
@@ -161,10 +161,65 @@ def _assert_topic_metadata_generation() -> None:
     assert result.model == "model-x"
 
 
+def _assert_cta_cleanup_after_generation() -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fake_generate(api_key, model, user_prompt, system_prompt, base_url=None, extra_headers=None, max_tokens=900):
+        calls.append((user_prompt, system_prompt))
+        return GenerationResult(
+            content="[[EMOJI:screen_card]] Claude update\n\n[[EMOJI:link]] Подробнее: [[LINK:читать|https://www.anthropic.com/news/claude-update]]",
+            prompt_tokens=1,
+            completion_tokens=2,
+            total_tokens=3,
+            model=model,
+        )
+
+    original = writer._generate_with_chat_completion
+    writer._generate_with_chat_completion = fake_generate
+    try:
+        result = generate_post_draft_from_page(
+            "key",
+            "model-x",
+            "https://www.anthropic.com/news/claude-update",
+            "Claude update news",
+            _long_text(),
+        )
+    finally:
+        writer._generate_with_chat_completion = original
+
+    assert "[[LINK:" not in result.content
+    assert "Подробнее" not in result.content
+    assert "Не добавляй CTA только потому, что source_url существует" in calls[0][0]
+
+    def fake_github_generate(api_key, model, user_prompt, system_prompt, base_url=None, extra_headers=None, max_tokens=900):
+        return GenerationResult(
+            content="[[EMOJI:screen_card]] Repo\n\n[[EMOJI:link]] Код: [[LINK:GitHub|https://github.com/rasbt/LLMs-from-scratch]]",
+            prompt_tokens=1,
+            completion_tokens=2,
+            total_tokens=3,
+            model=model,
+        )
+
+    writer._generate_with_chat_completion = fake_github_generate
+    try:
+        repo_result = generate_post_draft_from_page(
+            "key",
+            "model-x",
+            "https://github.com/rasbt/LLMs-from-scratch",
+            "LLMs from scratch GitHub repo",
+            _long_text(),
+        )
+    finally:
+        writer._generate_with_chat_completion = original
+
+    assert "[[LINK:GitHub|https://github.com/rasbt/LLMs-from-scratch]]" in repo_result.content
+
+
 def main() -> None:
     _assert_preview_extraction()
     _assert_rewrite_prompts()
     _assert_topic_metadata_generation()
+    _assert_cta_cleanup_after_generation()
 
     out = _ensure_custom_emoji_markers("🤖 MiniMax-M1: миллион токенов", title="MiniMax-M1")
     assert out.startswith("[[EMOJI:screen_card]]")

@@ -6,6 +6,7 @@ from bot.publisher import MEDIA_PREVIEW_CAPTION_LIMIT, _prepare_media_caption, _
 
 ALIASES = {
     "claude": ("🤖", "5208880957280522189"),
+    "fire": ("🔥", "5424972470023104089"),
 }
 
 
@@ -42,9 +43,18 @@ def run() -> None:
     assert short_caption.send_full_text_after is False
     assert '<a href="https://example.com">site</a>' in short_caption.text
 
-    fallback_caption = _prepare_media_caption("[[EMOJI:fire]] Hot [[EMOJI:unknown]]")
-    assert fallback_caption.text == "🔥 Hot "
-    assert "[[EMOJI:" not in fallback_caption.text
+    strict_caption = _prepare_media_caption("[[EMOJI:fire]] Hot [[EMOJI:unknown]]", custom_emoji_aliases=ALIASES)
+    assert strict_caption.text == '<tg-emoji emoji-id="5424972470023104089">🔥</tg-emoji> Hot '
+    assert "[[EMOJI:" not in strict_caption.text
+
+    strict_missing_caption = _prepare_media_caption("[[EMOJI:idea]] Plain")
+    assert strict_missing_caption.text == "Plain"
+    assert "💡" not in strict_missing_caption.text
+
+    rendered, rendered_mode = _render_or_plain("[[EMOJI:claude]] Claude", custom_emoji_aliases=ALIASES)
+    assert rendered_mode == "HTML"
+    assert '<tg-emoji emoji-id="5208880957280522189">🤖</tg-emoji>' in rendered
+    assert "[[EMOJI:" not in rendered
 
     original_render = publisher.render_post_html
 
@@ -57,7 +67,7 @@ def run() -> None:
     finally:
         publisher.render_post_html = original_render
     assert parse_mode is None
-    assert plain_text == "💡 Plain "
+    assert plain_text == "Plain "
     assert "[[EMOJI:" not in plain_text
 
 

@@ -23,9 +23,9 @@ SIMPLIFY_AI_STYLE_GUIDE = """
 - Не делай общих пустых выводов.
 
 Формат @simplify_ai в Telegram:
-- Короткий заголовок с одной emoji.
+- Короткий заголовок с одним [[EMOJI:alias]] маркером, без raw emoji.
 - 1-2 простые вводные фразы.
-- Короткий список с маркером "➖" - если это действительно полезно.
+- Короткий список с маркером "➖" - если это действительно полезно; финальный рендер превратит маркер в custom emoji.
 - Практический смысл: что это даёт человеку на практике.
 - Короткая человеческая финальная мысль.
 - Если пост про инструмент/сервис/GitHub-репозиторий/приложение/демо/гайд/open-source проект, добавляй в конце строку с кликабельной CTA-ссылкой.
@@ -49,8 +49,8 @@ HUMANIZER_RULES_FOR_SIMPLIFY_AI = """
 - Убери AI-клише и канцеляризмы.
 - Сделай текст естественным, как у обычного автора Telegram.
 - Сохрани все факты без искажений и добавлений.
-- Сохрани формат канала: emoji-заголовок, короткий ввод, при необходимости список с "➖", практический смысл, короткий финал.
-- Сохрани маркеры списка "➖".
+- Сохрани формат канала: [[EMOJI:alias]]-заголовок, короткий ввод, при необходимости список с "➖", практический смысл, короткий финал.
+- Сохрани маркеры списка "➖"; они нужны только в черновике и будут превращены в custom emoji при финальной публикации.
 - Сохрани короткую человеческую концовку.
 - Не добавляй строку "Источник" внутрь поста.
 - Для постов про сервисы/инструменты сохраняй полезные CTA-ссылки в формате [[LINK:text|url]].
@@ -90,9 +90,9 @@ Rules:
 - Choose custom emoji by visual meaning and topic, not by fallback emoji.
 - Use custom emoji sparingly: title, CTA line, or final thought.
 - Do not place custom emoji in every sentence.
-- Do not use raw emoji when a custom alias exists.
-- If topic does not match any alias, use a normal emoji or no emoji.
-- Use raw ➖ for list markers only.
+- Never output raw emoji in final draft text. Use only [[EMOJI:alias]] markers for title, CTA, final thought and branded bullets.
+- If topic does not match any alias, use no emoji.
+- For list markers, still use plain lines with ➖ in draft text if needed; final rendering will convert the marker to custom emoji. Do not use raw emoji anywhere else.
 - Use [[EMOJI:screen_card]] for generic AI model/tool news when no brand-specific alias exists.
 - CTA links should use [[LINK:text|url]] markers.
 

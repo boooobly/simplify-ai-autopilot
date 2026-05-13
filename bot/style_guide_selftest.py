@@ -14,7 +14,7 @@ def main() -> None:
     assert 'correct:' in combined
     assert '[[emoji:screen_card]] minimax-m1' in combined
     assert 'wrong:' in combined
-    assert 'do not use raw emoji when a custom alias exists'.lower() in combined
+    assert 'never output raw emoji in final draft text'.lower() in combined
     print('style_guide_selftest: ok')
 
 
