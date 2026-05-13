@@ -168,9 +168,10 @@ def _assert_topic_metadata_enrichment() -> None:
         calls.append((user_prompt, system_prompt))
         return GenerationResult(
             content=(
-                "TITLE: LLMs-from-scratch - пошаговая сборка ChatGPT-подобной модели на PyTorch\n"
-                "SUMMARY: Репозиторий показывает, как с нуля собрать ChatGPT-подобную LLM на PyTorch.\n"
-                "ANGLE: Можно подать как полезный open-source проект для тех, кто хочет понять, как LLM устроены изнутри."
+                "title_ru: LLMs-from-scratch - пошаговая сборка ChatGPT-подобной модели на PyTorch\n"
+                "summary_ru: Репозиторий показывает, как с нуля собрать ChatGPT-подобную LLM на PyTorch.\n"
+                "angle_ru: Можно подать как полезный open-source проект для тех, кто хочет понять, как LLM устроены изнутри.\n"
+                "reason_ru: Полезно для читателей, которые хотят понять устройство LLM на практике."
             ),
             prompt_tokens=10,
             completion_tokens=20,
@@ -197,14 +198,17 @@ def _assert_topic_metadata_enrichment() -> None:
     assert "PyTorch" in result.content and "ChatGPT" in result.content and "LLM" in result.content
     assert "Implement a ChatGPT-like LLM" not in lines[0]
     assert "Jupyter Notebook" in calls[0][1]
+    assert "ровно четыре поля" in calls[0][1]
+    assert "Не пиши пост" in calls[0][1]
     assert "Пример плохого TITLE" in calls[0][0]
 
     def bad_generate(api_key, model, user_prompt, system_prompt, base_url=None, extra_headers=None, max_tokens=900):
         return GenerationResult(
             content=(
-                "TITLE: LLMs-from-scratch - open-source проект: Implement a ChatGPT-like LLM in PyTorch from scratch, step by step\n"
-                "SUMMARY: Репозиторий показывает LLM.\n"
-                "ANGLE: Можно подать как проект."
+                "title_ru: LLMs-from-scratch - open-source проект: Implement a ChatGPT-like LLM in PyTorch from scratch, step by step\n"
+                "summary_ru: Репозиторий показывает LLM.\n"
+                "angle_ru: Можно подать как проект.\n"
+                "reason_ru: Полезно для изучения LLM."
             ),
             model=model,
         )

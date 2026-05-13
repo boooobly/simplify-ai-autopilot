@@ -8,6 +8,7 @@ REQUIRED_KEYS = {
     'OPENROUTER_API_KEY',
     'OPENAI_API_KEY',
     'MODEL_DRAFT',
+    'MODEL_TOPIC_ENRICH',
     'MODEL_POLISH',
     'OPENROUTER_SITE_URL',
     'OPENROUTER_APP_NAME',
@@ -45,6 +46,7 @@ REQUIRED_HINTS = [
     'X API may incur usage-based costs. Configure usernames manually without @.',
     'MAX_TOPIC_AGE_DAYS controls freshness filter for RSS topics (1..60 days).',
     'AI enrichment limits for topic metadata during /collect (0..30). Lower values make collection faster.',
+    'Topic title translation/enrichment/scoring metadata model',
     'Daily schedule slots, format: HH:MM,HH:MM,HH:MM',
 ]
 

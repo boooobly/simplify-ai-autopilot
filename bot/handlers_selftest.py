@@ -607,6 +607,128 @@ async def _run_topic_callback_warning_selftest() -> None:
 
 
 
+async def _run_topic_model_routing_selftest() -> None:
+    tmp = TemporaryDirectory()
+    db = DraftDatabase(f"{tmp.name}/models.db")
+    item = _with_scoring(
+        TopicItem(
+            "LLMs-from-scratch - Implement a ChatGPT-like LLM in PyTorch from scratch, step by step",
+            "https://github.com/rasbt/LLMs-from-scratch",
+            "GitHub Trending AI",
+            datetime.now(timezone.utc).isoformat(),
+            source_group="community",
+        )
+    )
+    db.upsert_topic_candidate_with_reason(
+        item.title,
+        item.url,
+        item.source,
+        item.published_at,
+        item.category,
+        item.score,
+        item.reason,
+        item.normalized_title,
+        item.source_group,
+        item.title_ru,
+        item.summary_ru,
+        item.angle_ru,
+        item.reason_ru,
+        item.original_description,
+    )
+    settings = SimpleNamespace(
+        has_ai_provider=True,
+        openrouter_api_key="or-key",
+        openai_api_key=None,
+        openrouter_app_name="Simplify AI Autopilot",
+        openrouter_site_url=None,
+        model_draft="draft-model",
+        model_topic_enrich="topic-model",
+        model_polish="polish-model",
+        openrouter_input_cost_per_1m=0.0,
+        openrouter_output_cost_per_1m=0.0,
+        openai_input_cost_per_1m=0.0,
+        openai_output_cost_per_1m=0.0,
+    )
+    models: list[str] = []
+    original_enrich = handlers._run_enrich_topic_metadata_ru
+
+    async def fake_enrich(**kwargs):
+        models.append(kwargs["model"])
+        return GenerationResult(
+            content=(
+                "LLMs-from-scratch - пошаговая сборка ChatGPT-подобной модели на PyTorch\n"
+                "Репозиторий показывает, как с нуля собрать ChatGPT-подобную LLM на PyTorch.\n"
+                "Можно подать как полезный open-source проект для понимания устройства LLM.\n"
+                "Важно как практичный учебный репозиторий."
+            ),
+            model=kwargs["model"],
+        )
+
+    original_translate = handlers._run_translate_topic_title_to_ru
+
+    async def fake_translate(**kwargs):
+        models.append(kwargs["model"])
+        return GenerationResult(content="OpenAI выпускает полезное обновление модели", model=kwargs["model"])
+
+    handlers._run_enrich_topic_metadata_ru = fake_enrich
+    handlers._run_translate_topic_title_to_ru = fake_translate
+    try:
+        await handlers._enrich_topic_metadata_if_available(item, settings, db)
+        translate_item = _with_scoring(TopicItem("OpenAI launches useful model update", "https://example.com/translate-model", "OpenAI blog", datetime.now(timezone.utc).isoformat(), source_group="official_ai"))
+        db.upsert_topic_candidate_with_reason(translate_item.title, translate_item.url, translate_item.source, translate_item.published_at, translate_item.category, translate_item.score, translate_item.reason, translate_item.normalized_title, translate_item.source_group, translate_item.title_ru, translate_item.summary_ru, translate_item.angle_ru, translate_item.reason_ru, translate_item.original_description)
+        await handlers._translate_topic_title_if_available(translate_item, settings, db)
+    finally:
+        handlers._run_enrich_topic_metadata_ru = original_enrich
+        handlers._run_translate_topic_title_to_ru = original_translate
+        tmp.cleanup()
+
+    assert models == ["topic-model", "topic-model"]
+    assert models[0] != settings.model_draft
+    assert item.title_ru.startswith("LLMs-from-scratch - пошаговая сборка")
+    assert "PyTorch" in item.title_ru and "ChatGPT" in item.title_ru
+    assert "Implement a ChatGPT-like LLM" not in item.title_ru
+
+    draft_source = inspect.getsource(handlers._generate_topic_metadata_fallback_draft)
+    assert "model=settings.model_draft" in draft_source
+    callback_source = inspect.getsource(handlers.moderation_callback)
+    assert "model=settings.model_polish" in callback_source
+    assert "_run_polish_post_draft" in callback_source
+    assert "_run_rewrite_post_draft" in callback_source
+
+
+async def _run_topic_enrichment_failure_fallback_selftest() -> None:
+    tmp = TemporaryDirectory()
+    db = DraftDatabase(f"{tmp.name}/fallback.db")
+    item = _with_scoring(TopicItem("OpenAI launches a useful model update", "https://example.com/fallback", "OpenAI blog", datetime.now(timezone.utc).isoformat(), source_group="official_ai"))
+    db.upsert_topic_candidate_with_reason(item.title, item.url, item.source, item.published_at, item.category, item.score, item.reason, item.normalized_title, item.source_group, item.title_ru, item.summary_ru, item.angle_ru, item.reason_ru, item.original_description)
+    settings = SimpleNamespace(
+        has_ai_provider=True,
+        openrouter_api_key="or-key",
+        openai_api_key=None,
+        openrouter_app_name="Simplify AI Autopilot",
+        openrouter_site_url=None,
+        model_draft="draft-model",
+        model_topic_enrich="topic-model",
+        openrouter_input_cost_per_1m=0.0,
+        openrouter_output_cost_per_1m=0.0,
+        openai_input_cost_per_1m=0.0,
+        openai_output_cost_per_1m=0.0,
+    )
+    original_enrich = handlers._run_enrich_topic_metadata_ru
+
+    async def fake_enrich(**kwargs):
+        return None
+
+    handlers._run_enrich_topic_metadata_ru = fake_enrich
+    try:
+        await handlers._enrich_topic_metadata_if_available(item, settings, db)
+    finally:
+        handlers._run_enrich_topic_metadata_ru = original_enrich
+        tmp.cleanup()
+
+    assert item.title_ru == item.title
+    assert item.summary_ru == handlers.TOPIC_ENRICH_FALLBACK_SUMMARY_RU
+
 def run() -> None:
     aliases = {"claude": ("🤖", "5208880957280522189")}
     text = "Тест [[EMOJI:claude]]"
@@ -681,6 +803,8 @@ def run() -> None:
     asyncio.run(_run_collect_stats_selftest())
     asyncio.run(_run_topics_menu_fallback_selftest())
     asyncio.run(_run_topic_metadata_fallback_selftest())
+    asyncio.run(_run_topic_model_routing_selftest())
+    asyncio.run(_run_topic_enrichment_failure_fallback_selftest())
     asyncio.run(_run_topic_403_fallback_and_failure_selftest())
     asyncio.run(_run_topic_callback_warning_selftest())
 
