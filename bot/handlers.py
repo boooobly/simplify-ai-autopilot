@@ -267,13 +267,12 @@ def _topic_card_text(topic: dict) -> str:
     return "\n".join(lines)
 
 
-def _topic_actions_keyboard(topic_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("✍️ Создать черновик", callback_data=f"topic_generate:{topic_id}")],
-            [InlineKeyboardButton("❌ Отклонить тему", callback_data=f"reject_topic:{topic_id}")],
-        ]
-    )
+def _topic_actions_keyboard(topic_id: int, source_url: str | None = None) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton("✍️ Создать черновик", callback_data=f"topic_generate:{topic_id}")]]
+    if source_url:
+        rows.append([InlineKeyboardButton("🔗 Открыть источник", url=source_url)])
+    rows.append([InlineKeyboardButton("❌ Отклонить тему", callback_data=f"reject_topic:{topic_id}")])
+    return InlineKeyboardMarkup(rows)
 
 
 def _is_admin(user_id: int | None, admin_id: int) -> bool:
@@ -340,6 +339,55 @@ def _empty_slots_for_day(db: DraftDatabase, settings, day_offset: int) -> list[s
         scheduled_utc = datetime.strptime(scheduled_raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
         busy_slots.add(scheduled_utc.astimezone(ZoneInfo(settings.schedule_timezone)).strftime("%H:%M"))
     return [slot for slot in settings.daily_post_slots if slot not in busy_slots]
+
+
+
+def _parse_slot_hhmm(slot: str) -> tuple[int, int]:
+    hour, minute = map(int, slot.split(":", 1))
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise ValueError(f"Некорректный слот времени: {slot}")
+    return hour, minute
+
+
+def _busy_slots_for_local_day(db: DraftDatabase, settings, day_start_local: datetime) -> set[str]:
+    tz = ZoneInfo(settings.schedule_timezone)
+    start_local = day_start_local.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    end_local = start_local + timedelta(days=1)
+    start_utc = start_local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
+    end_utc = end_local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
+    busy: set[str] = set()
+    for draft in db.list_scheduled_drafts_between(start_utc, end_utc):
+        scheduled_raw = str(draft.get("scheduled_at") or "")
+        if not scheduled_raw:
+            continue
+        scheduled_utc = datetime.strptime(scheduled_raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
+        busy.add(scheduled_utc.astimezone(tz).strftime("%H:%M"))
+    return busy
+
+
+def _find_nearest_available_slot(db: DraftDatabase, settings) -> datetime:
+    tz = ZoneInfo(settings.schedule_timezone)
+    now_local = datetime.now(tz)
+    slots = list(settings.daily_post_slots)
+    for day_offset in range(8):
+        day_start = (now_local + timedelta(days=day_offset)).replace(hour=0, minute=0, second=0, microsecond=0)
+        busy_slots = _busy_slots_for_local_day(db, settings, day_start)
+        for slot in slots:
+            hour, minute = _parse_slot_hhmm(slot)
+            candidate = day_start.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if candidate <= now_local:
+                continue
+            if slot in busy_slots:
+                continue
+            return candidate
+    raise ValueError("Нет свободных слотов на ближайшие 7 дней.")
+
+
+def _schedule_draft_to_nearest_slot(db: DraftDatabase, settings, draft_id: int) -> str:
+    scheduled_local = _find_nearest_available_slot(db, settings)
+    scheduled_utc = scheduled_local.astimezone(ZoneInfo("UTC"))
+    db.schedule_draft(draft_id, scheduled_utc.strftime("%Y-%m-%d %H:%M:%S"))
+    return scheduled_local.strftime("%d.%m %H:%M")
 
 
 def _select_daily_plan_topics(db: DraftDatabase, limit: int) -> list[dict]:
@@ -605,7 +653,12 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
     )
 
 
-def _moderation_keyboard(draft_id: int, status: str | None = None, has_media: bool = False) -> InlineKeyboardMarkup:
+def _moderation_keyboard(
+    draft_id: int,
+    status: str | None = None,
+    has_media: bool = False,
+    source_url: str | None = None,
+) -> InlineKeyboardMarkup:
     if status == "scheduled":
         rows = [
             [InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")],
@@ -626,13 +679,17 @@ def _moderation_keyboard(draft_id: int, status: str | None = None, has_media: bo
         rows = [
             [InlineKeyboardButton("✅ Опубликовать", callback_data=f"publish:{draft_id}")],
             [InlineKeyboardButton("🗓️ Запланировать", callback_data=f"schedule:{draft_id}")],
+            [InlineKeyboardButton("📅 В ближайший слот", callback_data=f"schedule_nearest:{draft_id}")],
             [InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")],
+            *([[InlineKeyboardButton("♻️ Перегенерировать", callback_data=f"regenerate:{draft_id}")]] if source_url else []),
             [InlineKeyboardButton("✨ Улучшить Claude", callback_data=f"polish:{draft_id}")],
             [InlineKeyboardButton("✏️ Редактировать текст", callback_data=f"edit_text:{draft_id}")],
             [InlineKeyboardButton("📎 Прикрепить медиа", callback_data=f"attach_media_flow:{draft_id}")],
             *([[InlineKeyboardButton("🗑 Убрать медиа", callback_data=f"remove_media:{draft_id}")]] if has_media else []),
             [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")],
         ]
+    if source_url:
+        rows.append([InlineKeyboardButton("🔗 Открыть источник", url=source_url)])
     return InlineKeyboardMarkup(rows)
 
 
@@ -961,6 +1018,63 @@ async def _generate_url_draft_with_fallback(
             return result, True, "fallback_draft_from_url"
         raise
 
+async def _regenerate_draft_from_source(
+    *,
+    db: DraftDatabase,
+    settings,
+    draft: dict[str, object],
+) -> tuple[str | None, str | None]:
+    source_url = str(draft.get("source_url") or "").strip()
+    draft_id = int(draft["id"])
+    if not source_url:
+        return None, "У этого черновика нет source_url, перегенерация недоступна."
+    if not settings.has_ai_provider:
+        return None, "AI-провайдер не настроен."
+
+    try:
+        title, page_text = await _run_fetch_page_content(source_url)
+    except Exception as exc:
+        logger.exception("Failed to fetch source for draft #%s from %s: %s", draft_id, source_url, exc)
+        return None, "Не удалось снова прочитать источник. Возможно, сайт закрыл доступ или страница изменилась."
+
+    try:
+        api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
+        generation_result, _used_fallback, operation = await _generate_url_draft_with_fallback(
+            api_key=api_key,
+            settings=settings,
+            source_url=source_url,
+            title=title,
+            page_text=page_text,
+            base_url=base_url,
+            extra_headers=extra_headers,
+        )
+    except EmptyAIResponseError:
+        return None, EMPTY_AI_REPLY_TEXT.replace("Черновик не создан", "Черновик не обновлён")
+    except Exception as exc:
+        logger.exception("Failed to regenerate draft #%s from %s: %s", draft_id, source_url, exc)
+        return None, "Не удалось перегенерировать черновик из источника. Ошибка записана в логи."
+
+    content = generation_result.content.strip()
+    if not content:
+        return None, "Модель вернула пустой ответ. Черновик не обновлён. Попробуй ещё раз или смени MODEL_DRAFT."
+
+    estimated_cost = estimate_ai_cost(provider, generation_result.prompt_tokens, generation_result.completion_tokens, settings)
+    db.record_ai_usage(
+        provider=provider,
+        model=generation_result.model or settings.model_draft,
+        operation=operation,
+        prompt_tokens=generation_result.prompt_tokens,
+        completion_tokens=generation_result.completion_tokens,
+        total_tokens=generation_result.total_tokens,
+        estimated_cost_usd=estimated_cost,
+        source_url=source_url,
+        draft_id=draft_id,
+    )
+    db.update_draft_content(draft_id, content)
+    db.update_status(draft_id, "draft")
+    return content, None
+
+
 
 
 
@@ -984,7 +1098,7 @@ async def _send_moderation_preview(
         custom_emoji_aliases=custom_emoji_aliases,
     )
     has_media = media_count(media_url, media_type) > 0
-    keyboard = _moderation_keyboard(draft_id, has_media=has_media)
+    keyboard = _moderation_keyboard(draft_id, status="draft", has_media=has_media, source_url=source_url)
     items = decode_media_items(media_url, media_type)
     if len(items) == 1:
         short_caption = _build_media_preview_caption(
@@ -1264,7 +1378,7 @@ async def draft_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"Черновик #{draft_id} не найден.")
         return
 
-    reply_markup = _moderation_keyboard(draft_id, str(draft.get("status") or ""))
+    reply_markup = _moderation_keyboard(draft_id, str(draft.get("status") or ""), source_url=draft.get("source_url"))
     await update.message.reply_text(
         _full_draft_text(draft),
         reply_markup=reply_markup,
@@ -1354,7 +1468,7 @@ async def _send_daily_plan(
         await context.bot.send_message(
             chat_id=settings.admin_id,
             text=f"🕒 Слот: {slot}\n\n{_topic_card_text(topic)}",
-            reply_markup=_topic_actions_keyboard(int(topic["id"])),
+            reply_markup=_topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")),
             link_preview_options=_disabled_link_preview_options(),
         )
 
@@ -2033,7 +2147,7 @@ async def topics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     for topic in topics:
         text = _topic_card_text(topic)
-        keyboard = _topic_actions_keyboard(int(topic["id"]))
+        keyboard = _topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or ""))
         await context.bot.send_message(
             chat_id=settings.admin_id,
             text=text,
@@ -2109,7 +2223,7 @@ async def _topics_fun_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await context.bot.send_message(
             chat_id=settings.admin_id,
             text=_topic_card_text(topic),
-            reply_markup=_topic_actions_keyboard(int(topic["id"])),
+            reply_markup=_topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")),
             link_preview_options=_disabled_link_preview_options(),
         )
     if update.message:
@@ -2135,7 +2249,7 @@ async def _topics_filtered_command(update: Update, context: ContextTypes.DEFAULT
         await context.bot.send_message(
             chat_id=settings.admin_id,
             text=_topic_card_text(topic),
-            reply_markup=_topic_actions_keyboard(int(topic["id"])),
+            reply_markup=_topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")),
             link_preview_options=_disabled_link_preview_options(),
         )
     if update.message:
@@ -2158,7 +2272,7 @@ async def topics_hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text("Горячих тем пока нет. Запусти /collect")
         return
     for topic in topics:
-        await context.bot.send_message(chat_id=settings.admin_id, text=_topic_card_text(topic), reply_markup=_topic_actions_keyboard(int(topic["id"])), link_preview_options=_disabled_link_preview_options())
+        await context.bot.send_message(chat_id=settings.admin_id, text=_topic_card_text(topic), reply_markup=_topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")), link_preview_options=_disabled_link_preview_options())
     if update.message:
         await update.message.reply_text(f"Показал {len(topics)} тем. Можно открыть больше: /topics_hot 30")
 
@@ -2403,6 +2517,54 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 query,
                 f"🗓️ Черновик #{draft_id} запланирован на {scheduled_local.strftime('%Y-%m-%d %H:%M')}.\nОчередь: /queue_today"
             )
+
+        elif action == "schedule_nearest":
+            if not _can_schedule(draft.get("status")):
+                await _edit_callback_message(query, _status_guard_message("schedule", draft.get("status")))
+                return
+            try:
+                scheduled_text = _schedule_draft_to_nearest_slot(db, settings, draft_id)
+            except ValueError as exc:
+                await _edit_callback_message(query, str(exc))
+                return
+            await _edit_callback_message(
+                query,
+                f"Черновик #{draft_id} поставлен в ближайший слот: {scheduled_text}",
+                reply_markup=_queue_keyboard(0, _queue_draft_ids_for_day(db, settings, 0)),
+            )
+
+        elif action == "regenerate":
+            status = str(draft.get("status") or "")
+            if not _can_edit(status):
+                await _edit_callback_message(query, _status_guard_message("edit", status))
+                return
+            if not str(draft.get("source_url") or "").strip():
+                await _edit_callback_message(query, "У этого черновика нет source_url, перегенерация недоступна.")
+                return
+            await _edit_callback_message(query, f"♻️ Перегенерирую черновик #{draft_id} из того же источника...")
+            regenerated, error = await _regenerate_draft_from_source(db=db, settings=settings, draft=draft)
+            if error or regenerated is None:
+                await _edit_callback_message(query, error or "Не удалось перегенерировать черновик.")
+                return
+            refreshed = db.get_draft(draft_id) or draft
+            await _edit_callback_message(
+                query,
+                _build_moderation_text(
+                    draft_id,
+                    regenerated,
+                    refreshed.get("source_url"),
+                    refreshed.get("media_type"),
+                    refreshed.get("media_url"),
+                    custom_emoji_aliases=settings.custom_emoji_aliases,
+                ),
+                reply_markup=_moderation_keyboard(
+                    draft_id,
+                    "draft",
+                    has_media=media_count(refreshed.get("media_url"), refreshed.get("media_type")) > 0,
+                    source_url=refreshed.get("source_url"),
+                ),
+            )
+
         elif action == "unschedule":
             if not draft:
                 await _edit_callback_message(query, f"Черновик #{draft_id} не найден.")
@@ -2441,6 +2603,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     draft_id,
                     str(refreshed.get("status") or ""),
                     has_media=media_count(refreshed.get("media_url"), refreshed.get("media_type")) > 0,
+                    source_url=refreshed.get("source_url"),
                 ),
             )
 
@@ -2478,6 +2641,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     draft_id,
                     str(refreshed.get("status") or ""),
                     has_media=media_count(refreshed.get("media_url"), refreshed.get("media_type")) > 0,
+                    source_url=refreshed.get("source_url"),
                 ),
             )
 
@@ -2491,7 +2655,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await _edit_callback_message(
                 query,
                 _build_moderation_text(draft_id, rewritten, draft.get("source_url"), custom_emoji_aliases=settings.custom_emoji_aliases),
-                reply_markup=_moderation_keyboard(draft_id, "draft"),
+                reply_markup=_moderation_keyboard(draft_id, "draft", source_url=draft.get("source_url")),
             )
 
         elif action == "edit_text":
@@ -2568,7 +2732,12 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     draft.get("media_url"),
                     custom_emoji_aliases=settings.custom_emoji_aliases,
                 ),
-                reply_markup=_moderation_keyboard(draft_id, str(draft.get("status") or ""), has_media=media_count(draft.get("media_url"), draft.get("media_type")) > 0),
+                reply_markup=_moderation_keyboard(
+                    draft_id,
+                    str(draft.get("status") or ""),
+                    has_media=media_count(draft.get("media_url"), draft.get("media_type")) > 0,
+                    source_url=draft.get("source_url"),
+                ),
             )
             if query.message:
                 await query.message.reply_text("Прикрепление медиа отменено.")
@@ -2603,7 +2772,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     draft.get("media_url"),
                     custom_emoji_aliases=settings.custom_emoji_aliases,
                 ),
-                reply_markup=_moderation_keyboard(draft_id, str(draft.get("status") or "")),
+                reply_markup=_moderation_keyboard(draft_id, str(draft.get("status") or ""), source_url=draft.get("source_url")),
             )
             if query.message:
                 await query.message.reply_text("Редактирование отменено.")
@@ -2647,11 +2816,11 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     draft.get("media_url"),
                     custom_emoji_aliases=settings.custom_emoji_aliases,
                 ),
-                reply_markup=_moderation_keyboard(draft_id, "draft"),
+                reply_markup=_moderation_keyboard(draft_id, "draft", source_url=draft.get("source_url")),
             )
 
         elif action == "draft_info":
-            reply_markup = _moderation_keyboard(draft_id, str(draft.get("status") or ""))
+            reply_markup = _moderation_keyboard(draft_id, str(draft.get("status") or ""), source_url=draft.get("source_url"))
             await _edit_callback_message(
                 query,
                 _full_draft_text(draft),
@@ -2756,7 +2925,7 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await _edit_callback_message(query, "Найденные темы:", reply_markup=_back_to_menu_keyboard())
         for topic in topics:
             text = _topic_card_text(topic)
-            keyboard = _topic_actions_keyboard(int(topic["id"]))
+            keyboard = _topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or ""))
             await context.bot.send_message(chat_id=settings.admin_id, text=text, reply_markup=keyboard, link_preview_options=_disabled_link_preview_options())
     elif data == "menu_sources_status":
         _items, reports = await _run_collect_topics_with_diagnostics()
