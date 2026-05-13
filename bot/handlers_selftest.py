@@ -57,6 +57,8 @@ def _run_keyboard_selftest() -> None:
     topic_buttons = _keyboard_buttons(topic_keyboard)
     assert any(button.text == "🔗 Открыть источник" and button.url == "https://example.com/topic" for button in topic_buttons)
     assert "✍️ Создать черновик" in _keyboard_texts(topic_keyboard)
+    assert "🔁 Перевести заново" in _keyboard_texts(topic_keyboard)
+    assert any(button.callback_data == "topic_reenrich:7" for button in topic_buttons)
     assert "❌ Отклонить тему" in _keyboard_texts(topic_keyboard)
     assert not any("Shorts" in text or "Reels" in text or "TikTok" in text or "Видео" in text for text in _keyboard_texts(topic_keyboard))
 
@@ -414,6 +416,7 @@ def _topic_settings(admin_id: int = 123):
         openrouter_site_url="",
         openai_api_key="test-key",
         model_draft="draft-model",
+        model_topic_enrich="topic-model",
         model_polish="",
         post_max_chars=800,
         post_soft_chars=600,
@@ -605,6 +608,67 @@ async def _run_topic_callback_warning_selftest() -> None:
     assert "Источник не удалось прочитать напрямую" in query.edited_text
     assert "Проверь факты" in query.edited_text
 
+
+
+async def _run_topic_reenrich_callback_selftest() -> None:
+    tmp = TemporaryDirectory()
+    db = DraftDatabase(f"{tmp.name}/topic-reenrich.db")
+    settings = _topic_settings()
+    context = SimpleNamespace(bot_data={"settings": settings, "db": db}, bot=_FakeBot(), user_data={})
+    topic_id = _insert_topic(db, url="https://example.com/old-english")
+    db.force_update_topic_candidate_display_fields(
+        topic_id,
+        title_ru="Old English fallback title",
+        summary_ru="Old summary fallback",
+        angle_ru="Old angle fallback",
+        reason_ru="Old reason fallback",
+    )
+    models: list[str] = []
+    calls: list[dict] = []
+    original_enrich = handlers._run_enrich_topic_metadata_ru
+
+    async def fake_enrich(**kwargs):
+        models.append(kwargs["model"])
+        calls.append(kwargs)
+        return GenerationResult(
+            content=(
+                "Новый русский заголовок темы\n"
+                "Новая русская сводка темы.\n"
+                "Новый русский ракурс для поста.\n"
+                "Новая русская причина важности."
+            ),
+            prompt_tokens=11,
+            completion_tokens=22,
+            total_tokens=33,
+            model=kwargs["model"],
+        )
+
+    handlers._run_enrich_topic_metadata_ru = fake_enrich
+    try:
+        query = _FakeCallbackQuery(f"topic_reenrich:{topic_id}", settings.admin_id)
+        await handlers.moderation_callback(SimpleNamespace(callback_query=query), context)
+    finally:
+        handlers._run_enrich_topic_metadata_ru = original_enrich
+
+    assert models == [settings.model_topic_enrich]
+    assert calls[0]["title"].startswith("New AI repo v2.1 discussed")
+    assert calls[0]["source"] == "Reddit LocalLLaMA"
+    assert calls[0]["description"].startswith("Reddit users discuss")
+    updated = db.get_topic_candidate(topic_id)
+    assert updated["title_ru"] == "Новый русский заголовок темы"
+    assert updated["summary_ru"] == "Новая русская сводка темы."
+    assert updated["angle_ru"] == "Новый русский ракурс для поста."
+    assert updated["reason_ru"] == "Новая русская причина важности."
+    assert query.edited_text is not None
+    card_lines = query.edited_text.splitlines()
+    assert card_lines[3] == "Новый русский заголовок темы"
+    assert "Old English fallback title" not in query.edited_text
+    original_lines = [line for line in card_lines if line.startswith("Оригинал:")]
+    assert original_lines == ["Оригинал: New AI repo v2.1 discussed on Reddit https://example.com/old-english"]
+    assert "New AI repo v2.1 discussed" not in query.edited_text.replace(original_lines[0], "")
+    assert query.edited_reply_markup is not None
+    assert "🔁 Перевести заново" in _keyboard_texts(query.edited_reply_markup)
+    tmp.cleanup()
 
 
 async def _run_topic_model_routing_selftest() -> None:
@@ -803,6 +867,7 @@ def run() -> None:
     asyncio.run(_run_collect_stats_selftest())
     asyncio.run(_run_topics_menu_fallback_selftest())
     asyncio.run(_run_topic_metadata_fallback_selftest())
+    asyncio.run(_run_topic_reenrich_callback_selftest())
     asyncio.run(_run_topic_model_routing_selftest())
     asyncio.run(_run_topic_enrichment_failure_fallback_selftest())
     asyncio.run(_run_topic_403_fallback_and_failure_selftest())

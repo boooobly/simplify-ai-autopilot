@@ -172,6 +172,18 @@ def _assert_topic_candidates(db: DraftDatabase) -> None:
     assert updated["title_ru"] == "Обновленный T1"
     assert updated["summary_ru"] == "Обновленное о чем"
     assert updated["angle_ru"] == "Обновленная идея"
+    assert db.force_update_topic_candidate_display_fields(
+        int(row_by_url["id"]),
+        title_ru="Новый русский заголовок",
+        summary_ru="Новая русская сводка",
+        angle_ru="Новый русский ракурс",
+        reason_ru="Новая русская причина",
+    ) is True
+    force_updated = db.find_topic_candidate_by_url("https://a")
+    assert force_updated["title_ru"] == "Новый русский заголовок"
+    assert force_updated["summary_ru"] == "Новая русская сводка"
+    assert force_updated["angle_ru"] == "Новый русский ракурс"
+    assert force_updated["reason_ru"] == "Новая русская причина"
     merged_model = db.upsert_topic_candidate_with_reason(
         "OpenAI launches GPT-5.1 for ChatGPT",
         "https://official/model",
