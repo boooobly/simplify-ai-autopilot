@@ -760,6 +760,28 @@ class DraftDatabase:
             conn.commit()
             return cursor.rowcount > 0
 
+    def force_update_topic_candidate_display_fields(
+        self,
+        topic_id: int,
+        title_ru: str,
+        summary_ru: str,
+        angle_ru: str,
+        reason_ru: str,
+    ) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE topic_candidates
+                SET title_ru = ?,
+                    summary_ru = ?,
+                    angle_ru = ?,
+                    reason_ru = ?
+                WHERE id = ?
+                """,
+                (title_ru, summary_ru, angle_ru, reason_ru, topic_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
 
 
 

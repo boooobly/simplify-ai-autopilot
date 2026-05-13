@@ -368,6 +368,7 @@ def _topic_card_text(topic: dict) -> str:
 
 def _topic_actions_keyboard(topic_id: int, source_url: str | None = None) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton("✍️ Создать черновик", callback_data=f"topic_generate:{topic_id}")]]
+    rows.append([InlineKeyboardButton("🔁 Перевести заново", callback_data=f"topic_reenrich:{topic_id}")])
     if source_url:
         rows.append([InlineKeyboardButton("🔗 Открыть источник", url=source_url)])
     rows.append([InlineKeyboardButton("❌ Отклонить тему", callback_data=f"reject_topic:{topic_id}")])
@@ -798,6 +799,70 @@ async def _translate_topic_title_if_available(item, settings, db: DraftDatabase)
     )
 
 
+def _parse_topic_metadata_result_content(content: str) -> tuple[str, str, str, str] | None:
+    parts = [part.strip() for part in content.splitlines() if part.strip()]
+    if len(parts) < 3:
+        return None
+    return parts[0], parts[1], parts[2], (parts[3] if len(parts) >= 4 else "")
+
+
+async def _reenrich_topic_candidate_display_metadata(
+    topic_id: int,
+    settings,
+    db: DraftDatabase,
+) -> tuple[dict | None, str | None]:
+    topic = db.get_topic_candidate(topic_id)
+    if not topic:
+        return None, f"Тема #{topic_id} не найдена."
+    if not settings or not getattr(settings, "has_ai_provider", False):
+        return None, "AI-провайдер не настроен."
+    api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
+    if not api_key:
+        return None, "AI-ключ не настроен."
+    model = _topic_enrich_model(settings)
+    try:
+        result = await _run_enrich_topic_metadata_ru(
+            api_key=api_key,
+            model=model,
+            title=str(topic.get("title") or ""),
+            source=str(topic.get("source") or ""),
+            description=topic.get("original_description"),
+            base_url=base_url,
+            extra_headers=extra_headers,
+        )
+    except Exception as exc:
+        logger.warning("Manual topic re-enrichment failed: topic_id=%s error=%s", topic_id, exc)
+        return None, "Не удалось заново перевести тему."
+    if not result or not result.content.strip():
+        return None, "Модель не вернула перевод темы."
+    parsed = _parse_topic_metadata_result_content(result.content)
+    if parsed is None:
+        return None, "Модель вернула неполные данные темы."
+    title_ru, summary_ru, angle_ru, reason_ru = parsed
+    if not all([title_ru, summary_ru, angle_ru, reason_ru]):
+        return None, "Модель вернула неполные данные темы."
+    db.force_update_topic_candidate_display_fields(
+        topic_id,
+        title_ru=title_ru,
+        summary_ru=summary_ru,
+        angle_ru=angle_ru,
+        reason_ru=reason_ru,
+    )
+    estimated_cost = estimate_ai_cost(provider, result.prompt_tokens, result.completion_tokens, settings)
+    db.record_ai_usage(
+        provider=provider,
+        model=result.model or model,
+        operation="topic_reenrich_metadata",
+        prompt_tokens=result.prompt_tokens,
+        completion_tokens=result.completion_tokens,
+        total_tokens=result.total_tokens,
+        estimated_cost_usd=estimated_cost,
+        source_url=str(topic.get("url") or ""),
+        draft_id=None,
+    )
+    return db.get_topic_candidate(topic_id), None
+
+
 async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase) -> None:
     if not settings or not getattr(settings, "has_ai_provider", False):
         return
@@ -823,19 +888,19 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
     if not result or not result.content.strip():
         _apply_topic_enrichment_fallback(item, db)
         return
-    parts = [part.strip() for part in result.content.splitlines() if part.strip()]
-    if len(parts) < 3:
+    parsed = _parse_topic_metadata_result_content(result.content)
+    if parsed is None:
         _apply_topic_enrichment_fallback(item, db)
         return
+    title_ru, summary_ru, angle_ru, reason_ru = parsed
     topic = db.find_topic_candidate_by_url(item.url)
     if not topic:
         _apply_topic_enrichment_fallback(item, db)
         return
-    item.title_ru = item.title_ru or parts[0]
-    item.summary_ru = item.summary_ru or parts[1]
-    item.angle_ru = item.angle_ru or parts[2]
-    if len(parts) >= 4:
-        item.reason_ru = item.reason_ru or parts[3]
+    item.title_ru = item.title_ru or title_ru
+    item.summary_ru = item.summary_ru or summary_ru
+    item.angle_ru = item.angle_ru or angle_ru
+    item.reason_ru = item.reason_ru or reason_ru
     db.update_topic_candidate_display_fields(
         int(topic["id"]),
         title_ru=item.title_ru,
@@ -2876,6 +2941,20 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 query,
                 f"Черновик #{draft_id} поставлен на {scheduled_text}",
                 reply_markup=_queue_keyboard(db, settings, day_offset),
+            )
+            return
+
+        if action == "topic_reenrich":
+            topic_id = draft_id
+            await _edit_callback_message(query, f"🔁 Перевожу тему #{topic_id} заново...")
+            topic, error = await _reenrich_topic_candidate_display_metadata(topic_id, settings, db)
+            if error or not topic:
+                await _edit_callback_message(query, error or "Не удалось заново перевести тему.")
+                return
+            await _edit_callback_message(
+                query,
+                _topic_card_text(topic),
+                reply_markup=_topic_actions_keyboard(topic_id, str(topic.get("url") or "")),
             )
             return
 
