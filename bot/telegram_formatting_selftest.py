@@ -1,5 +1,7 @@
 """Лёгкие self-test проверки для форматирования Telegram."""
 
+import re
+
 from bot.telegram_formatting import render_post_html, strip_quote_markers
 
 
@@ -11,6 +13,9 @@ def run() -> None:
         'github': ('📱', '6208880957280522191'),
         'photoshop': ('📱', '6208880957280522192'),
         'windows': ('📱', '6208880957280522193'),
+        'link': ('🔗', '5271604874419647061'),
+        'thought': ('💭', '5467538555158943525'),
+        'bullet': ('➖', '5382261056078881010'),
     }
 
     case1 = 'Title\n\n➖ one\n➖ two\n\nEnd'
@@ -38,6 +43,17 @@ def run() -> None:
     assert '<tg-emoji emoji-id="5208880957280522189">🤖</tg-emoji>' in out
     assert '[[EMOJI:' not in out
 
+    strict_alias = render_post_html('[[EMOJI:claude]] Claude', custom_emoji_aliases={'claude': ('🤖', '5208880957280522189')}, strict_custom_emoji=True)
+    assert '<tg-emoji emoji-id="5208880957280522189">🤖</tg-emoji>' in strict_alias
+    assert '[[EMOJI:claude]]' not in strict_alias
+
+    strict_missing = render_post_html('[[EMOJI:claude]] Claude', custom_emoji_aliases={}, strict_custom_emoji=True)
+    assert strict_missing == 'Claude'
+    assert '🤖' not in strict_missing
+
+    non_strict_missing = render_post_html('[[EMOJI:claude]] Claude', custom_emoji_aliases={}, strict_custom_emoji=False)
+    assert non_strict_missing.startswith('🤖 Claude')
+
     out2 = render_post_html('[[EMOJI:github]] [[EMOJI:photoshop]] [[EMOJI:windows]]', custom_emoji_aliases=aliases)
     assert '6208880957280522191' in out2 and '6208880957280522192' in out2 and '6208880957280522193' in out2
 
@@ -45,7 +61,19 @@ def run() -> None:
     assert '<tg-emoji emoji-id="5208880957280522189">🤖</tg-emoji>' not in plain
     assert '<tg-emoji emoji-id="6208880957280522191">📱</tg-emoji>' not in plain
 
-    fallback = render_post_html('[[EMOJI:screen_card]] Tool [[EMOJI:link]]', custom_emoji_aliases=aliases)
+    strict_raw = render_post_html('🤖 Claude\n🔗 Подробнее\n💭 Мысль', custom_emoji_aliases=aliases, strict_custom_emoji=True)
+    assert '<tg-emoji emoji-id="5208880957280522189">🤖</tg-emoji>' in strict_raw
+    assert '<tg-emoji emoji-id="5271604874419647061">🔗</tg-emoji>' in strict_raw
+    assert '<tg-emoji emoji-id="5467538555158943525">💭</tg-emoji>' in strict_raw
+    without_tags = re.sub(r'<tg-emoji[^>]*>.*?</tg-emoji>', '', strict_raw)
+    assert '🤖' not in without_tags and '🔗' not in without_tags and '💭' not in without_tags
+
+    strict_bullets = render_post_html('➖ пункт один\n➖ пункт два', custom_emoji_aliases=aliases, strict_custom_emoji=True)
+    assert strict_bullets.count('<tg-emoji emoji-id="5382261056078881010">➖</tg-emoji>') == 2
+    assert '<blockquote>' in strict_bullets
+    assert '➖ пункт' not in re.sub(r'<tg-emoji[^>]*>.*?</tg-emoji>', '', strict_bullets)
+
+    fallback = render_post_html('[[EMOJI:screen_card]] Tool [[EMOJI:link]]', custom_emoji_aliases={})
     assert '🖥 Tool 🔗' in fallback
     assert '[[EMOJI:' not in fallback
     assert '<tg-emoji' not in fallback

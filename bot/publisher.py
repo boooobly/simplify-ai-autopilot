@@ -34,11 +34,22 @@ def _render_or_plain(
     text: str,
     custom_emoji_map: dict[str, str] | None = None,
     custom_emoji_aliases: dict[str, tuple[str, str]] | None = None,
+    *,
+    strict_custom_emoji: bool = True,
 ) -> tuple[str, str | None]:
     try:
-        return render_post_html(text, custom_emoji_map=custom_emoji_map, custom_emoji_aliases=custom_emoji_aliases), "HTML"
+        return render_post_html(
+            text,
+            custom_emoji_map=custom_emoji_map,
+            custom_emoji_aliases=custom_emoji_aliases,
+            strict_custom_emoji=strict_custom_emoji,
+        ), "HTML"
     except Exception:
-        return strip_quote_markers(text, custom_emoji_aliases=custom_emoji_aliases), None
+        return strip_quote_markers(
+            text,
+            custom_emoji_aliases=custom_emoji_aliases,
+            strict_custom_emoji=strict_custom_emoji,
+        ), None
 
 
 def _remove_incomplete_trailing_marker(text: str) -> str:
