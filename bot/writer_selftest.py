@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 import bot.writer as writer
-from bot.writer import GenerationResult, _ensure_custom_emoji_markers, enrich_topic_metadata_ru, fetch_page_content, fetch_page_content_details, generate_post_draft_from_page, generate_post_draft_from_topic_metadata, rewrite_post_draft
+from bot.writer import GenerationResult, _ensure_custom_emoji_markers, _looks_like_useful_russian_metadata, _parse_topic_metadata_fields, enrich_topic_metadata_ru, fetch_page_content, fetch_page_content_details, generate_post_draft_from_page, generate_post_draft_from_topic_metadata, rewrite_post_draft
 
 
 class _Response:
@@ -159,6 +159,117 @@ def _assert_topic_metadata_generation() -> None:
     assert "Источник:" not in result.content
     assert result.prompt_tokens == 11
     assert result.model == "model-x"
+
+
+
+def _assert_topic_metadata_parser_variants() -> None:
+    exact = _parse_topic_metadata_fields(
+        "title_ru: Русский заголовок\n"
+        "summary_ru: Русская сводка\n"
+        "angle_ru: Русский ракурс\n"
+        "reason_ru: Русская причина"
+    )
+    assert exact == {
+        "title_ru": "Русский заголовок",
+        "summary_ru": "Русская сводка",
+        "angle_ru": "Русский ракурс",
+        "reason_ru": "Русская причина",
+    }
+
+    russian = _parse_topic_metadata_fields(
+        "Заголовок: agentmemory - память для AI-агентов в кодинге\n"
+        "О чем: Репозиторий добавляет persistent memory для AI coding agents.\n"
+        "Идея: Показать инфраструктуру для AI-агентов.\n"
+        "Почему: Тема сильная из-за интереса к памяти."
+    )
+    assert russian["title_ru"] == "agentmemory - память для AI-агентов в кодинге"
+    assert russian["summary_ru"].startswith("Репозиторий добавляет persistent memory")
+    assert russian["angle_ru"] == "Показать инфраструктуру для AI-агентов."
+    assert russian["reason_ru"] == "Тема сильная из-за интереса к памяти."
+
+    plain = _parse_topic_metadata_fields(
+        "Заголовок темы\nСводка темы\nРакурс темы\nПричина темы"
+    )
+    assert plain == {
+        "title_ru": "Заголовок темы",
+        "summary_ru": "Сводка темы",
+        "angle_ru": "Ракурс темы",
+        "reason_ru": "Причина темы",
+    }
+
+    numbered = _parse_topic_metadata_fields(
+        "1. Заголовок темы\n2. Сводка темы\n3. Ракурс темы\n4. Причина темы"
+    )
+    assert numbered == plain
+
+    json_output = _parse_topic_metadata_fields(
+        '{"title_ru":"JSON заголовок","summary_ru":"JSON сводка","angle_ru":"JSON ракурс","reason_ru":"JSON причина"}'
+    )
+    assert json_output["title_ru"] == "JSON заголовок"
+    assert json_output["summary_ru"] == "JSON сводка"
+
+    fenced = _parse_topic_metadata_fields(
+        "```json\n"
+        '{"title":"Fenced заголовок","summary":"Fenced сводка","angle":"Fenced ракурс","why":"Fenced причина"}'
+        "\n```"
+    )
+    assert fenced == {
+        "title_ru": "Fenced заголовок",
+        "summary_ru": "Fenced сводка",
+        "angle_ru": "Fenced ракурс",
+        "reason_ru": "Fenced причина",
+    }
+
+
+def _assert_topic_metadata_hy3_agentmemory() -> None:
+    def fake_generate(api_key, model, user_prompt, system_prompt, base_url=None, extra_headers=None, max_tokens=900):
+        return GenerationResult(
+            content=(
+                "```text\n"
+                "1. agentmemory - память для AI-агентов в кодинге\n"
+                "2. Репозиторий добавляет persistent memory для AI coding agents и проверяет её на real-world benchmarks.\n"
+                "3. Можно показать как пример инфраструктуры для более полезных AI-агентов в разработке.\n"
+                "4. Тема сильная из-за интереса к памяти и устойчивости coding agents.\n"
+                "```"
+            ),
+            model=model,
+        )
+
+    original = writer._generate_with_chat_completion
+    writer._generate_with_chat_completion = fake_generate
+    try:
+        result = enrich_topic_metadata_ru(
+            api_key="key",
+            model="tencent/hy3-preview",
+            title="agentmemory - GitHub-проект, нужен AI-перевод",
+            source="GitHub Trending AI",
+            description="#1 Persistent memory for AI coding agents based on real-world benchmarks",
+        )
+    finally:
+        writer._generate_with_chat_completion = original
+
+    assert result is not None
+    assert result.content.splitlines() == [
+        "agentmemory - память для AI-агентов в кодинге",
+        "Репозиторий добавляет persistent memory для AI coding agents и проверяет её на real-world benchmarks.",
+        "Можно показать как пример инфраструктуры для более полезных AI-агентов в разработке.",
+        "Тема сильная из-за интереса к памяти и устойчивости coding agents.",
+    ]
+
+
+def _assert_topic_metadata_english_validation() -> None:
+    assert _looks_like_useful_russian_metadata(
+        "agentmemory - память для AI-агентов в кодинге",
+        "Репозиторий добавляет persistent memory для AI coding agents и проверяет её на real-world benchmarks.",
+        "Можно показать Agentic AI Infrastructure на TypeScript, GitHub, LLM и PyTorch.",
+        original_title="agentmemory - GitHub-проект, нужен AI-перевод",
+    )
+    assert not _looks_like_useful_russian_metadata(
+        "Persistent memory for AI coding agents based on real-world benchmarks",
+        "Русская сводка про память.",
+        "Русский ракурс.",
+        original_title="Persistent memory for AI coding agents based on real-world benchmarks",
+    )
 
 
 def _assert_topic_metadata_enrichment() -> None:

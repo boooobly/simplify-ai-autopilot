@@ -671,6 +671,80 @@ async def _run_topic_reenrich_callback_selftest() -> None:
     tmp.cleanup()
 
 
+async def _run_topic_reenrich_parse_failure_error_selftest() -> None:
+    tmp = TemporaryDirectory()
+    db = DraftDatabase(f"{tmp.name}/topic-reenrich-error.db")
+    settings = _topic_settings()
+    context = SimpleNamespace(bot_data={"settings": settings, "db": db}, bot=_FakeBot(), user_data={})
+    topic_id = _insert_topic(db, url="https://example.com/parse-failure")
+    original_enrich = handlers._run_enrich_topic_metadata_ru
+
+    async def fake_enrich(**kwargs):
+        return GenerationResult(content="title: Only English title\nsummary:", model=kwargs["model"])
+
+    handlers._run_enrich_topic_metadata_ru = fake_enrich
+    try:
+        query = _FakeCallbackQuery(f"topic_reenrich:{topic_id}", settings.admin_id)
+        await handlers.moderation_callback(SimpleNamespace(callback_query=query), context)
+    finally:
+        handlers._run_enrich_topic_metadata_ru = original_enrich
+        tmp.cleanup()
+
+    assert query.edited_text == "Модель вернула ответ, но бот не смог разобрать формат."
+
+
+async def _run_topic_reenrich_empty_error_selftest() -> None:
+    tmp = TemporaryDirectory()
+    db = DraftDatabase(f"{tmp.name}/topic-reenrich-empty.db")
+    settings = _topic_settings()
+    context = SimpleNamespace(bot_data={"settings": settings, "db": db}, bot=_FakeBot(), user_data={})
+    topic_id = _insert_topic(db, url="https://example.com/empty-response")
+    original_enrich = handlers._run_enrich_topic_metadata_ru
+
+    async def fake_enrich(**kwargs):
+        return GenerationResult(content="   ", model=kwargs["model"])
+
+    handlers._run_enrich_topic_metadata_ru = fake_enrich
+    try:
+        query = _FakeCallbackQuery(f"topic_reenrich:{topic_id}", settings.admin_id)
+        await handlers.moderation_callback(SimpleNamespace(callback_query=query), context)
+    finally:
+        handlers._run_enrich_topic_metadata_ru = original_enrich
+        tmp.cleanup()
+
+    assert query.edited_text == "Модель вернула пустой ответ."
+
+
+async def _run_topic_reenrich_too_english_error_selftest() -> None:
+    tmp = TemporaryDirectory()
+    db = DraftDatabase(f"{tmp.name}/topic-reenrich-english.db")
+    settings = _topic_settings()
+    context = SimpleNamespace(bot_data={"settings": settings, "db": db}, bot=_FakeBot(), user_data={})
+    topic_id = _insert_topic(db, url="https://example.com/english-response")
+    original_enrich = handlers._run_enrich_topic_metadata_ru
+
+    async def fake_enrich(**kwargs):
+        return GenerationResult(
+            content=(
+                "Persistent memory for AI coding agents based on real-world benchmarks\n"
+                "Русская сводка про память.\n"
+                "Русский ракурс для канала.\n"
+                "Русская причина важности."
+            ),
+            model=kwargs["model"],
+        )
+
+    handlers._run_enrich_topic_metadata_ru = fake_enrich
+    try:
+        query = _FakeCallbackQuery(f"topic_reenrich:{topic_id}", settings.admin_id)
+        await handlers.moderation_callback(SimpleNamespace(callback_query=query), context)
+    finally:
+        handlers._run_enrich_topic_metadata_ru = original_enrich
+        tmp.cleanup()
+
+    assert query.edited_text == "Модель вернула слишком английский текст, перевод отклонён."
+
+
 async def _run_topic_model_routing_selftest() -> None:
     tmp = TemporaryDirectory()
     db = DraftDatabase(f"{tmp.name}/models.db")
@@ -1052,6 +1126,9 @@ def run() -> None:
     asyncio.run(_run_topics_menu_fallback_selftest())
     asyncio.run(_run_topic_metadata_fallback_selftest())
     asyncio.run(_run_topic_reenrich_callback_selftest())
+    asyncio.run(_run_topic_reenrich_parse_failure_error_selftest())
+    asyncio.run(_run_topic_reenrich_empty_error_selftest())
+    asyncio.run(_run_topic_reenrich_too_english_error_selftest())
     asyncio.run(_run_topic_model_routing_selftest())
     asyncio.run(_run_weak_topic_metadata_overwrite_selftest())
     asyncio.run(_run_good_topic_metadata_no_overwrite_selftest())
