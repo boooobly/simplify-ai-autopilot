@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 from bot.database import DraftDatabase
+from bot.writer import GenerationResult
 from bot.sources import TopicItem, _with_scoring
 import bot.handlers as handlers
 from bot.handlers import (
@@ -404,6 +405,194 @@ async def _run_topics_menu_fallback_selftest() -> None:
     tmp.cleanup()
 
 
+def _topic_settings(admin_id: int = 123):
+    return SimpleNamespace(
+        admin_id=admin_id,
+        has_ai_provider=True,
+        openrouter_api_key="",
+        openrouter_app_name="simplify-ai-test",
+        openrouter_site_url="",
+        openai_api_key="test-key",
+        model_draft="draft-model",
+        model_polish="",
+        post_max_chars=800,
+        post_soft_chars=600,
+        openrouter_input_cost_per_1m=0.0,
+        openrouter_output_cost_per_1m=0.0,
+        openai_input_cost_per_1m=0.0,
+        openai_output_cost_per_1m=0.0,
+        custom_emoji_aliases={},
+    )
+
+
+def _insert_topic(db: DraftDatabase, url: str = "https://www.reddit.com/r/LocalLLaMA/comments/test/topic/") -> int:
+    unique_title = f"New AI repo v2.1 discussed on Reddit {url}"
+    db.upsert_topic_candidate_with_reason(
+        title=unique_title,
+        url=url,
+        source="Reddit LocalLLaMA",
+        published_at="2026-05-13 10:00:00",
+        category="tools",
+        score=91,
+        reason="High-signal AI tooling discussion",
+        normalized_title=unique_title.lower(),
+        source_group="reddit",
+        title_ru="Новый AI-репозиторий v2.1 обсуждают на Reddit",
+        summary_ru="В теме сохранено описание репозитория и зачем он может быть полезен.",
+        angle_ru="Подать осторожно, потому что источник не прочитан напрямую.",
+        original_description="Reddit users discuss a new AI repo v2.1 and possible use cases.",
+        canonical_key=unique_title.lower(),
+    )
+    topic = db.find_topic_candidate_by_url(url)
+    assert topic is not None
+    return int(topic["id"])
+
+
+async def _run_topic_metadata_fallback_selftest() -> None:
+    tmp = TemporaryDirectory()
+    db = DraftDatabase(f"{tmp.name}/topic-fallback.db")
+    settings = _topic_settings()
+    context = SimpleNamespace(bot_data={"settings": settings, "db": db}, bot=_FakeBot(), user_data={})
+
+    original_fetch = handlers._run_fetch_page_content_details
+    original_metadata = handlers._run_generate_post_draft_from_topic_metadata
+    original_page = handlers._run_generate_post_draft_from_page
+    fetch_calls: list[str] = []
+    metadata_calls: list[dict] = []
+    page_calls: list[str] = []
+
+    async def fake_fetch(url):
+        fetch_calls.append(url)
+        raise AssertionError("Reddit page fetch must be skipped")
+
+    async def fake_page(*args, **kwargs):
+        page_calls.append(str(kwargs.get("source_url") or ""))
+        raise AssertionError("Reddit page generation must be skipped")
+
+    async def fake_metadata(*args, **kwargs):
+        metadata_calls.append(kwargs)
+        return GenerationResult(
+            content="[[EMOJI:screen_card]] Осторожный черновик по сохранённому описанию темы.\n\n[[EMOJI:link]] Детали: [[LINK:открыть обсуждение|https://www.reddit.com/r/LocalLLaMA/comments/test/topic/]]",
+            prompt_tokens=10,
+            completion_tokens=20,
+            total_tokens=30,
+            model="draft-model",
+        )
+
+    handlers._run_fetch_page_content_details = fake_fetch
+    handlers._run_generate_post_draft_from_page = fake_page
+    handlers._run_generate_post_draft_from_topic_metadata = fake_metadata
+    try:
+        topic_id = _insert_topic(db)
+        new_draft_id, note = await handlers._create_draft_from_topic(
+            context=context, settings=settings, db=db, topic_id=topic_id
+        )
+    finally:
+        handlers._run_fetch_page_content_details = original_fetch
+        handlers._run_generate_post_draft_from_page = original_page
+        handlers._run_generate_post_draft_from_topic_metadata = original_metadata
+
+    assert new_draft_id is not None
+    assert fetch_calls == []
+    assert page_calls == []
+    assert len(metadata_calls) == 1
+    assert note is not None and "Источник не удалось прочитать напрямую" in note
+    draft = db.get_draft(new_draft_id)
+    assert draft is not None
+    assert draft["source_url"] == "https://www.reddit.com/r/LocalLLaMA/comments/test/topic/"
+    assert draft["source_image_url"] is None
+    assert "Источник:" not in draft["content"]
+    assert db.get_topic_candidate(topic_id)["status"] == "used"
+    with db._connect() as conn:
+        usage = conn.execute("SELECT operation, source_url, draft_id FROM ai_usage").fetchone()
+    assert usage["operation"] == "generate_topic_metadata_fallback"
+    assert usage["source_url"] == "https://www.reddit.com/r/LocalLLaMA/comments/test/topic/"
+    assert int(usage["draft_id"]) == new_draft_id
+    tmp.cleanup()
+
+
+async def _run_topic_403_fallback_and_failure_selftest() -> None:
+    tmp = TemporaryDirectory()
+    db = DraftDatabase(f"{tmp.name}/topic-403.db")
+    settings = _topic_settings()
+    context = SimpleNamespace(bot_data={"settings": settings, "db": db}, bot=_FakeBot(), user_data={})
+
+    original_fetch = handlers._run_fetch_page_content_details
+    original_metadata = handlers._run_generate_post_draft_from_topic_metadata
+    fetch_calls: list[str] = []
+
+    async def fake_fetch(url):
+        fetch_calls.append(url)
+        raise RuntimeError("403 Client Error: Blocked for url: " + url)
+
+    async def fake_metadata(*args, **kwargs):
+        return GenerationResult(
+            content="[[EMOJI:web]] Черновик по метаданным без строки источника и без лишних фактов.",
+            prompt_tokens=1,
+            completion_tokens=2,
+            total_tokens=3,
+            model="draft-model",
+        )
+
+    handlers._run_fetch_page_content_details = fake_fetch
+    handlers._run_generate_post_draft_from_topic_metadata = fake_metadata
+    try:
+        topic_id = _insert_topic(db, url="https://blocked.example.com/story")
+        new_draft_id, note = await handlers._create_draft_from_topic(
+            context=context, settings=settings, db=db, topic_id=topic_id
+        )
+        assert new_draft_id is not None
+        assert fetch_calls == ["https://blocked.example.com/story"]
+        assert note is not None and "Источник не удалось прочитать напрямую" in note
+        assert db.get_draft(new_draft_id)["source_url"] == "https://blocked.example.com/story"
+        assert db.get_topic_candidate(topic_id)["status"] == "used"
+
+        async def failing_metadata(*args, **kwargs):
+            raise RuntimeError("metadata fallback model failed")
+
+        handlers._run_generate_post_draft_from_topic_metadata = failing_metadata
+        db_fail = DraftDatabase(f"{tmp.name}/topic-403-fail.db")
+        context_fail = SimpleNamespace(bot_data={"settings": settings, "db": db_fail}, bot=_FakeBot(), user_data={})
+        failed_topic_id = _insert_topic(db_fail, url="https://blocked.example.com/fail")
+        failed_draft_id, error = await handlers._create_draft_from_topic(
+            context=context_fail, settings=settings, db=db_fail, topic_id=failed_topic_id
+        )
+        assert failed_draft_id is None
+        assert error and "Не удалось создать черновик" in error
+        assert db_fail.get_topic_candidate(failed_topic_id)["status"] == "new"
+    finally:
+        handlers._run_fetch_page_content_details = original_fetch
+        handlers._run_generate_post_draft_from_topic_metadata = original_metadata
+        tmp.cleanup()
+
+
+async def _run_topic_callback_warning_selftest() -> None:
+    tmp = TemporaryDirectory()
+    db = DraftDatabase(f"{tmp.name}/topic-callback.db")
+    settings = _topic_settings()
+    context = SimpleNamespace(bot_data={"settings": settings, "db": db}, bot=_FakeBot(), user_data={})
+    topic_id = _insert_topic(db)
+
+    original_create = handlers._create_draft_from_topic
+
+    async def fake_create(**kwargs):
+        return 77, handlers.TOPIC_METADATA_FALLBACK_NOTE
+
+    handlers._create_draft_from_topic = fake_create
+    try:
+        query = _FakeCallbackQuery(f"topic_generate:{topic_id}", settings.admin_id)
+        await handlers.moderation_callback(SimpleNamespace(callback_query=query), context)
+    finally:
+        handlers._create_draft_from_topic = original_create
+        tmp.cleanup()
+
+    assert query.edited_text is not None
+    assert "Создан черновик #77" in query.edited_text
+    assert "Источник не удалось прочитать напрямую" in query.edited_text
+    assert "Проверь факты" in query.edited_text
+
+
+
 def run() -> None:
     aliases = {"claude": ("🤖", "5208880957280522189")}
     text = "Тест [[EMOJI:claude]]"
@@ -477,6 +666,9 @@ def run() -> None:
     asyncio.run(_run_cleanup_callback_selftest())
     asyncio.run(_run_collect_stats_selftest())
     asyncio.run(_run_topics_menu_fallback_selftest())
+    asyncio.run(_run_topic_metadata_fallback_selftest())
+    asyncio.run(_run_topic_403_fallback_and_failure_selftest())
+    asyncio.run(_run_topic_callback_warning_selftest())
 
     print("OK")
 
