@@ -1,13 +1,25 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 import re
 import string
 
 _CLEAN_RE = re.compile(r"\s+")
 _STOP_WORDS = {
-    "the", "a", "an", "and", "for", "with", "new", "новый", "новая", "запустил", "запустила"
+    "the", "a", "an", "and", "for", "with", "new", "update", "latest",
+    "announces", "releases", "release", "launch", "launched", "launches", "introduces", "unveils",
+    "новый", "новая", "новое", "новые", "запустил", "запустила", "представила", "представил", "выпустила", "выпустил",
 }
+
+_SOURCE_PREFIX_RE = re.compile(
+    r"^\s*(?:github\s+trending|openai|anthropic|google|microsoft|meta|mistral|perplexity)\s*[:\-–—]+\s*",
+    re.IGNORECASE,
+)
+_TOPIC_KEY_TOKEN_RE = re.compile(r"\d+(?:\.\d+)+|[a-zа-яё0-9]+", re.IGNORECASE)
+_MIN_FUZZY_KEY_LENGTH = 16
+_MIN_FUZZY_TOKEN_COUNT = 3
+_TOPIC_KEY_SIMILARITY_THRESHOLD = 0.86
 
 # Score scale: 85-100 = very strong, 70-84 = good, 50-69 = maybe useful, <50 = usually skip.
 _SOURCE_GROUP_BOOST = {
@@ -39,6 +51,44 @@ _SPAM_KEYWORDS = ["casino", "betting", "sportsbook", "porn", "xxx", "viagra", "c
 _RESEARCH_KEYWORDS = ["paper", "research", "arxiv", "study", "dataset", "eval", "benchmark", "исследован", "датасет"]
 _NARROW_DEV_KEYWORDS = ["library", "framework", "sdk", "api wrapper", "bindings", "kernel", "compiler", "runtime", "orm"]
 _USER_IMPACT_KEYWORDS = ["privacy", "leak", "hack", "lawsuit", "ban", "tracking", "data breach", "утеч", "взлом", "бан", "слеж"]
+
+
+
+def canonical_topic_key(title: str, source_group: str | None = None) -> str:
+    """Return a deterministic lightweight key for grouping the same story across sources."""
+    text = (title or "").strip().lower()
+    text = _SOURCE_PREFIX_RE.sub("", text)
+    if (source_group or "").strip().lower() == "github":
+        text = re.sub(r"^\s*github\s+trending\s*[:\-–—]+\s*", "", text, flags=re.IGNORECASE)
+    tokens = []
+    for match in _TOPIC_KEY_TOKEN_RE.finditer(text):
+        token = match.group(0).lower()
+        if token in _STOP_WORDS:
+            continue
+        tokens.append(token)
+    return " ".join(tokens)
+
+
+def is_similar_topic_key(a: str, b: str) -> bool:
+    """Return True when two canonical topic keys likely describe the same story."""
+    left = (a or "").strip().lower()
+    right = (b or "").strip().lower()
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    left_tokens = left.split()
+    right_tokens = right.split()
+    if (
+        min(len(left), len(right)) < _MIN_FUZZY_KEY_LENGTH
+        or min(len(left_tokens), len(right_tokens)) < _MIN_FUZZY_TOKEN_COUNT
+    ):
+        return False
+    # Avoid merging stories that only share a brand/generic AI term. Require at least
+    # two overlapping tokens before applying the fuzzy ratio.
+    if len(set(left_tokens) & set(right_tokens)) < 2:
+        return False
+    return SequenceMatcher(None, left, right).ratio() >= _TOPIC_KEY_SIMILARITY_THRESHOLD
 
 
 def normalize_topic_title(title: str) -> str:

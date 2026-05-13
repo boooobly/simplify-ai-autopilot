@@ -18,6 +18,9 @@ def run() -> None:
         "category": "model",
         "score": 91,
         "url": "https://example.com/openai-model",
+        "related_sources": "OpenAI blog\nThe Verge AI\nTechCrunch AI\nReddit r/OpenAI",
+        "related_urls": "https://example.com/openai-model\nhttps://example.com/verge\nhttps://example.com/tc\nhttps://reddit.com/r/openai/1",
+        "related_count": 4,
     }
     card = _topic_card_text(topic)
     assert "OpenAI выпустила новую модель" in card
@@ -28,6 +31,8 @@ def run() -> None:
     assert "Оригинал: OpenAI releases a new model" in card
     assert "Почему: Тема набрала высокий вес" in card
     assert "URL: https://example.com/openai-model" in card
+    assert "Повторы: еще 3 источника" in card
+    assert "Также встречалось: The Verge AI, TechCrunch AI, Reddit r/OpenAI" in card
 
     fallback_topic = {
         "id": 8,

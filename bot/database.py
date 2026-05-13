@@ -6,6 +6,30 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from bot.topic_scoring import canonical_topic_key, is_similar_topic_key
+
+
+def _split_related_values(value: str | None) -> list[str]:
+    seen: set[str] = set()
+    values: list[str] = []
+    for raw in (value or "").split("\n"):
+        item = raw.strip()
+        if item and item not in seen:
+            seen.add(item)
+            values.append(item)
+    return values
+
+
+def _join_related_values(*values: str | None) -> str:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for item in _split_related_values(value):
+            if item not in seen:
+                seen.add(item)
+                result.append(item)
+    return "\n".join(result)
+
 
 class DraftDatabase:
     """Simple helper class around sqlite3 for draft storage."""
@@ -69,6 +93,10 @@ class DraftDatabase:
             self._ensure_column(conn, "topic_candidates", "normalized_title", "TEXT")
             self._ensure_column(conn, "topic_candidates", "last_seen_at", "TIMESTAMP")
             self._ensure_column(conn, "topic_candidates", "source_group", "TEXT")
+            self._ensure_column(conn, "topic_candidates", "canonical_key", "TEXT")
+            self._ensure_column(conn, "topic_candidates", "related_sources", "TEXT")
+            self._ensure_column(conn, "topic_candidates", "related_urls", "TEXT")
+            self._ensure_column(conn, "topic_candidates", "related_count", "INTEGER DEFAULT 1")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ai_usage (
@@ -110,6 +138,10 @@ class DraftDatabase:
             """
             CREATE INDEX IF NOT EXISTS idx_topic_candidates_normalized_title
             ON topic_candidates (normalized_title)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_topic_candidates_canonical_key
+            ON topic_candidates (canonical_key)
             """,
             """
             CREATE INDEX IF NOT EXISTS idx_ai_usage_created_at
@@ -366,6 +398,118 @@ class DraftDatabase:
             conn.commit()
             return cursor.rowcount > 0
 
+    def _merge_topic_candidate_row(
+        self,
+        conn: sqlite3.Connection,
+        existing: sqlite3.Row,
+        *,
+        title: str,
+        url: str,
+        source: str,
+        category: str,
+        score: int,
+        reason: str,
+        normalized_title: str,
+        canonical_key: str,
+        source_group: str,
+        title_ru: str | None,
+        summary_ru: str | None,
+        angle_ru: str | None,
+        reason_ru: str | None,
+        original_description: str | None,
+    ) -> None:
+        existing_sources = _join_related_values(existing["related_sources"], existing["source"], source)
+        existing_urls = _join_related_values(existing["related_urls"], existing["url"], url)
+        related_count = max(1, len(_split_related_values(existing_urls)))
+        existing_score = int(existing["score"] or 0)
+        if score > existing_score:
+            category_to_store = category
+            score_to_store = score
+            reason_to_store = reason
+            title_ru_to_store = title_ru
+            summary_ru_to_store = summary_ru
+            angle_ru_to_store = angle_ru
+            reason_ru_to_store = reason_ru
+            original_description_to_store = original_description
+        else:
+            category_to_store = existing["category"]
+            score_to_store = existing_score
+            reason_to_store = existing["reason"]
+            title_ru_to_store = None
+            summary_ru_to_store = None
+            angle_ru_to_store = None
+            reason_ru_to_store = None
+            original_description_to_store = None
+        conn.execute(
+            """
+            UPDATE topic_candidates
+            SET last_seen_at = CURRENT_TIMESTAMP,
+                category = ?,
+                score = ?,
+                reason = ?,
+                title_ru = COALESCE(NULLIF(?, ''), title_ru),
+                summary_ru = COALESCE(NULLIF(?, ''), summary_ru),
+                angle_ru = COALESCE(NULLIF(?, ''), angle_ru),
+                reason_ru = COALESCE(NULLIF(?, ''), reason_ru),
+                original_description = COALESCE(NULLIF(?, ''), original_description),
+                normalized_title = COALESCE(NULLIF(normalized_title, ''), ?),
+                canonical_key = COALESCE(NULLIF(canonical_key, ''), ?),
+                source_group = COALESCE(source_group, ?),
+                related_sources = ?,
+                related_urls = ?,
+                related_count = ?
+            WHERE id = ?
+            """,
+            (
+                category_to_store,
+                score_to_store,
+                reason_to_store,
+                title_ru_to_store,
+                summary_ru_to_store,
+                angle_ru_to_store,
+                reason_ru_to_store,
+                original_description_to_store,
+                normalized_title,
+                canonical_key,
+                source_group,
+                existing_sources,
+                existing_urls,
+                related_count,
+                int(existing["id"]),
+            ),
+        )
+
+    def _find_similar_topic_candidate(self, conn: sqlite3.Connection, canonical_key: str) -> sqlite3.Row | None:
+        if not canonical_key:
+            return None
+        exact = conn.execute(
+            """
+            SELECT * FROM topic_candidates
+            WHERE canonical_key = ?
+              AND status != 'rejected'
+            ORDER BY score DESC, created_at DESC
+            LIMIT 1
+            """,
+            (canonical_key,),
+        ).fetchone()
+        if exact:
+            return exact
+        rows = conn.execute(
+            """
+            SELECT * FROM topic_candidates
+            WHERE canonical_key IS NOT NULL
+              AND canonical_key != ''
+              AND status != 'rejected'
+              AND created_at >= datetime('now', '-21 days')
+            ORDER BY created_at DESC
+            LIMIT 200
+            """
+        ).fetchall()
+        for row in rows:
+            if is_similar_topic_key(canonical_key, str(row["canonical_key"] or "")):
+                return row
+        return None
+
     def upsert_topic_candidate_with_reason(
         self,
         title: str,
@@ -382,52 +526,99 @@ class DraftDatabase:
         angle_ru: str | None = None,
         reason_ru: str | None = None,
         original_description: str | None = None,
+        canonical_key: str | None = None,
     ) -> str:
+        canonical_key = (canonical_key or canonical_topic_key(title, source_group)).strip()
         with self._connect() as conn:
             existing = conn.execute(
-                "SELECT id, category, score, reason FROM topic_candidates WHERE url = ?",
+                "SELECT * FROM topic_candidates WHERE url = ?",
                 (url,),
             ).fetchone()
             if existing:
-                conn.execute(
-                    """
-                    UPDATE topic_candidates
-                    SET last_seen_at = CURRENT_TIMESTAMP,
-                        category = ?,
-                        score = ?,
-                        reason = ?,
-                        title_ru = COALESCE(NULLIF(?, ''), title_ru),
-                        summary_ru = COALESCE(NULLIF(?, ''), summary_ru),
-                        angle_ru = COALESCE(NULLIF(?, ''), angle_ru),
-                        reason_ru = COALESCE(NULLIF(?, ''), reason_ru),
-                        original_description = COALESCE(NULLIF(?, ''), original_description),
-                        normalized_title = COALESCE(normalized_title, ?),
-                        source_group = COALESCE(source_group, ?)
-                    WHERE id = ?
-                    """,
-                    (category, score, reason, title_ru, summary_ru, angle_ru, reason_ru, original_description, normalized_title, source_group, int(existing["id"])),
+                self._merge_topic_candidate_row(
+                    conn,
+                    existing,
+                    title=title,
+                    url=url,
+                    source=source,
+                    category=category,
+                    score=score,
+                    reason=reason,
+                    normalized_title=normalized_title,
+                    canonical_key=canonical_key,
+                    source_group=source_group,
+                    title_ru=title_ru,
+                    summary_ru=summary_ru,
+                    angle_ru=angle_ru,
+                    reason_ru=reason_ru,
+                    original_description=original_description,
                 )
                 conn.commit()
                 return "existing_url"
-            near_duplicate = conn.execute(
-                """
-                SELECT id FROM topic_candidates
-                WHERE normalized_title = ?
-                  AND status != 'rejected'
-                LIMIT 1
-                """,
-                (normalized_title,),
-            ).fetchone()
-            if near_duplicate:
-                return "near_duplicate"
+
+            similar = self._find_similar_topic_candidate(conn, canonical_key)
+            if not similar and normalized_title:
+                similar = conn.execute(
+                    """
+                    SELECT * FROM topic_candidates
+                    WHERE normalized_title = ?
+                      AND status != 'rejected'
+                    ORDER BY score DESC, created_at DESC
+                    LIMIT 1
+                    """,
+                    (normalized_title,),
+                ).fetchone()
+            if similar:
+                self._merge_topic_candidate_row(
+                    conn,
+                    similar,
+                    title=title,
+                    url=url,
+                    source=source,
+                    category=category,
+                    score=score,
+                    reason=reason,
+                    normalized_title=normalized_title,
+                    canonical_key=canonical_key,
+                    source_group=source_group,
+                    title_ru=title_ru,
+                    summary_ru=summary_ru,
+                    angle_ru=angle_ru,
+                    reason_ru=reason_ru,
+                    original_description=original_description,
+                )
+                conn.commit()
+                return "merged_story"
+
             cursor = conn.execute(
                 """
                 INSERT INTO topic_candidates (
-                    title, url, source, published_at, status, category, score, reason, title_ru, summary_ru, angle_ru, reason_ru, original_description, normalized_title, source_group, created_at, last_seen_at
+                    title, url, source, published_at, status, category, score, reason,
+                    title_ru, summary_ru, angle_ru, reason_ru, original_description,
+                    normalized_title, source_group, canonical_key, related_sources,
+                    related_urls, related_count, created_at, last_seen_at
                 )
-                VALUES (?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """,
-                (title, url, source, published_at, category, score, reason, title_ru, summary_ru, angle_ru, reason_ru, original_description, normalized_title, source_group),
+                (
+                    title,
+                    url,
+                    source,
+                    published_at,
+                    category,
+                    score,
+                    reason,
+                    title_ru,
+                    summary_ru,
+                    angle_ru,
+                    reason_ru,
+                    original_description,
+                    normalized_title,
+                    source_group,
+                    canonical_key,
+                    source,
+                    url,
+                ),
             )
             conn.commit()
             return "inserted" if cursor.rowcount > 0 else "existing_url"
