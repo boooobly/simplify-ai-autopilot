@@ -42,6 +42,9 @@ ACTIONABLE_DRAFT_STATUSES = {"draft", "approved"}
 TELEGRAM_CAPTION_LIMIT = 1024
 SHORT_MEDIA_PREVIEW_LIMIT = 850
 EMPTY_AI_REPLY_TEXT = "Модель вернула пустой ответ. Черновик не создан. Попробуй ещё раз или смени MODEL_DRAFT."
+CLEANUP_CONFIRM_TTL_SECONDS = 10 * 60
+CLEANUP_PREVIEW_GENERATED_AT_KEY = "cleanup_preview_generated_at"
+CLEANUP_PREVIEW_COUNTS_KEY = "cleanup_preview_counts"
 REWRITE_DRAFT_ACTIONS = {
     "rewrite_remove_fluff": {
         "mode": "remove_fluff",
@@ -218,6 +221,83 @@ def _render_usage_text(summary: dict[str, object], period_title: str, costs_enab
     return "\n".join(lines)
 
 
+
+
+def _cleanup_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🧹 Очистить", callback_data="cleanup_confirm:0")],
+            [InlineKeyboardButton("Отмена", callback_data="cleanup_cancel:0")],
+        ]
+    )
+
+
+def _settings_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🧹 Очистка базы", callback_data="menu_cleanup_preview")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")],
+        ]
+    )
+
+
+def _cleanup_total(counts: dict[str, int]) -> int:
+    return int(counts.get("total") or sum(int(value) for key, value in counts.items() if key != "total"))
+
+
+def _render_cleanup_preview_text(counts: dict[str, int]) -> str:
+    return "\n".join(
+        [
+            "🧹 Предпросмотр очистки базы",
+            "",
+            f"Старые отклонённые темы: {_fmt_int(int(counts.get('old_rejected_topics', 0)))}",
+            f"Старые использованные темы: {_fmt_int(int(counts.get('old_used_topics', 0)))}",
+            f"Старые новые темы: {_fmt_int(int(counts.get('old_new_topics', 0)))}",
+            f"Старые отклонённые черновики: {_fmt_int(int(counts.get('old_rejected_drafts', 0)))}",
+            f"Старые failed-черновики: {_fmt_int(int(counts.get('old_failed_drafts', 0)))}",
+            f"Залежавшиеся нетронутые draft-черновики: {_fmt_int(int(counts.get('stale_draft_drafts', 0)))}",
+            "",
+            f"Всего строк к удалению: {_fmt_int(_cleanup_total(counts))}",
+            "",
+            "Защита: scheduled/publishing/published/approved, черновики с медиа и ai_usage не удаляются.",
+            "Для применения нажми кнопку или отправь /cleanup_confirm в течение 10 минут.",
+        ]
+    )
+
+
+def _render_cleanup_applied_text(counts: dict[str, int]) -> str:
+    return _render_cleanup_preview_text(counts).replace(
+        "🧹 Предпросмотр очистки базы", "✅ Очистка базы выполнена"
+    ).replace(
+        "Всего строк к удалению:", "Всего строк удалено:"
+    ).replace(
+        "Для применения нажми кнопку или отправь /cleanup_confirm в течение 10 минут.",
+        "Автоматическая очистка не включалась.",
+    )
+
+
+def _store_cleanup_preview(context: ContextTypes.DEFAULT_TYPE, counts: dict[str, int]) -> None:
+    context.user_data[CLEANUP_PREVIEW_GENERATED_AT_KEY] = datetime.now(timezone.utc).timestamp()
+    context.user_data[CLEANUP_PREVIEW_COUNTS_KEY] = dict(counts)
+
+
+def _clear_cleanup_preview(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop(CLEANUP_PREVIEW_GENERATED_AT_KEY, None)
+    context.user_data.pop(CLEANUP_PREVIEW_COUNTS_KEY, None)
+
+
+def _cleanup_preview_is_fresh(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    generated_at = context.user_data.get(CLEANUP_PREVIEW_GENERATED_AT_KEY)
+    counts = context.user_data.get(CLEANUP_PREVIEW_COUNTS_KEY)
+    if not isinstance(counts, dict):
+        return False
+    try:
+        generated_ts = float(generated_at)
+    except (TypeError, ValueError):
+        return False
+    age = datetime.now(timezone.utc).timestamp() - generated_ts
+    return 0 <= age <= CLEANUP_CONFIRM_TTL_SECONDS
+
 def _disabled_link_preview_options() -> LinkPreviewOptions:
     return LinkPreviewOptions(is_disabled=True)
 
@@ -311,6 +391,37 @@ def _ai_provider_for_status(settings) -> str:
     if settings.openai_api_key:
         return "OpenAI"
     return "не настроен"
+
+
+async def cleanup_preview_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    if not _is_admin(update.effective_user.id if update.effective_user else None, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+    db: DraftDatabase = context.bot_data["db"]
+    counts = db.cleanup_preview()
+    _store_cleanup_preview(context, counts)
+    if update.message:
+        await update.message.reply_text(_render_cleanup_preview_text(counts), reply_markup=_cleanup_keyboard())
+
+
+async def cleanup_confirm_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    if not _is_admin(update.effective_user.id if update.effective_user else None, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+    if not _cleanup_preview_is_fresh(context):
+        _clear_cleanup_preview(context)
+        if update.message:
+            await update.message.reply_text("Сначала запусти /cleanup_preview. Предпросмотр действует 10 минут.")
+        return
+    db: DraftDatabase = context.bot_data["db"]
+    counts = db.cleanup_apply()
+    _clear_cleanup_preview(context)
+    if update.message:
+        await update.message.reply_text(_render_cleanup_applied_text(counts), reply_markup=_admin_reply_keyboard())
 
 
 async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1426,7 +1537,8 @@ def _admin_reply_keyboard() -> ReplyKeyboardMarkup:
 
 async def _reply_admin_text(update: Update, text: str, **kwargs) -> None:
     if update.message:
-        await update.message.reply_text(text, reply_markup=_admin_reply_keyboard(), **kwargs)
+        reply_markup = kwargs.pop("reply_markup", _admin_reply_keyboard())
+        await update.message.reply_text(text, reply_markup=reply_markup, **kwargs)
 
 
 async def _handle_navigation_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
@@ -1465,7 +1577,7 @@ async def _handle_navigation_text(update: Update, context: ContextTypes.DEFAULT_
         await style_guide_command(update, context)
         return True
     if text == NAV_SETTINGS:
-        await _reply_admin_text(update, _settings_text(settings), link_preview_options=_disabled_link_preview_options())
+        await _reply_admin_text(update, _settings_text(settings), reply_markup=_settings_keyboard(), link_preview_options=_disabled_link_preview_options())
         return True
     if text == NAV_HELP:
         await _reply_admin_text(update, "Нажми кнопку ниже для навигации или используй /menu.\nТакже можешь прислать ссылку для черновика.")
@@ -2597,6 +2709,21 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     try:
+        if action == "cleanup_cancel":
+            _clear_cleanup_preview(context)
+            await _edit_callback_message(query, "Очистка отменена.", reply_markup=_back_to_menu_keyboard())
+            return
+
+        if action == "cleanup_confirm":
+            if not _cleanup_preview_is_fresh(context):
+                _clear_cleanup_preview(context)
+                await _edit_callback_message(query, "Сначала запусти /cleanup_preview. Предпросмотр действует 10 минут.")
+                return
+            counts = db.cleanup_apply()
+            _clear_cleanup_preview(context)
+            await _edit_callback_message(query, _render_cleanup_applied_text(counts), reply_markup=_back_to_menu_keyboard())
+            return
+
         if action == "topic_generate":
             topic_id = draft_id
             new_draft_id, error = await _create_draft_from_topic(
@@ -3347,7 +3474,11 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
         summary = await _schedule_generated_plan(context=context, settings=settings, db=db, day_offset=1)
         await context.bot.send_message(chat_id=settings.admin_id, text=summary)
     elif data == "menu_settings":
-        await _edit_callback_message(query, _settings_text(settings), reply_markup=_back_to_menu_keyboard())
+        await _edit_callback_message(query, _settings_text(settings), reply_markup=_settings_keyboard())
+    elif data == "menu_cleanup_preview":
+        counts = db.cleanup_preview()
+        _store_cleanup_preview(context, counts)
+        await _edit_callback_message(query, _render_cleanup_preview_text(counts), reply_markup=_cleanup_keyboard())
     elif data == "menu_usage":
         summary = db.get_ai_usage_summary(days=1)
         costs_enabled = any([
@@ -3387,6 +3518,8 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             "/usage_today - расходы ИИ за сегодня\n"
             "/usage_7d - расходы ИИ за 7 дней\n"
             "/usage_month - расходы ИИ за 30 дней\n"
+            "/cleanup_preview - показать безопасную очистку базы\n"
+            "/cleanup_confirm - применить свежий предпросмотр очистки\n"
             "/style_guide - краткая сводка текущего стиля генерации\n"
             "/emoji_ids - показать custom_emoji_id из сообщения/реплая\n"
             "/collect - собрать темы\n"

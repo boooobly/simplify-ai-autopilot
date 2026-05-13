@@ -245,6 +245,88 @@ def _assert_topic_candidates(db: DraftDatabase) -> None:
     assert "https://official/model" in [candidate["url"] for candidate in hot_candidates]
 
 
+
+def _insert_topic_for_cleanup(db: DraftDatabase, url: str, status: str, last_seen_at: str | None, created_at: str) -> int:
+    with db._connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO topic_candidates (title, url, source, status, created_at, last_seen_at)
+            VALUES (?, ?, 'selftest', ?, ?, ?)
+            """,
+            (url, url, status, created_at, last_seen_at),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
+def _insert_draft_for_cleanup(
+    db: DraftDatabase,
+    status: str,
+    updated_at: str | None,
+    *,
+    media_url: str | None = None,
+    media_type: str | None = None,
+    scheduled_at: str | None = None,
+) -> int:
+    with db._connect() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO drafts (content, status, updated_at, media_url, media_type, scheduled_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (f"cleanup {status}", status, updated_at, media_url, media_type, scheduled_at),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
+def _assert_cleanup_flow(db: DraftDatabase) -> None:
+    old = "2000-01-01 00:00:00"
+    fresh = "2999-01-01 00:00:00"
+
+    old_rejected_topic = _insert_topic_for_cleanup(db, "https://cleanup/rejected-old", "rejected", old, old)
+    old_used_topic = _insert_topic_for_cleanup(db, "https://cleanup/used-old", "used", old, old)
+    old_new_topic = _insert_topic_for_cleanup(db, "https://cleanup/new-old", "new", None, old)
+    fresh_new_topic = _insert_topic_for_cleanup(db, "https://cleanup/new-fresh", "new", fresh, fresh)
+    missing_topic = _insert_topic_for_cleanup(db, "https://cleanup/missing", "rejected", None, "not-a-date")
+
+    old_rejected_draft = _insert_draft_for_cleanup(db, "rejected", old)
+    old_failed_draft = _insert_draft_for_cleanup(db, "failed", old)
+    old_stale_draft = _insert_draft_for_cleanup(db, "draft", old)
+    protected_status_ids = [
+        _insert_draft_for_cleanup(db, status, old)
+        for status in ["scheduled", "publishing", "published", "approved"]
+    ]
+    media_draft = _insert_draft_for_cleanup(db, "failed", old, media_url="file-id", media_type="photo")
+    fresh_draft = _insert_draft_for_cleanup(db, "failed", fresh)
+    scheduled_at_draft = _insert_draft_for_cleanup(db, "draft", old, scheduled_at="2030-01-01 00:00:00")
+    missing_draft = _insert_draft_for_cleanup(db, "failed", "not-a-date")
+
+    db.record_ai_usage(provider="openrouter", model="cleanup-model", operation="cleanup-test")
+    preview = db.cleanup_preview()
+    assert preview == {
+        "old_rejected_topics": 1,
+        "old_used_topics": 1,
+        "old_new_topics": 1,
+        "old_rejected_drafts": 1,
+        "old_failed_drafts": 1,
+        "stale_draft_drafts": 1,
+        "total": 6,
+    }
+    applied = db.cleanup_apply()
+    assert applied == preview
+
+    for removed_id in [old_rejected_draft, old_failed_draft, old_stale_draft]:
+        assert db.get_draft(removed_id) is None
+    for kept_id in [*protected_status_ids, media_draft, fresh_draft, scheduled_at_draft, missing_draft]:
+        assert db.get_draft(kept_id) is not None
+    for removed_topic_id in [old_rejected_topic, old_used_topic, old_new_topic]:
+        assert db.get_topic_candidate(removed_topic_id) is None
+    for kept_topic_id in [fresh_new_topic, missing_topic]:
+        assert db.get_topic_candidate(kept_topic_id) is not None
+    assert db.get_ai_usage_summary(days=36500)["requests"] >= 1
+    assert db.cleanup_preview()["total"] == 0
+
 def _assert_ai_usage_summary(db: DraftDatabase) -> None:
     db.record_ai_usage(
         provider="openrouter",
@@ -282,6 +364,7 @@ def run() -> None:
         _assert_publishing_recovery(db)
         _assert_topic_candidates(db)
         _assert_ai_usage_summary(db)
+        _assert_cleanup_flow(db)
 
 
 if __name__ == "__main__":

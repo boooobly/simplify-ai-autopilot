@@ -163,6 +163,98 @@ class DraftDatabase:
                 f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql_type}"
             )
 
+
+    @staticmethod
+    def _cleanup_counts_template() -> dict[str, int]:
+        return {
+            "old_rejected_topics": 0,
+            "old_used_topics": 0,
+            "old_new_topics": 0,
+            "old_rejected_drafts": 0,
+            "old_failed_drafts": 0,
+            "stale_draft_drafts": 0,
+            "total": 0,
+        }
+
+    @staticmethod
+    def _topic_cleanup_where(status: str, age_days: int) -> tuple[str, tuple[Any, ...]]:
+        age_days = max(1, int(age_days))
+        # last_seen_at is the safest activity timestamp for merged/re-seen topics.
+        # Fall back to created_at only when last_seen_at is empty. datetime(...)
+        # returns NULL for missing/unparsable values, and those rows are excluded.
+        where_sql = """
+            status = ?
+            AND datetime(COALESCE(NULLIF(last_seen_at, ''), NULLIF(created_at, ''))) IS NOT NULL
+            AND datetime(COALESCE(NULLIF(last_seen_at, ''), NULLIF(created_at, ''))) < datetime('now', ?)
+        """
+        return where_sql, (status, f"-{age_days} days")
+
+    @staticmethod
+    def _draft_cleanup_where(status: str, age_days: int, *, stale_draft: bool = False) -> tuple[str, tuple[Any, ...]]:
+        age_days = max(1, int(age_days))
+        clauses = [
+            "status = ?",
+            "datetime(NULLIF(updated_at, '')) IS NOT NULL",
+            "datetime(NULLIF(updated_at, '')) < datetime('now', ?)",
+            "COALESCE(NULLIF(media_url, ''), NULLIF(media_type, '')) IS NULL",
+        ]
+        if stale_draft:
+            clauses.append("scheduled_at IS NULL")
+        return " AND ".join(clauses), (status, f"-{age_days} days")
+
+    def cleanup_preview(
+        self,
+        *,
+        topic_age_days: int = 30,
+        rejected_draft_age_days: int = 30,
+        failed_draft_age_days: int = 30,
+        stale_draft_age_days: int = 45,
+    ) -> dict[str, int]:
+        """Return conservative cleanup counts without deleting any rows."""
+
+        counts = self._cleanup_counts_template()
+        queries = [
+            ("old_rejected_topics", "topic_candidates", self._topic_cleanup_where("rejected", topic_age_days)),
+            ("old_used_topics", "topic_candidates", self._topic_cleanup_where("used", topic_age_days)),
+            ("old_new_topics", "topic_candidates", self._topic_cleanup_where("new", topic_age_days)),
+            ("old_rejected_drafts", "drafts", self._draft_cleanup_where("rejected", rejected_draft_age_days)),
+            ("old_failed_drafts", "drafts", self._draft_cleanup_where("failed", failed_draft_age_days)),
+            ("stale_draft_drafts", "drafts", self._draft_cleanup_where("draft", stale_draft_age_days, stale_draft=True)),
+        ]
+        with self._connect() as conn:
+            for key, table, (where_sql, params) in queries:
+                row = conn.execute(f"SELECT COUNT(*) AS count FROM {table} WHERE {where_sql}", params).fetchone()
+                counts[key] = int(row["count"] if row else 0)
+        counts["total"] = sum(value for key, value in counts.items() if key != "total")
+        return counts
+
+    def cleanup_apply(
+        self,
+        *,
+        topic_age_days: int = 30,
+        rejected_draft_age_days: int = 30,
+        failed_draft_age_days: int = 30,
+        stale_draft_age_days: int = 45,
+    ) -> dict[str, int]:
+        """Delete only rows eligible under the conservative cleanup rules."""
+
+        counts = self._cleanup_counts_template()
+        deletions = [
+            ("old_rejected_topics", "topic_candidates", self._topic_cleanup_where("rejected", topic_age_days)),
+            ("old_used_topics", "topic_candidates", self._topic_cleanup_where("used", topic_age_days)),
+            ("old_new_topics", "topic_candidates", self._topic_cleanup_where("new", topic_age_days)),
+            ("old_rejected_drafts", "drafts", self._draft_cleanup_where("rejected", rejected_draft_age_days)),
+            ("old_failed_drafts", "drafts", self._draft_cleanup_where("failed", failed_draft_age_days)),
+            ("stale_draft_drafts", "drafts", self._draft_cleanup_where("draft", stale_draft_age_days, stale_draft=True)),
+        ]
+        with self._connect() as conn:
+            for key, table, (where_sql, params) in deletions:
+                cursor = conn.execute(f"DELETE FROM {table} WHERE {where_sql}", params)
+                counts[key] = int(cursor.rowcount if cursor.rowcount is not None else 0)
+            conn.commit()
+        counts["total"] = sum(value for key, value in counts.items() if key != "total")
+        return counts
+
     def create_draft(
         self,
         content: str,
