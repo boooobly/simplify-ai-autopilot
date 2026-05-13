@@ -65,6 +65,8 @@ from bot.writer import (
     enrich_topic_metadata_ru,
     polish_post_draft,
     rewrite_post_draft,
+    _looks_like_useful_russian_metadata,
+    _parse_topic_metadata_fields,
 )
 
 logger = logging.getLogger(__name__)
@@ -800,10 +802,10 @@ async def _translate_topic_title_if_available(item, settings, db: DraftDatabase)
 
 
 def _parse_topic_metadata_result_content(content: str) -> tuple[str, str, str, str] | None:
-    parts = [part.strip() for part in content.splitlines() if part.strip()]
-    if len(parts) < 3:
-        return None
-    return parts[0], parts[1], parts[2], (parts[3] if len(parts) >= 4 else "")
+    values = _parse_topic_metadata_fields(content)
+    if all(values.get(k) for k in ("title_ru", "summary_ru", "angle_ru", "reason_ru")):
+        return values["title_ru"], values["summary_ru"], values["angle_ru"], values["reason_ru"]
+    return None
 
 
 async def _reenrich_topic_candidate_display_metadata(
@@ -833,14 +835,20 @@ async def _reenrich_topic_candidate_display_metadata(
     except Exception as exc:
         logger.warning("Manual topic re-enrichment failed: topic_id=%s error=%s", topic_id, exc)
         return None, "Не удалось заново перевести тему."
-    if not result or not result.content.strip():
-        return None, "Модель не вернула перевод темы."
+    if not result:
+        return None, "Модель вернула ответ, но бот не смог разобрать формат."
+    if not result.content.strip():
+        return None, "Модель вернула пустой ответ."
     parsed = _parse_topic_metadata_result_content(result.content)
     if parsed is None:
-        return None, "Модель вернула неполные данные темы."
+        return None, "Модель вернула ответ, но бот не смог разобрать формат."
     title_ru, summary_ru, angle_ru, reason_ru = parsed
     if not all([title_ru, summary_ru, angle_ru, reason_ru]):
-        return None, "Модель вернула неполные данные темы."
+        return None, "Модель вернула ответ, но бот не смог разобрать формат."
+    if not _looks_like_useful_russian_metadata(
+        title_ru, summary_ru, angle_ru, original_title=str(topic.get("title") or "")
+    ):
+        return None, "Модель вернула слишком английский текст, перевод отклонён."
     db.force_update_topic_candidate_display_fields(
         topic_id,
         title_ru=title_ru,

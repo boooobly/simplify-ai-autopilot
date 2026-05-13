@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -135,43 +136,154 @@ def _contains_cyrillic_text(text: str) -> bool:
     return any("а" <= ch.lower() <= "я" or ch.lower() == "ё" for ch in text or "")
 
 
-def _looks_like_useful_russian_metadata(title_ru: str, summary_ru: str, angle_ru: str) -> bool:
-    """Reject AI metadata that is still mostly untranslated English text."""
+TOPIC_METADATA_AUTO_REASON_RU = "Тема выглядит полезной для админского просмотра, но причина важности была восстановлена автоматически."
+
+
+def _normalize_topic_text_for_compare(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip()).casefold()
+
+
+def _is_mostly_english_text(text: str) -> bool:
+    latin_chars = len(re.findall(r"[A-Za-z]", text or ""))
+    cyrillic_chars = len(re.findall(r"[А-Яа-яЁё]", text or ""))
+    if cyrillic_chars == 0:
+        return latin_chars > 0
+    return latin_chars >= max(24, cyrillic_chars * 2)
+
+
+def _looks_like_useful_russian_metadata(
+    title_ru: str,
+    summary_ru: str,
+    angle_ru: str,
+    *,
+    original_title: str = "",
+) -> bool:
+    """Reject metadata only when the title itself is still effectively English."""
     combined = " ".join([title_ru, summary_ru, angle_ru]).strip()
     if not combined or not _contains_cyrillic_text(combined):
         return False
-    # Preserve names like PyTorch/ChatGPT/LLM, but avoid accepting a title that only
-    # adds a Russian label before an untouched English description.
-    bad_title_patterns = [
-        r"(?i)open-source\s+проект:\s*(?:implement|build|create|learn|introducing|release|launch)",
-        r"(?i)проект:\s*(?:implement|build|create|learn|introducing|release|launch)",
-        r"(?i):\s*(?:implement|build|create|learn)\b",
-    ]
-    return not any(re.search(pattern, title_ru) for pattern in bad_title_patterns)
+    if original_title and _normalize_topic_text_for_compare(title_ru) == _normalize_topic_text_for_compare(original_title):
+        return False
+    return not _is_mostly_english_text(title_ru)
+
+
+def _strip_topic_metadata_markdown(content: str) -> str:
+    text = (content or "").strip()
+    text = re.sub(r"^```[\w+-]*\s*\n", "", text)
+    text = re.sub(r"\n?```$", "", text).strip()
+    return text
+
+
+def _clean_topic_metadata_value(value: object) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"^[-*•]+\s*", "", text).strip()
+    return text.strip().strip(',').strip().strip('"“”')
+
+
+def _topic_metadata_key_map() -> dict[str, str]:
+    aliases = {
+        "title_ru": ["title_ru", "title", "заголовок", "название"],
+        "summary_ru": ["summary_ru", "summary", "о чем", "о чём", "кратко", "описание", "суть"],
+        "angle_ru": ["angle_ru", "angle", "идея", "ракурс", "подача"],
+        "reason_ru": ["reason_ru", "reason", "importance", "why", "почему", "важность", "причина"],
+    }
+    return {alias.casefold(): target for target, names in aliases.items() for alias in names}
+
+
+def _parse_topic_metadata_json(content: str, field_map: dict[str, str]) -> dict[str, str]:
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    values: dict[str, str] = {}
+    for key, value in payload.items():
+        target = field_map.get(str(key).strip().casefold())
+        if target and value is not None:
+            values[target] = _clean_topic_metadata_value(value)
+    return values
+
+
+def _meaningful_topic_lines(content: str) -> list[str]:
+    lines: list[str] = []
+    for line in content.splitlines():
+        cleaned = _clean_topic_metadata_value(line)
+        if not cleaned or cleaned in {"{", "}", "[", "]"}:
+            continue
+        lines.append(cleaned)
+    return lines
 
 
 def _parse_topic_metadata_fields(content: str) -> dict[str, str]:
+    cleaned_content = _strip_topic_metadata_markdown(content)
     values: dict[str, str] = {}
-    field_map = {
-        "title": "title_ru",
-        "title_ru": "title_ru",
-        "summary": "summary_ru",
-        "summary_ru": "summary_ru",
-        "angle": "angle_ru",
-        "angle_ru": "angle_ru",
-        "reason": "reason_ru",
-        "reason_ru": "reason_ru",
-    }
-    for line in content.splitlines():
-        cleaned = line.strip()
+    field_map = _topic_metadata_key_map()
+
+    values.update(_parse_topic_metadata_json(cleaned_content, field_map))
+    if all(values.get(k) for k in ("title_ru", "summary_ru", "angle_ru", "reason_ru")):
+        return values
+
+    for line in cleaned_content.splitlines():
+        cleaned = line.strip().strip(',')
         if not cleaned or ":" not in cleaned:
             continue
+        cleaned = re.sub(r"^[-*•]?\s*\d+[.)]\s*", "", cleaned).strip()
         key, value = cleaned.split(":", 1)
-        normalized_key = key.strip().lower()
+        normalized_key = key.strip().strip('"“”').casefold()
         target = field_map.get(normalized_key)
         if target:
-            values[target] = value.strip().strip('"“”')
+            values[target] = _clean_topic_metadata_value(value)
+    if all(values.get(k) for k in ("title_ru", "summary_ru", "angle_ru", "reason_ru")):
+        return values
+
+    numbered: list[tuple[int, str]] = []
+    for line in cleaned_content.splitlines():
+        match = re.match(r"^\s*(\d{1,2})[.)]\s*(.+?)\s*$", line)
+        if match:
+            numbered.append((int(match.group(1)), _clean_topic_metadata_value(match.group(2))))
+    if len(numbered) >= 4:
+        ordered = [value for _, value in sorted(numbered, key=lambda item: item[0]) if value]
+        for key, value in zip(("title_ru", "summary_ru", "angle_ru", "reason_ru"), ordered):
+            values.setdefault(key, value)
+        if all(values.get(k) for k in ("title_ru", "summary_ru", "angle_ru", "reason_ru")):
+            return values
+
+    lines = _meaningful_topic_lines(cleaned_content)
+    if len(lines) >= 4 and not any(":" in line for line in lines[:4]):
+        for key, value in zip(("title_ru", "summary_ru", "angle_ru", "reason_ru"), lines[:4]):
+            values.setdefault(key, value)
+        if all(values.get(k) for k in ("title_ru", "summary_ru", "angle_ru", "reason_ru")):
+            return values
+
+    cyrillic_lines = [line for line in lines if _contains_cyrillic_text(line)]
+    if len(cyrillic_lines) >= 3:
+        values.setdefault("title_ru", cyrillic_lines[0])
+        values.setdefault("summary_ru", cyrillic_lines[1])
+        values.setdefault("angle_ru", cyrillic_lines[2])
+        values.setdefault("reason_ru", TOPIC_METADATA_AUTO_REASON_RU)
     return values
+
+
+def _topic_metadata_failure_reason(values: dict[str, str], title_ru: str = "", original_title: str = "") -> str:
+    missing = [key for key in ("title_ru", "summary_ru", "angle_ru", "reason_ru") if not values.get(key)]
+    if missing:
+        return "missing fields: " + ", ".join(missing)
+    if original_title and _normalize_topic_text_for_compare(title_ru) == _normalize_topic_text_for_compare(original_title):
+        return "title equals original English title"
+    if _is_mostly_english_text(title_ru):
+        return "title is mostly English"
+    return "metadata failed Russian usefulness validation"
+
+
+def _log_invalid_topic_metadata(model: str, original_title: str, reason: str, raw_output: str) -> None:
+    logger.warning(
+        "Topic metadata enrichment returned invalid output: model=%s original_title=%r reason=%s raw_output=%r",
+        model,
+        (original_title or "")[:120],
+        reason,
+        (raw_output or "")[:500],
+    )
 
 
 def enrich_topic_metadata_ru(
@@ -225,13 +337,19 @@ def enrich_topic_metadata_ru(
         return None
     values = _parse_topic_metadata_fields(result.content)
     if not all(values.get(k) for k in ("title_ru", "summary_ru", "angle_ru", "reason_ru")):
+        _log_invalid_topic_metadata(model, clean_title, _topic_metadata_failure_reason(values), result.content)
         return None
     title_ru = values["title_ru"][:180]
     summary_ru = values["summary_ru"][:260]
     angle_ru = values["angle_ru"][:260]
     reason_ru = values["reason_ru"][:220]
-    if not _looks_like_useful_russian_metadata(title_ru, summary_ru, angle_ru):
-        logger.warning("Topic metadata enrichment returned unusable Russian metadata")
+    if not _looks_like_useful_russian_metadata(title_ru, summary_ru, angle_ru, original_title=clean_title):
+        _log_invalid_topic_metadata(
+            model,
+            clean_title,
+            _topic_metadata_failure_reason(values, title_ru, clean_title),
+            result.content,
+        )
         return None
     result.content = "\n".join([title_ru, summary_ru, angle_ru, reason_ru])
     return result
