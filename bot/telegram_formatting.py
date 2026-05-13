@@ -220,9 +220,9 @@ def _alias_fallback_variants(alias: str, configured_fallback: str | None = None)
 
 
 def _strict_raw_fallback_replacements(custom_emoji_aliases: dict[str, tuple[str, str]] | None) -> dict[str, str]:
-    replacements: dict[str, str] = {}
+    raw_to_tags: dict[str, set[str]] = {}
     if not custom_emoji_aliases:
-        return replacements
+        return {}
 
     for alias, emoji_data in custom_emoji_aliases.items():
         valid_data = _valid_alias_data(emoji_data)
@@ -231,8 +231,9 @@ def _strict_raw_fallback_replacements(custom_emoji_aliases: dict[str, tuple[str,
         fallback, emoji_id = valid_data
         tag = _custom_emoji_tag(fallback, emoji_id)
         for raw_fallback in _alias_fallback_variants(alias, fallback):
-            replacements.setdefault(html.escape(raw_fallback), tag)
-    return replacements
+            raw_to_tags.setdefault(html.escape(raw_fallback), set()).add(tag)
+
+    return {raw_fallback: next(iter(tags)) for raw_fallback, tags in raw_to_tags.items() if len(tags) == 1}
 
 
 def _replace_outside_tg_emoji_tags(text: str, callback) -> str:

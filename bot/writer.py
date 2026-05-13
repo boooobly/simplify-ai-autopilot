@@ -12,6 +12,7 @@ import requests
 from bs4 import BeautifulSoup
 from openai import OpenAI
 
+from bot.link_policy import strip_disallowed_cta_links
 from bot.style_guide import HUMANIZER_RULES_FOR_SIMPLIFY_AI, SIMPLIFY_AI_EMOJI_ALIAS_GUIDE, SIMPLIFY_AI_STYLE_GUIDE
 
 logger = logging.getLogger(__name__)
@@ -352,6 +353,26 @@ REWRITE_POST_DRAFT_MODE_INSTRUCTIONS: dict[str, str] = {
 }
 
 
+
+
+def _finalize_generated_content(
+    text: str,
+    *,
+    source_url: str | None = None,
+    source_group: str | None = None,
+    category: str | None = None,
+    title: str | None = None,
+) -> str:
+    marked = _ensure_custom_emoji_markers(text, source_url=source_url, title=title)
+    return strip_disallowed_cta_links(
+        marked,
+        source_url=source_url,
+        source_group=source_group,
+        category=category,
+        title=title,
+    )
+
+
 def _rewrite_post_draft_instruction(mode: str) -> str:
     try:
         return REWRITE_POST_DRAFT_MODE_INSTRUCTIONS[mode]
@@ -408,7 +429,7 @@ def generate_post_draft_from_topic_metadata(
         "Не используй фразы: 'не про..., а про...', 'главный вывод простой', 'важно отметить', 'давайте разберем', 'в заключение'. "
         "Не используй эм-даш и кавычки-ёлочки. "
         "Не добавляй строку Источник в сам пост. URL хранится отдельно в модерации. "
-        "Если пост про инструмент/сервис/репозиторий/приложение/демо/гайд и URL есть, можно добавить короткую CTA-ссылку через [[LINK:text|url]]. "
+        "source_url нужен в первую очередь для модерации и фактчекинга. Не добавляй CTA только потому, что source_url существует. Если пост про тестируемый инструмент/сервис/репозиторий/приложение/демо/гайд и URL реально полезен читателю, можно добавить короткую CTA-ссылку через [[LINK:text|url]]. Не добавляй 'Подробнее'-ссылки на новости, блоги и статьи. "
         "Используй только маркеры [[LINK:text|url]] и никогда не выводи голые URL. Не выдумывай ссылки. "
         f"Желательная длина до {soft_chars} символов. Жёсткий максимум {max_chars} символов. Не обрывай мысль. "
         "Верни только финальный текст поста без комментариев и без markdown-блоков.\n\n"
@@ -419,7 +440,7 @@ def generate_post_draft_from_topic_metadata(
     final_text = _limit_text_safely(_strip_source_lines(result.content), limit=max_chars)
     if not _has_meaningful_body(final_text, source_url=source_url):
         raise EmptyAIResponseError("AI model returned empty content")
-    result.content = _ensure_custom_emoji_markers(final_text, source_url=source_url, title=topic_title_ru or topic_title)
+    result.content = _finalize_generated_content(final_text, source_url=source_url, source_group=topic_source_group, category=topic_category, title=topic_title_ru or topic_title)
     return result
 
 
@@ -446,14 +467,14 @@ def generate_post_draft(
         "Используй [[EMOJI:claude]] для Claude/Anthropic, [[EMOJI:chatgpt]] для ChatGPT/OpenAI/GPT, [[EMOJI:deepseek]] для DeepSeek, [[EMOJI:google]] для Google/Gemini/DeepMind. "
         "Для GitHub используй [[EMOJI:github]], для Photoshop/Adobe [[EMOJI:photoshop]], для Windows [[EMOJI:windows]], для Telegram [[EMOJI:telegram]], для privacy/security/VPN [[EMOJI:lock]], для web/services [[EMOJI:web]]. "
         "Если alias явно не подходит, не используй emoji. "
-        f"Источник (контекст модерации): {source_context}."
+        f"Источник (контекст модерации и фактчекинга, не повод для CTA): {source_context}. Не добавляй CTA только потому, что source_url существует. Добавляй [[LINK:text|url]] только для тестируемого/полезного читателю URL, не для новостей и блогов."
     )
     logger.info("Генерация черновика: model=%s", model)
     result = _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
     final_text = _limit_text_safely(_strip_source_lines(result.content), limit=max_chars)
     if not _has_meaningful_body(final_text, source_url=source_url):
         raise EmptyAIResponseError("AI model returned empty content")
-    result.content = _ensure_custom_emoji_markers(final_text, source_url=source_url, title=None)
+    result.content = _finalize_generated_content(final_text, source_url=source_url, title=None)
     return result
 
 
@@ -473,9 +494,9 @@ def polish_post_draft(
         "Сделай текст яснее и живее, но не делай его стерильным или корпоративным. "
         "Не меняй факты и не добавляй новые факты. Не перегружай объяснениями. "
         "Не добавляй строку Источник в сам пост. Ссылка хранится отдельно в модерации. Верни только финальный текст. "
-        "Сохраняй все существующие маркеры ссылок вида [[LINK:text|url]]. Сохраняй существующие [[EMOJI:alias]] маркеры без изменений. "
-        "Если пост про сервис/инструмент и в тексте есть raw URL, преобразуй его в короткий CTA с [[LINK:text|url]]. "
-        "Не удаляй полезные CTA-ссылки и не выдумывай новые ссылки. "
+        "Сохраняй существующие маркеры ссылок вида [[LINK:text|url]] только если они ведут на тестируемый сервис/инструмент/репозиторий/демо/гайд. Сохраняй существующие [[EMOJI:alias]] маркеры без изменений. "
+        "Если пост про сервис/инструмент и в тексте есть raw URL, преобразуй его в короткий CTA с [[LINK:text|url]] только когда URL ведёт на тестируемый сервис/инструмент/репозиторий/демо/гайд. "
+        "Не удаляй полезные тестируемые CTA-ссылки и не выдумывай новые ссылки; удаляй CTA на новости/блоги/статьи. "
         "Для перечислений используй обычные строки с ➖, если это не ломает структуру; финальный рендер превратит ведущий маркер в custom emoji. "
         "Можно оставить [[QUOTE]]...[[/QUOTE]], если это действительно уместно, но это не обязательно. "
         "Если в черновике есть \"▌\", убери этот символ. Не выводи raw HTML и не используй markdown blockquote. "
@@ -496,7 +517,7 @@ def polish_post_draft(
         "нет ли стерильного маркетингового тона, не слишком ли длинно, нет ли неподтверждённых фактов. "
         "Верни только финальный очищенный пост, без отчёта о проверке.\n\n"
         f"Дополнительные humanizer-правила:\n{HUMANIZER_RULES_FOR_SIMPLIFY_AI}\n\n"
-        f"Источник (контекст модерации): {source_url or 'не указан'}\n\n"
+        f"Источник (контекст модерации и фактчекинга, не повод для CTA): {source_url or 'не указан'}. Не добавляй CTA только потому, что source_url существует. Добавляй [[LINK:text|url]] только для тестируемого/полезного читателю URL, не для новостей и блогов.\n\n"
         f"Желательная длина до {soft_chars} символов. Жёсткий максимум {max_chars} символов. Не обрывай мысль.\n\n"
         f"Текущий черновик:\n{_strip_source_lines(draft_text)}"
     )
@@ -505,7 +526,7 @@ def polish_post_draft(
     final_text = _limit_text_safely(_strip_source_lines(result.content), limit=max_chars)
     if not _has_meaningful_body(final_text, source_url=source_url):
         raise EmptyAIResponseError("AI model returned empty content")
-    result.content = _ensure_custom_emoji_markers(final_text, source_url=source_url, title=None)
+    result.content = _finalize_generated_content(final_text, source_url=source_url, title=None)
     return result
 
 
@@ -529,11 +550,11 @@ def rewrite_post_draft(
         "Это точечный cleanup-pass, а не генерация нового поста. "
         "Соблюдай стиль-гайд и humanizer-правила ниже. "
         "Сохраняй факты и смысл. Не добавляй новые факты, даты, цифры, выводы или ссылки. "
-        "Сохраняй полезные маркеры ссылок вида [[LINK:text|url]]. "
+        "Сохраняй только полезные маркеры ссылок вида [[LINK:text|url]] для тестируемых сервисов/инструментов/репозиториев/демо/гайдов. Не сохраняй CTA 'Подробнее' на новости или блоги. "
         "Сохраняй существующие [[EMOJI:alias]] маркеры, когда это возможно и уместно. "
         "Не добавляй строку Источник: или Source:. Ссылка хранится отдельно в модерации. "
         "Верни только финальный текст поста без комментариев, без отчёта, без markdown-блоков и без HTML. "
-        "Если в тексте есть raw URL, не выдумывай новые ссылки; полезный URL можно оставить только как [[LINK:text|url]]. "
+        "Если в тексте есть raw URL, не выдумывай новые ссылки; полезный URL можно оставить только как [[LINK:text|url]], если это тестируемый сервис/инструмент/репозиторий/демо/гайд, а не новость или блог. "
         "Не используй markdown blockquote. Для списков можно оставить строки с ➖ и существующие [[QUOTE]]...[[/QUOTE]], если они уже помогают структуре; финальный рендер превратит ведущий ➖ в custom emoji. "
         "Без AI-клише, без эм-даша, без кавычек-ёлочек. "
         "Избегай штампов: 'не про..., а про...', 'главный вывод простой', 'важно отметить', 'давайте разберем', 'в заключение'. "
@@ -542,7 +563,7 @@ def rewrite_post_draft(
         f"Желательная длина до {soft_chars} символов. Жёсткий максимум {max_chars} символов. "
         "Перед возвратом молча проверь, что текст не пустой, не содержит строки Источник:, не содержит raw emoji, сохраняет полезные [[LINK:...]] и [[EMOJI:...]] маркеры.\n\n"
         f"Дополнительные humanizer-правила:\n{HUMANIZER_RULES_FOR_SIMPLIFY_AI}\n\n"
-        f"Источник (только контекст модерации, не добавлять в пост): {source_url or 'не указан'}\n\n"
+        f"Источник (только контекст модерации и фактчекинга, не добавлять в пост и не использовать как CTA без тестируемой пользы): {source_url or 'не указан'}. Не добавляй CTA только потому, что source_url существует; не добавляй Подробнее-ссылки на новости/блоги.\n\n"
         f"Текущий черновик:\n{cleaned_draft}"
     )
     logger.info("Переписывание черновика: mode=%s model=%s", mode, model)
@@ -550,7 +571,7 @@ def rewrite_post_draft(
     final_text = _limit_text_safely(_strip_source_lines(result.content), limit=max_chars)
     if not _has_meaningful_body(final_text, source_url=source_url):
         raise EmptyAIResponseError("AI model returned empty content")
-    result.content = _ensure_custom_emoji_markers(final_text, source_url=source_url, title=None)
+    result.content = _finalize_generated_content(final_text, source_url=source_url, title=None)
     return result
 
 
@@ -673,18 +694,18 @@ def generate_post_draft_from_page(api_key: str, model: str, source_url: str, tit
         "Не используй эм-даш и кавычки-ёлочки. "
         "Не оставляй ответ пустым: даже если статья слабая, сделай осторожный короткий пост только по подтверждённым фактам. "
         "Не добавляй строку Источник в сам пост. Ссылка хранится отдельно в модерации. "
-        "Если пост про инструмент/сервис/репозиторий/приложение/демо/гайд, добавь в конце CTA-ссылку. "
+        "source_url нужен в первую очередь для модерации и фактчекинга. Не добавляй CTA только потому, что source_url существует. Если пост про инструмент/сервис/репозиторий/приложение/демо/гайд и URL ведёт на тестируемую страницу, добавь в конце CTA-ссылку. Не добавляй CTA просто на новость, блог или статью. "
         "Используй только маркеры [[LINK:text|url]] и никогда не выводи голые URL. "
         "Не добавляй строку 'Источник:'. Не выдумывай ссылки. "
         f"Желательная длина до {soft_chars} символов. Жёсткий максимум {max_chars} символов. Не обрывай мысль. "
         "Не используй markdown blockquote и не используй HTML. "
         "Верни только финальный текст поста без комментариев и без markdown-блоков.\n\n"
-        f"Источник (контекст модерации): {source_url}\nЗаголовок: {title}\n\nТекст страницы:\n{page_text}"
+        f"Источник (контекст модерации и фактчекинга, не повод для CTA): {source_url}\nЗаголовок: {title}\n\nТекст страницы:\n{page_text}"
     )
     logger.info("Генерация по URL: model=%s", model)
     result = _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
     final_text = _limit_text_safely(_strip_source_lines(result.content), limit=max_chars)
     if not _has_meaningful_body(final_text, source_url=source_url):
         raise EmptyAIResponseError("AI model returned empty content")
-    result.content = _ensure_custom_emoji_markers(final_text, source_url=source_url, title=title)
+    result.content = _finalize_generated_content(final_text, source_url=source_url, title=title)
     return result
