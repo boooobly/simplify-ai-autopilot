@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 
 def _clean_text(value: object) -> str:
     return str(value or "").strip()
@@ -11,6 +13,90 @@ def _topic_value(topic: object, key: str) -> object:
     if isinstance(topic, dict):
         return topic.get(key)
     return getattr(topic, key, None)
+
+
+def _contains_cyrillic(value: str) -> bool:
+    return any("а" <= ch.lower() <= "я" or ch.lower() == "ё" for ch in value or "")
+
+
+def _letter_counts(value: str) -> tuple[int, int]:
+    cyrillic = 0
+    latin = 0
+    for ch in value or "":
+        lower = ch.lower()
+        if "а" <= lower <= "я" or lower == "ё":
+            cyrillic += 1
+        elif "a" <= lower <= "z":
+            latin += 1
+    return cyrillic, latin
+
+
+def _mostly_english_text(value: str) -> bool:
+    cyrillic, latin = _letter_counts(value)
+    if latin < 12:
+        return False
+    if cyrillic == 0:
+        return True
+    return cyrillic / max(1, cyrillic + latin) < 0.35 and latin > cyrillic * 1.8
+
+
+def _has_untranslated_source_after_russian_label(title_ru: str) -> bool:
+    text = _clean_text(title_ru)
+    label_patterns = [
+        r"(?i)(?:^|[-:—])\s*(?:open-source|opensource)\s+проект\s*:\s*[a-z]",
+        r"(?i)(?:^|[-:—])\s*проект\s+(?:about|for)\b",
+        r"(?i)(?:^|[-:—])\s*(?:новость|релиз|проект|инструмент)\s*:\s*(?:[a-z][a-z ]{8,})",
+    ]
+    return any(re.search(pattern, text) for pattern in label_patterns)
+
+
+def is_weak_topic_metadata(
+    title_ru: str | None,
+    summary_ru: str | None,
+    angle_ru: str | None,
+    original_title: str | None = None,
+) -> bool:
+    """Return True when admin-facing topic metadata is empty, generic or mostly untranslated."""
+    title = _clean_text(title_ru)
+    summary = _clean_text(summary_ru)
+    angle = _clean_text(angle_ru)
+    original = _clean_text(original_title)
+
+    if not title:
+        return True
+    if original and title.casefold() == original.casefold():
+        return True
+    if not _contains_cyrillic(title):
+        return True
+    if _mostly_english_text(title):
+        return True
+
+    bad_title_patterns = [
+        r"(?i)open-source\s+проект:\s*(?:implement|build|create|learn|launch|release|introducing)",
+        r"(?i)\bproject\s+about\b",
+        r"(?i)\bbased\s+on\s+real-world\s+benchmarks\b",
+        r"(?i)\bfor\s+magnifying\s+HUMAN\s+capabilities\b",
+        r"(?i)\bPersistent\s+memory\s+for\b",
+        r"(?i)\bAgentic\s+AI\s+Infrastructure\b",
+        r"(?i)GitHub-проект,\s*нужен\s+AI-перевод",
+        r"(?i)GitHub-проект\s+по\s+AI/разработке",
+    ]
+    if any(re.search(pattern, title) for pattern in bad_title_patterns):
+        return True
+    if _has_untranslated_source_after_russian_label(title):
+        return True
+
+    generic_summary_fragments = [
+        "Репозиторий выглядит как проект про",
+        "Источник предлагает новость по AI",
+        "Нужен ручной просмотр",
+    ]
+    if any(fragment.casefold() in summary.casefold() for fragment in generic_summary_fragments):
+        return True
+
+    if angle and not _contains_cyrillic(angle) and len(angle) > 20:
+        return True
+    return False
 
 
 def topic_display_title(topic: object) -> str:

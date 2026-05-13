@@ -104,7 +104,7 @@ def run() -> None:
         "10",
         None,
     )
-    assert unknown_title == "UnknownRepo - GitHub-проект по AI/разработке"
+    assert unknown_title == "UnknownRepo - GitHub-проект, нужен AI-перевод"
     assert "Описание GitHub: Fast reliable building blocks for production systems." in unknown_summary
     assert "Формат - Go." in unknown_summary
     assert "На GitHub: 10 stars." in unknown_summary

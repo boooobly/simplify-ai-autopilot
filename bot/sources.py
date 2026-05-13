@@ -13,6 +13,7 @@ import requests
 from bs4 import BeautifulSoup
 from bot.config import _parse_bool_env, _parse_csv_env, _parse_int_range_env
 from bot.topic_scoring import humanize_topic_reason_ru, normalize_topic_title, score_topic
+from bot.topic_display import is_weak_topic_metadata
 
 
 @dataclass
@@ -410,6 +411,10 @@ def build_github_topic_ru_metadata(
         title_ru = repo_name
     elif title_phrase_ru:
         title_ru = _shorten(f"{repo_short} - {title_phrase_ru}", 120)
+        if is_weak_topic_metadata(title_ru, summary_sentence_ru, angle_override, original_title=clean_description):
+            title_ru = f"{repo_short} - GitHub-проект, нужен AI-перевод"
+    elif clean_description:
+        title_ru = f"{repo_short} - GitHub-проект, нужен AI-перевод"
     else:
         title_ru = f"{repo_short} - GitHub-проект по AI/разработке"
 
