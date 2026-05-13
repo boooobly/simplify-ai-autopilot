@@ -22,6 +22,7 @@ class Settings:
     openai_api_key: str | None
     openrouter_api_key: str | None
     model_draft: str = "moonshotai/kimi-k2.6"
+    model_topic_enrich: str = "tencent/hy3-preview"
     model_polish: str = "anthropic/claude-sonnet-4.5"
     openrouter_site_url: str | None = None
     openrouter_app_name: str = "Simplify AI Autopilot"
@@ -187,6 +188,7 @@ def startup_diagnostics(settings: Settings) -> list[str]:
     lines = [
         f"AI provider: {_ai_provider_label(settings.openrouter_api_key, settings.openai_api_key)}",
         f"model_draft: {settings.model_draft}",
+        f"model_topic_enrich: {settings.model_topic_enrich}",
         f"model_polish: {settings.model_polish}",
         f"schedule_timezone: {settings.schedule_timezone}",
         f"daily_post_slots: {', '.join(settings.daily_post_slots)}",
@@ -220,6 +222,7 @@ def load_settings() -> Settings:
     openrouter_api_key_raw = os.getenv("OPENROUTER_API_KEY", "").strip()
     openrouter_api_key = openrouter_api_key_raw or None
     model_draft = os.getenv("MODEL_DRAFT", "moonshotai/kimi-k2.6").strip() or "moonshotai/kimi-k2.6"
+    model_topic_enrich = os.getenv("MODEL_TOPIC_ENRICH", "tencent/hy3-preview").strip() or "tencent/hy3-preview"
     model_polish = os.getenv("MODEL_POLISH", "anthropic/claude-sonnet-4.5").strip() or "anthropic/claude-sonnet-4.5"
     openrouter_site_url_raw = os.getenv("OPENROUTER_SITE_URL", "").strip()
     openrouter_site_url = openrouter_site_url_raw or None
@@ -277,6 +280,7 @@ def load_settings() -> Settings:
         openai_api_key=openai_api_key,
         openrouter_api_key=openrouter_api_key,
         model_draft=model_draft,
+        model_topic_enrich=model_topic_enrich,
         model_polish=model_polish,
         openrouter_site_url=openrouter_site_url,
         openrouter_app_name=openrouter_app_name,

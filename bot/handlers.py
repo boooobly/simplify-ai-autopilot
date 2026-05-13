@@ -74,6 +74,29 @@ TELEGRAM_CAPTION_LIMIT = 1024
 SHORT_MEDIA_PREVIEW_LIMIT = 850
 EMPTY_AI_REPLY_TEXT = "Модель вернула пустой ответ. Черновик не создан. Попробуй ещё раз или смени MODEL_DRAFT."
 REDDIT_METADATA_EMPTY_REPLY_TEXT = "Reddit-источник заблокирован, а по сохранённому описанию не удалось собрать нормальный черновик. Лучше отклонить тему или открыть источник вручную."
+
+TOPIC_ENRICH_FALLBACK_SUMMARY_RU = "Нужен ручной просмотр: не удалось нормально обработать тему."
+TOPIC_ENRICH_FALLBACK_ANGLE_RU = "Открой источник и проверь тему вручную перед генерацией поста."
+
+
+def _topic_enrich_model(settings) -> str:
+    return (getattr(settings, "model_topic_enrich", "") or getattr(settings, "model_draft", "")).strip() or getattr(settings, "model_draft", "")
+
+
+def _apply_topic_enrichment_fallback(item, db: DraftDatabase) -> None:
+    item.title_ru = item.title_ru or item.title
+    item.summary_ru = item.summary_ru or TOPIC_ENRICH_FALLBACK_SUMMARY_RU
+    item.angle_ru = item.angle_ru or TOPIC_ENRICH_FALLBACK_ANGLE_RU
+    topic = db.find_topic_candidate_by_url(item.url)
+    if topic:
+        db.update_topic_candidate_display_fields(
+            int(topic["id"]),
+            title_ru=item.title_ru,
+            summary_ru=item.summary_ru,
+            angle_ru=item.angle_ru,
+            reason_ru=item.reason_ru,
+        )
+
 REWRITE_DRAFT_ACTIONS = {
     "rewrite_remove_fluff": {
         "mode": "remove_fluff",
@@ -446,6 +469,7 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "Бот запущен",
         f"Провайдер AI: {provider}",
         f"Draft model: {settings.model_draft}",
+        f"Topic enrich model: {settings.model_topic_enrich}",
         f"Polish model: {settings.model_polish}",
         f"Таймзона: {settings.schedule_timezone}",
         f"Слоты: {', '.join(settings.daily_post_slots)}",
@@ -679,6 +703,7 @@ def _settings_text(settings) -> str:
         "⚙️ Настройки\n\n"
         f"Провайдер ИИ: {ai_provider}\n"
         f"Модель черновика: {settings.model_draft}\n"
+        f"Модель тем: {settings.model_topic_enrich}\n"
         f"Модель улучшения: {settings.model_polish}\n"
         f"Часовой пояс: {settings.schedule_timezone}\n"
         f"Длина поста: до {settings.post_soft_chars} / максимум {settings.post_max_chars} символов\n"
@@ -747,7 +772,7 @@ async def _translate_topic_title_if_available(item, settings, db: DraftDatabase)
         return
     result = await _run_translate_topic_title_to_ru(
         api_key=api_key,
-        model=settings.model_draft,
+        model=_topic_enrich_model(settings),
         title=item.title,
         base_url=base_url,
         extra_headers=extra_headers,
@@ -762,7 +787,7 @@ async def _translate_topic_title_if_available(item, settings, db: DraftDatabase)
     estimated_cost = estimate_ai_cost(provider, result.prompt_tokens, result.completion_tokens, settings)
     db.record_ai_usage(
         provider=provider,
-        model=result.model or settings.model_draft,
+        model=result.model or _topic_enrich_model(settings),
         operation="topic_translate_title",
         prompt_tokens=result.prompt_tokens,
         completion_tokens=result.completion_tokens,
@@ -784,7 +809,7 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
     try:
         result = await _run_enrich_topic_metadata_ru(
             api_key=api_key,
-            model=settings.model_draft,
+            model=_topic_enrich_model(settings),
             title=item.title,
             source=item.source,
             description=getattr(item, "original_description", None),
@@ -793,18 +818,24 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
         )
     except Exception as exc:
         logger.warning("Topic metadata enrichment failed: %s", exc)
+        _apply_topic_enrichment_fallback(item, db)
         return
     if not result or not result.content.strip():
+        _apply_topic_enrichment_fallback(item, db)
         return
     parts = [part.strip() for part in result.content.splitlines() if part.strip()]
     if len(parts) < 3:
+        _apply_topic_enrichment_fallback(item, db)
         return
     topic = db.find_topic_candidate_by_url(item.url)
     if not topic:
+        _apply_topic_enrichment_fallback(item, db)
         return
     item.title_ru = item.title_ru or parts[0]
     item.summary_ru = item.summary_ru or parts[1]
     item.angle_ru = item.angle_ru or parts[2]
+    if len(parts) >= 4:
+        item.reason_ru = item.reason_ru or parts[3]
     db.update_topic_candidate_display_fields(
         int(topic["id"]),
         title_ru=item.title_ru,
@@ -815,7 +846,7 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
     estimated_cost = estimate_ai_cost(provider, result.prompt_tokens, result.completion_tokens, settings)
     db.record_ai_usage(
         provider=provider,
-        model=result.model or settings.model_draft,
+        model=result.model or _topic_enrich_model(settings),
         operation="topic_enrich_metadata",
         prompt_tokens=result.prompt_tokens,
         completion_tokens=result.completion_tokens,

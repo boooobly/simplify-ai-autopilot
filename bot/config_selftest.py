@@ -90,6 +90,24 @@ def run() -> None:
 
     _with_env({"BOT_TOKEN": "", "ADMIN_ID": "", "CHANNEL_ID": ""}, _admin_id_must_be_int)
 
+    def _topic_enrich_model_env() -> None:
+        os.environ["BOT_TOKEN"] = "token"
+        os.environ["ADMIN_ID"] = "123"
+        os.environ["CHANNEL_ID"] = "@simplify_ai"
+        os.environ["MODEL_DRAFT"] = "draft-model-x"
+        settings = load_settings()
+        assert settings.model_topic_enrich == "tencent/hy3-preview"
+        os.environ["MODEL_TOPIC_ENRICH"] = "topic-model-x"
+        settings = load_settings()
+        assert settings.model_topic_enrich == "topic-model-x"
+        os.environ["MODEL_TOPIC_ENRICH"] = "   "
+        settings = load_settings()
+        assert settings.model_topic_enrich == "tencent/hy3-preview"
+        text = "\n".join(startup_diagnostics(settings))
+        assert "model_topic_enrich: tencent/hy3-preview" in text
+
+    _with_env({"MODEL_TOPIC_ENRICH": ""}, _topic_enrich_model_env)
+
     def _diagnostics_no_secrets() -> None:
         os.environ["BOT_TOKEN"] = "bot-secret"
         os.environ["ADMIN_ID"] = "123"
@@ -104,7 +122,9 @@ def run() -> None:
         os.environ["X_API_BEARER_TOKEN"] = "x-secret"
         os.environ["X_ACCOUNTS"] = "openai,anthropic"
         os.environ["X_MAX_POSTS_PER_ACCOUNT"] = "3"
+        os.environ["MODEL_TOPIC_ENRICH"] = "topic-diag-model"
         settings = load_settings()
+        assert settings.model_topic_enrich == "topic-diag-model"
         assert settings.max_topic_age_days == 7
         assert settings.topic_ai_enrich_limit == 3
         assert settings.topic_ai_translate_limit == 4
@@ -119,6 +139,7 @@ def run() -> None:
         assert "or-secret" not in text
         assert "oa-secret" not in text
         assert "x-secret" not in text
+        assert "model_topic_enrich: topic-diag-model" in text
 
     _with_env({}, _diagnostics_no_secrets)
 

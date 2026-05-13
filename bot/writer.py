@@ -150,6 +150,30 @@ def _looks_like_useful_russian_metadata(title_ru: str, summary_ru: str, angle_ru
     return not any(re.search(pattern, title_ru) for pattern in bad_title_patterns)
 
 
+def _parse_topic_metadata_fields(content: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    field_map = {
+        "title": "title_ru",
+        "title_ru": "title_ru",
+        "summary": "summary_ru",
+        "summary_ru": "summary_ru",
+        "angle": "angle_ru",
+        "angle_ru": "angle_ru",
+        "reason": "reason_ru",
+        "reason_ru": "reason_ru",
+    }
+    for line in content.splitlines():
+        cleaned = line.strip()
+        if not cleaned or ":" not in cleaned:
+            continue
+        key, value = cleaned.split(":", 1)
+        normalized_key = key.strip().lower()
+        target = field_map.get(normalized_key)
+        if target:
+            values[target] = value.strip().strip('"“”')
+    return values
+
+
 def enrich_topic_metadata_ru(
     *,
     api_key: str,
@@ -160,20 +184,23 @@ def enrich_topic_metadata_ru(
     base_url: str | None = None,
     extra_headers: dict[str, str] | None = None,
 ) -> GenerationResult | None:
-    """Generate short Russian topic display metadata; return pipe-separated fields."""
+    """Generate strict Russian topic display metadata fields."""
     clean_title = title.strip()
     if not clean_title:
         return None
     system_prompt = (
         "Ты помогаешь администратору русскоязычного Telegram-канала @simplify_ai быстро понять тему. "
-        "Верни ровно три строки на русском: TITLE, SUMMARY, ANGLE. "
-        "TITLE должен быть человеческим русским заголовком, который объясняет смысл темы, а не буквальным переводом. "
-        "SUMMARY одной фразой объясняет, что это такое. "
-        "ANGLE предлагает, как подать тему для @simplify_ai. "
+        "Пиши только по-русски, кроме неизменяемых имен. "
+        "Верни ровно четыре поля и ничего больше: title_ru, summary_ru, angle_ru, reason_ru. "
+        "title_ru должен быть понятным с первого взгляда русским заголовком, а не буквальным переводом. "
+        "summary_ru одной короткой фразой объясняет, что это такое. "
+        "angle_ru предлагает спокойный редакционный угол для @simplify_ai. "
+        "reason_ru кратко объясняет важность темы для админа. "
         "Не переводи и не искажай названия репозиториев, продуктов, моделей, фреймворков, компаний и версий: "
         "PyTorch, ChatGPT, LLM, Jupyter Notebook, GitHub, Hugging Face и похожие имена оставляй как есть. "
-        "Для GitHub тем сохраняй короткое имя репозитория в начале TITLE, если оно есть. "
-        "Не оставляй исходный английский текст целиком после русской приписки. Не выдумывай факты."
+        "Для GitHub тем сохраняй короткое имя репозитория в начале title_ru, если оно есть. "
+        "Не оставляй исходный английский текст целиком после русской приписки. Не выдумывай факты. "
+        "Не пиши пост, не добавляй маркетинговый тон и не добавляй поля сверх формата."
     )
     user_prompt = (
         f"Title: {clean_title[:300]}\n"
@@ -181,7 +208,7 @@ def enrich_topic_metadata_ru(
         f"Description: {(description or '')[:500]}\n\n"
         "Пример хорошего GitHub TITLE: LLMs-from-scratch - пошаговая сборка ChatGPT-подобной модели на PyTorch\n"
         "Пример плохого TITLE: LLMs-from-scratch - open-source проект: Implement a ChatGPT-like LLM in PyTorch from scratch, step by step\n\n"
-        "Format:\nTITLE: ...\nSUMMARY: ...\nANGLE: ..."
+        "Format:\ntitle_ru: ...\nsummary_ru: ...\nangle_ru: ...\nreason_ru: ..."
     )
     try:
         result = _generate_with_chat_completion(
@@ -196,28 +223,17 @@ def enrich_topic_metadata_ru(
     except Exception as exc:
         logger.warning("Topic metadata enrichment failed: %s", exc)
         return None
-    lines = [line.strip() for line in result.content.splitlines() if line.strip()]
-    values: dict[str, str] = {}
-    for line in lines:
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        key = key.strip().lower()
-        if key in {"title", "title_ru"}:
-            values["title"] = value.strip().strip('"“”')
-        elif key in {"summary", "summary_ru"}:
-            values["summary"] = value.strip().strip('"“”')
-        elif key in {"angle", "angle_ru"}:
-            values["angle"] = value.strip().strip('"“”')
-    if not all(values.get(k) for k in ("title", "summary", "angle")):
+    values = _parse_topic_metadata_fields(result.content)
+    if not all(values.get(k) for k in ("title_ru", "summary_ru", "angle_ru", "reason_ru")):
         return None
-    title_ru = values["title"][:180]
-    summary_ru = values["summary"][:260]
-    angle_ru = values["angle"][:260]
+    title_ru = values["title_ru"][:180]
+    summary_ru = values["summary_ru"][:260]
+    angle_ru = values["angle_ru"][:260]
+    reason_ru = values["reason_ru"][:220]
     if not _looks_like_useful_russian_metadata(title_ru, summary_ru, angle_ru):
         logger.warning("Topic metadata enrichment returned unusable Russian metadata")
         return None
-    result.content = "\n".join([title_ru, summary_ru, angle_ru])
+    result.content = "\n".join([title_ru, summary_ru, angle_ru, reason_ru])
     return result
 
 
@@ -236,9 +252,11 @@ def translate_topic_title_to_ru(
     if any("а" <= ch.lower() <= "я" or ch.lower() == "ё" for ch in clean_title):
         return GenerationResult(content=clean_title, model=model)
     system_prompt = (
-        "Translate a topic title into short natural Russian. Preserve product names, "
-        "model names, company names, version numbers and brand names. Do not add facts. "
-        "Return only the translated title."
+        "Переведи заголовок темы на короткий естественный русский. Пиши только по-русски, "
+        "кроме названий продуктов, репозиториев, моделей, фреймворков, компаний, версий и брендов. "
+        "Сохраняй такие имена без искажений. Не выдумывай факты. Не пиши пост. "
+        "Не добавляй маркетинговый тон. Заголовок должен быть понятен с первого взгляда. "
+        "Верни только переведенный заголовок."
     )
     user_prompt = clean_title[:300]
     try:
