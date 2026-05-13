@@ -131,6 +131,24 @@ def _generate_with_chat_completion(
     )
 
 
+def _contains_cyrillic_text(text: str) -> bool:
+    return any("а" <= ch.lower() <= "я" or ch.lower() == "ё" for ch in text or "")
+
+
+def _looks_like_useful_russian_metadata(title_ru: str, summary_ru: str, angle_ru: str) -> bool:
+    """Reject AI metadata that is still mostly untranslated English text."""
+    combined = " ".join([title_ru, summary_ru, angle_ru]).strip()
+    if not combined or not _contains_cyrillic_text(combined):
+        return False
+    # Preserve names like PyTorch/ChatGPT/LLM, but avoid accepting a title that only
+    # adds a Russian label before an untouched English description.
+    bad_title_patterns = [
+        r"(?i)open-source\s+проект:\s*(?:implement|build|create|learn|introducing|release|launch)",
+        r"(?i)проект:\s*(?:implement|build|create|learn|introducing|release|launch)",
+        r"(?i):\s*(?:implement|build|create|learn)\b",
+    ]
+    return not any(re.search(pattern, title_ru) for pattern in bad_title_patterns)
+
 
 def enrich_topic_metadata_ru(
     *,
@@ -147,15 +165,22 @@ def enrich_topic_metadata_ru(
     if not clean_title:
         return None
     system_prompt = (
-        "You help a Russian-speaking Telegram channel admin understand AI topic candidates. "
-        "Return exactly three short lines in Russian: title_ru, summary_ru, angle_ru. "
-        "Do not translate URLs. Preserve product names, repo names, model names, company names and versions. "
-        "Do not invent facts beyond the given title, source and description. Keep each line short."
+        "Ты помогаешь администратору русскоязычного Telegram-канала @simplify_ai быстро понять тему. "
+        "Верни ровно три строки на русском: TITLE, SUMMARY, ANGLE. "
+        "TITLE должен быть человеческим русским заголовком, который объясняет смысл темы, а не буквальным переводом. "
+        "SUMMARY одной фразой объясняет, что это такое. "
+        "ANGLE предлагает, как подать тему для @simplify_ai. "
+        "Не переводи и не искажай названия репозиториев, продуктов, моделей, фреймворков, компаний и версий: "
+        "PyTorch, ChatGPT, LLM, Jupyter Notebook, GitHub, Hugging Face и похожие имена оставляй как есть. "
+        "Для GitHub тем сохраняй короткое имя репозитория в начале TITLE, если оно есть. "
+        "Не оставляй исходный английский текст целиком после русской приписки. Не выдумывай факты."
     )
     user_prompt = (
         f"Title: {clean_title[:300]}\n"
         f"Source: {source[:120]}\n"
         f"Description: {(description or '')[:500]}\n\n"
+        "Пример хорошего GitHub TITLE: LLMs-from-scratch - пошаговая сборка ChatGPT-подобной модели на PyTorch\n"
+        "Пример плохого TITLE: LLMs-from-scratch - open-source проект: Implement a ChatGPT-like LLM in PyTorch from scratch, step by step\n\n"
         "Format:\nTITLE: ...\nSUMMARY: ...\nANGLE: ..."
     )
     try:
@@ -186,8 +211,15 @@ def enrich_topic_metadata_ru(
             values["angle"] = value.strip().strip('"“”')
     if not all(values.get(k) for k in ("title", "summary", "angle")):
         return None
-    result.content = "\n".join([values["title"][:180], values["summary"][:260], values["angle"][:260]])
+    title_ru = values["title"][:180]
+    summary_ru = values["summary"][:260]
+    angle_ru = values["angle"][:260]
+    if not _looks_like_useful_russian_metadata(title_ru, summary_ru, angle_ru):
+        logger.warning("Topic metadata enrichment returned unusable Russian metadata")
+        return None
+    result.content = "\n".join([title_ru, summary_ru, angle_ru])
     return result
+
 
 def translate_topic_title_to_ru(
     *,

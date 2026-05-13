@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from bot.handlers import _render_plan_text, _topic_card_text
-from bot.topic_display import topic_compact_preview_ru, topic_display_reason, topic_display_title
+from bot.topic_display import MANUAL_REVIEW_NOTE_RU, topic_compact_preview_ru, topic_display_reason, topic_display_title
 
 
 def run() -> None:
@@ -49,8 +49,9 @@ def run() -> None:
     assert topic_display_reason(fallback_topic) == "новость/релиз"
     assert "English fallback title" in fallback_card
     assert "О чем:" in fallback_card
-    assert "Источник предлагает новость по AI" in fallback_card
+    assert MANUAL_REVIEW_NOTE_RU in fallback_card
     assert "Идея поста:" in fallback_card
+    assert "AI-обогащение не дало понятный русский ракурс" in fallback_card
     assert "Оригинал:" not in fallback_card
 
     github_fallback = {
@@ -64,7 +65,7 @@ def run() -> None:
         "url": "https://github.com/owner/repo",
     }
     github_card = _topic_card_text(github_fallback)
-    assert "Похоже на GitHub-проект по AI/разработке" in github_card
+    assert MANUAL_REVIEW_NOTE_RU in github_card
     assert "URL: https://github.com/owner/repo" in github_card
 
     compact = topic_compact_preview_ru(topic)
@@ -74,7 +75,20 @@ def run() -> None:
 
     compact_missing_ru = topic_compact_preview_ru(fallback_topic)
     assert compact_missing_ru.startswith("Нужна проверка: English fallback title")
-    assert "О чем:" in compact_missing_ru
+    assert MANUAL_REVIEW_NOTE_RU in compact_missing_ru
+
+    ru_preview_topic = {
+        "title": "GitHub Trending: rasbt / LLMs-from-scratch",
+        "title_ru": "LLMs-from-scratch - пошаговая сборка ChatGPT-подобной модели на PyTorch",
+        "summary_ru": "Репозиторий показывает, как с нуля собрать ChatGPT-подобную LLM на PyTorch.",
+        "angle_ru": "Можно подать как полезный open-source проект.",
+        "score": 95,
+        "category": "dev",
+    }
+    collect_preview = topic_compact_preview_ru(ru_preview_topic)
+    assert collect_preview.startswith("LLMs-from-scratch - пошаговая сборка")
+    assert "Репозиторий показывает" in collect_preview
+    assert "GitHub Trending:" not in collect_preview
 
     plan = _render_plan_text("сегодня", ["10:00"], [topic])
     assert "OpenAI выпустила новую модель" in plan
