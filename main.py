@@ -46,10 +46,9 @@ from bot.handlers import (
     restore_draft_command,
     failed_drafts_command,
     emoji_ids_command,
-    cleanup_confirm_command,
-    cleanup_preview_command,
     health_command,
 )
+from bot.cleanup_handlers import cleanup_confirm_command, cleanup_preview_command
 from bot.publisher import run_scheduled_publishing
 
 

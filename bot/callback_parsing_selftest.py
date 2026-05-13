@@ -8,6 +8,8 @@ def run() -> None:
     assert _parse_callback_data("queue_tomorrow:0") == ("queue_tomorrow", 0, None)
     assert _parse_callback_data("queue_pick_slot:1:1400") == ("queue_pick_slot", 1, "1400")
     assert _parse_callback_data("queue_schedule_draft:42:1:1400") == ("queue_schedule_draft", 42, "1:1400")
+    assert _parse_callback_data("cleanup_confirm:0") == ("cleanup_confirm", 0, None)
+    assert _parse_callback_data("cleanup_cancel:0") == ("cleanup_cancel", 0, None)
     assert _parse_callback_data("unschedule:42") == ("unschedule", 42, None)
     assert _parse_callback_data("restore_draft:42") == ("restore_draft", 42, None)
     assert _parse_callback_data("reject_topic:42") == ("reject_topic", 42, None)
