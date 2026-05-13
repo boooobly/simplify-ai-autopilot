@@ -2,6 +2,8 @@ import os
 
 from bot.config import (
     _detect_railway_with_local_db_path,
+    _parse_bool_env,
+    _parse_csv_env,
     _parse_custom_emoji_aliases,
     _parse_custom_emoji_map,
     _parse_daily_post_slots,
@@ -44,6 +46,22 @@ def run() -> None:
 
     _with_env({}, _max_topic_age_parser)
 
+    def _new_source_env_parsers() -> None:
+        for value in ["1", "true", "yes", "on", " TRUE "]:
+            os.environ["ENABLE_REDDIT_SOURCES"] = value
+            assert _parse_bool_env("ENABLE_REDDIT_SOURCES") is True
+        for value in ["", "0", "false", "no", "off", "anything"]:
+            os.environ["ENABLE_REDDIT_SOURCES"] = value
+            assert _parse_bool_env("ENABLE_REDDIT_SOURCES") is False
+        os.environ["X_ACCOUNTS"] = "@openai, anthropic, OpenAI, , @karpathy"
+        assert _parse_csv_env("X_ACCOUNTS") == ["openai", "anthropic", "karpathy"]
+        os.environ["X_MAX_POSTS_PER_ACCOUNT"] = "20"
+        assert _parse_int_range_env("X_MAX_POSTS_PER_ACCOUNT", 5, 1, 20) == 20
+        os.environ["X_MAX_POSTS_PER_ACCOUNT"] = "21"
+        assert _parse_int_range_env("X_MAX_POSTS_PER_ACCOUNT", 5, 1, 20) == 5
+
+    _with_env({}, _new_source_env_parsers)
+
     aliases = _parse_custom_emoji_aliases('claude|🤖|520;bad alias|🔥|111;chatgpt|🤖|abc;claude|🤖|521')
     assert aliases == {'claude': ('🤖', '521')}
     assert _parse_custom_emoji_aliases('chatgpt|🤖|123;deepseek|🤖|124') == {
@@ -81,15 +99,26 @@ def run() -> None:
         os.environ["MAX_TOPIC_AGE_DAYS"] = "7"
         os.environ["TOPIC_AI_ENRICH_LIMIT"] = "3"
         os.environ["TOPIC_AI_TRANSLATE_LIMIT"] = "4"
+        os.environ["ENABLE_REDDIT_SOURCES"] = "yes"
+        os.environ["ENABLE_X_SOURCES"] = "on"
+        os.environ["X_API_BEARER_TOKEN"] = "x-secret"
+        os.environ["X_ACCOUNTS"] = "openai,anthropic"
+        os.environ["X_MAX_POSTS_PER_ACCOUNT"] = "3"
         settings = load_settings()
         assert settings.max_topic_age_days == 7
         assert settings.topic_ai_enrich_limit == 3
         assert settings.topic_ai_translate_limit == 4
+        assert settings.enable_reddit_sources is True
+        assert settings.enable_x_sources is True
+        assert settings.x_api_bearer_token == "x-secret"
+        assert settings.x_accounts == ["openai", "anthropic"]
+        assert settings.x_max_posts_per_account == 3
         lines = startup_diagnostics(settings)
         text = "\n".join(lines)
         assert "bot-secret" not in text
         assert "or-secret" not in text
         assert "oa-secret" not in text
+        assert "x-secret" not in text
 
     _with_env({}, _diagnostics_no_secrets)
 

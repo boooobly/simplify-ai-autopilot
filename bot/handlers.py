@@ -73,6 +73,7 @@ ALLOWED_DRAFT_STATUSES = {"draft", "approved", "scheduled", "publishing", "publi
 TELEGRAM_CAPTION_LIMIT = 1024
 SHORT_MEDIA_PREVIEW_LIMIT = 850
 EMPTY_AI_REPLY_TEXT = "Модель вернула пустой ответ. Черновик не создан. Попробуй ещё раз или смени MODEL_DRAFT."
+REDDIT_METADATA_EMPTY_REPLY_TEXT = "Reddit-источник заблокирован, а по сохранённому описанию не удалось собрать нормальный черновик. Лучше отклонить тему или открыть источник вручную."
 REWRITE_DRAFT_ACTIONS = {
     "rewrite_remove_fluff": {
         "mode": "remove_fluff",
@@ -135,6 +136,7 @@ SOURCE_GROUP_LABELS = {
     "tools": "Инструменты",
     "community": "Сообщества",
     "github": "GitHub",
+    "x": "X API",
     "custom": "Кастомные источники",
     "other": "Другое",
 }
@@ -380,7 +382,7 @@ def _topics_for_kind(db: DraftDatabase, kind: str, limit: int = 10) -> list[dict
         return db.list_topic_candidates_filtered(limit=limit, status="new", categories=["news", "model", "agent", "research", "business", "privacy"])
     if kind == "fun":
         topics_by_category = db.list_topic_candidates_filtered(limit=20, status="new", categories=["drama", "meme"])
-        topics_by_group = db.list_topic_candidates_filtered(limit=20, status="new", source_groups=["community", "github", "custom"])
+        topics_by_group = db.list_topic_candidates_filtered(limit=20, status="new", source_groups=["community", "github", "x", "custom"])
         merged: dict[int, dict] = {}
         for topic in topics_by_category + topics_by_group:
             merged[int(topic["id"])] = topic
@@ -547,7 +549,7 @@ def _select_daily_plan_topics(db: DraftDatabase, limit: int) -> list[dict]:
 
     _pick_from(lambda _t, c, _g: c in {"tool", "guide", "creator", "dev", "mobile"})
     _pick_from(lambda _t, c, _g: c in {"news", "model", "agent", "research", "privacy"})
-    _pick_from(lambda _t, c, g: c in {"drama", "meme"} or g in {"community", "github", "custom"})
+    _pick_from(lambda _t, c, g: c in {"drama", "meme"} or g in {"community", "github", "x", "custom"})
     while len(selected) < limit:
         previous = len(selected)
         _pick_from(lambda _t, _c, _g: True, respect_balance=True)
@@ -1683,6 +1685,8 @@ async def _create_draft_from_topic(
             used_metadata_fallback = True
             operation = "generate_topic_metadata_fallback"
         if not generation_result.content.strip():
+            if used_metadata_fallback and _is_blocked_source_url(source_url):
+                return None, REDDIT_METADATA_EMPTY_REPLY_TEXT
             return None, EMPTY_AI_REPLY_TEXT
         source_image_url = details.preview_image_url if details else None
         new_draft_id = db.create_draft(
@@ -2233,8 +2237,9 @@ def _render_sources_status(reports: list[SourceReport]) -> str:
     total = len(reports)
     ok = sum(1 for r in reports if r.status == "ok")
     empty = sum(1 for r in reports if r.status == "empty")
+    skipped = sum(1 for r in reports if r.status == "skipped")
     errors = sum(1 for r in reports if r.status == "error")
-    lines = ["📡 Статус источников", "", f"Всего источников: {total}", f"Работают: {ok}", f"Пустые: {empty}", f"Ошибки: {errors}", "", "По группам:"]
+    lines = ["📡 Статус источников", "", f"Всего источников: {total}", f"Работают: {ok}", f"Пустые: {empty}", f"Отключены/пропущены: {skipped}", f"Ошибки: {errors}", "", "По группам:"]
     for group, label in SOURCE_GROUP_LABELS.items():
         group_reports = [r for r in reports if (r.source_group or "other") == group]
         if not group_reports:
@@ -2242,7 +2247,16 @@ def _render_sources_status(reports: list[SourceReport]) -> str:
                 lines.append(f"{label}: 0/0")
             continue
         group_ok = sum(1 for r in group_reports if r.status == "ok")
-        lines.append(f"{label}: {group_ok}/{len(group_reports)}")
+        group_skipped = sum(1 for r in group_reports if r.status == "skipped")
+        suffix = f", пропущено {group_skipped}" if group_skipped else ""
+        lines.append(f"{label}: {group_ok}/{len(group_reports)}{suffix}")
+
+    skipped_reports = [r for r in reports if r.status == "skipped"]
+    if skipped_reports:
+        lines.append("")
+        lines.append("Отключено/пропущено:")
+        for rep in skipped_reports[:8]:
+            lines.append(f"- {rep.name}: {rep.error or 'пропущено'}")
 
     problems = [r for r in reports if r.status in {"error", "empty"}]
     if problems:
@@ -2302,7 +2316,7 @@ def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list, 
             lines.extend(_render_collect_topic_line(item))
     else:
         lines.append("Новых сильных тем нет. Посмотри старые через /topics_all или добавь источники в CUSTOM_TOPIC_FEEDS.")
-    lively = [i for i in sorted(items, key=lambda i: i.score, reverse=True) if i.score >= 50 and (i.source_group in {"community","github","tools","custom"} or i.category in {"drama","meme","guide","creator"})][:5]
+    lively = [i for i in sorted(items, key=lambda i: i.score, reverse=True) if i.score >= 50 and (i.source_group in {"community","github","x","tools","custom"} or i.category in {"drama","meme","guide","creator"})][:5]
     lines.extend(["", "Живые темы:"])
     if lively:
         for item in lively:
@@ -2372,12 +2386,16 @@ async def collect_debug_command(update: Update, context: ContextTypes.DEFAULT_TY
     text = _render_collect_text(stats, items, inserted, debug=True)
     ok = sum(1 for r in reports if r.status == "ok")
     empty = sum(1 for r in reports if r.status == "empty")
+    skipped = sum(1 for r in reports if r.status == "skipped")
     errors = sum(1 for r in reports if r.status == "error")
     problems = [r for r in reports if r.status in {"error", "empty"}][:12]
     problem_lines = [f"- {r.name}: {r.error or 'empty'}" if r.status == "error" else f"- {r.name}: empty" for r in problems]
+    skipped_lines = [f"- {r.name}: {r.error or 'пропущено'}" for r in reports if r.status == "skipped"][:8]
     combined = text.replace("🧠 Темы собраны", "🧠 Темы собраны с диагностикой")
     combined += f"\n\nСвежесть: пропущено старых тем: {stats.stale} (лимит {getattr(settings, 'max_topic_age_days', 14)} дн.)"
-    combined += f"\n\nИсточники:\nРаботают: {ok}\nПустые: {empty}\nОшибки: {errors}"
+    combined += f"\n\nИсточники:\nРаботают: {ok}\nПустые: {empty}\nОтключены/пропущены: {skipped}\nОшибки: {errors}"
+    if skipped_lines:
+        combined += "\n\nОтключено/пропущено:\n" + "\n".join(skipped_lines)
     if problem_lines:
         combined += "\n\nПроблемы:\n" + "\n".join(problem_lines)
     if len([r for r in reports if r.status in {'error', 'empty'}]) > 12:
@@ -2509,7 +2527,7 @@ async def _topics_fun_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     topics_by_category = db.list_topic_candidates_filtered(limit=20, status="new", categories=["drama", "meme"])
-    topics_by_group = db.list_topic_candidates_filtered(limit=20, status="new", source_groups=["community", "github", "custom"])
+    topics_by_group = db.list_topic_candidates_filtered(limit=20, status="new", source_groups=["community", "github", "x", "custom"])
 
     merged: dict[int, dict] = {}
     for topic in topics_by_category + topics_by_group:
