@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from bot.database import DraftDatabase
 from bot.sources import TopicItem, _with_scoring
+import bot.handlers as handlers
 from bot.handlers import (
     _build_media_preview_caption,
     _build_moderation_text,
@@ -12,8 +13,114 @@ from bot.handlers import (
     _render_failed_drafts_text,
     _send_moderation_preview,
     _collect_topics_with_stats,
+    _find_nearest_available_slot,
+    _moderation_keyboard,
     _render_collect_text,
+    _schedule_draft_to_nearest_slot,
+    _topic_actions_keyboard,
 )
+
+
+class _FixedDateTime(datetime):
+    fixed_now: datetime | None = None
+
+    @classmethod
+    def now(cls, tz=None):
+        value = cls.fixed_now or datetime.now(timezone.utc)
+        if tz is None:
+            return value.replace(tzinfo=None)
+        return value.astimezone(tz)
+
+
+def _keyboard_texts(markup) -> list[str]:
+    return [button.text for row in markup.inline_keyboard for button in row]
+
+
+def _keyboard_buttons(markup):
+    return [button for row in markup.inline_keyboard for button in row]
+
+
+def _settings(slots: list[str], timezone_name: str = "UTC") -> SimpleNamespace:
+    return SimpleNamespace(daily_post_slots=slots, schedule_timezone=timezone_name)
+
+
+def _with_fixed_now(now: datetime):
+    class _Patch:
+        def __enter__(self):
+            self.original = handlers.datetime
+            _FixedDateTime.fixed_now = now
+            handlers.datetime = _FixedDateTime
+
+        def __exit__(self, exc_type, exc, tb):
+            handlers.datetime = self.original
+            _FixedDateTime.fixed_now = None
+    return _Patch()
+
+
+def _run_nearest_slot_selftest() -> None:
+    fixed_now = datetime(2026, 5, 13, 10, 30, tzinfo=timezone.utc)
+    with _with_fixed_now(fixed_now):
+        tmp = TemporaryDirectory()
+        db = DraftDatabase(f"{tmp.name}/slots.db")
+        settings = _settings(["09:00", "11:00", "18:00"])
+        later_today = _find_nearest_available_slot(db, settings)
+        assert later_today.strftime("%Y-%m-%d %H:%M") == "2026-05-13 11:00"
+        draft_id = db.create_draft("slot test")
+        scheduled_text = _schedule_draft_to_nearest_slot(db, settings, draft_id)
+        stored = db.get_draft(draft_id)
+        assert scheduled_text == "13.05 11:00"
+        assert stored["status"] == "scheduled"
+        assert stored["scheduled_at"] == "2026-05-13 11:00:00"
+        datetime.strptime(stored["scheduled_at"], "%Y-%m-%d %H:%M:%S")
+        tmp.cleanup()
+
+    with _with_fixed_now(fixed_now):
+        tmp = TemporaryDirectory()
+        db = DraftDatabase(f"{tmp.name}/full-today.db")
+        settings = _settings(["09:00", "11:00"])
+        booked_id = db.create_draft("booked")
+        db.schedule_draft(booked_id, "2026-05-13 11:00:00")
+        tomorrow = _find_nearest_available_slot(db, settings)
+        assert tomorrow.strftime("%Y-%m-%d %H:%M") == "2026-05-14 09:00"
+        tmp.cleanup()
+
+    with _with_fixed_now(fixed_now):
+        tmp = TemporaryDirectory()
+        db = DraftDatabase(f"{tmp.name}/double-book.db")
+        settings = _settings(["11:00", "18:00"])
+        booked_id = db.create_draft("booked")
+        db.schedule_draft(booked_id, "2026-05-13 11:00:00")
+        next_free = _find_nearest_available_slot(db, settings)
+        assert next_free.strftime("%Y-%m-%d %H:%M") == "2026-05-13 18:00"
+        tmp.cleanup()
+
+
+def _run_keyboard_selftest() -> None:
+    topic_keyboard = _topic_actions_keyboard(7, "https://example.com/topic")
+    topic_buttons = _keyboard_buttons(topic_keyboard)
+    assert any(button.text == "🔗 Открыть источник" and button.url == "https://example.com/topic" for button in topic_buttons)
+    assert "✍️ Создать черновик" in _keyboard_texts(topic_keyboard)
+    assert "❌ Отклонить тему" in _keyboard_texts(topic_keyboard)
+    assert not any("Shorts" in text or "Reels" in text or "TikTok" in text or "Видео" in text for text in _keyboard_texts(topic_keyboard))
+
+    draft_keyboard = _moderation_keyboard(5, "draft", source_url="https://example.com/source")
+    draft_buttons = _keyboard_buttons(draft_keyboard)
+    draft_texts = _keyboard_texts(draft_keyboard)
+    assert "📅 В ближайший слот" in draft_texts
+    assert "♻️ Перегенерировать" in draft_texts
+    assert any(button.text == "🔗 Открыть источник" and button.url == "https://example.com/source" for button in draft_buttons)
+
+    approved_texts = _keyboard_texts(_moderation_keyboard(5, "approved", source_url="https://example.com/source"))
+    assert "📅 В ближайший слот" in approved_texts
+    assert "♻️ Перегенерировать" in approved_texts
+
+    for status in ["scheduled", "published", "rejected", "failed"]:
+        texts = _keyboard_texts(_moderation_keyboard(5, status, source_url="https://example.com/source"))
+        assert "📅 В ближайший слот" not in texts
+        assert "♻️ Перегенерировать" not in texts
+
+    no_source_texts = _keyboard_texts(_moderation_keyboard(5, "draft"))
+    assert "♻️ Перегенерировать" not in no_source_texts
 
 
 async def _run_collect_stats_selftest() -> None:
@@ -105,6 +212,8 @@ def run() -> None:
     assert second_row[1].text == "🔁 Восстановить #43"
     assert second_row[1].callback_data == "restore_draft:43"
 
+    _run_nearest_slot_selftest()
+    _run_keyboard_selftest()
     asyncio.run(_run_collect_stats_selftest())
 
     print("OK")
