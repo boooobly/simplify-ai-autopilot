@@ -690,6 +690,38 @@ def _clear_pending_plan_schedule(context) -> None:
     context.user_data.pop("pending_plan_schedule_items", None)
 
 
+PENDING_EDIT_DRAFT_KEY = "pending_edit_draft_id"
+PENDING_MEDIA_DRAFT_KEY = "pending_media_draft_id"
+
+
+def _set_pending_edit(context, draft_id: int) -> None:
+    context.user_data[PENDING_EDIT_DRAFT_KEY] = draft_id
+
+
+def _get_pending_edit(context) -> int | None:
+    value = context.user_data.get(PENDING_EDIT_DRAFT_KEY)
+    return int(value) if value is not None else None
+
+
+def _clear_pending_edit(context) -> None:
+    context.user_data.pop(PENDING_EDIT_DRAFT_KEY, None)
+
+
+def _set_pending_media(context, draft_id: int) -> None:
+    context.user_data[PENDING_MEDIA_DRAFT_KEY] = draft_id
+    context.user_data["pending_media_items"] = []
+
+
+def _get_pending_media(context) -> int | None:
+    value = context.user_data.get(PENDING_MEDIA_DRAFT_KEY)
+    return int(value) if value is not None else None
+
+
+def _clear_pending_media(context) -> None:
+    context.user_data.pop(PENDING_MEDIA_DRAFT_KEY, None)
+    context.user_data.pop("pending_media_items", None)
+
+
 def _generated_plan_keyboard(day_offset: int, has_created: bool) -> InlineKeyboardMarkup | None:
     queue_callback = "queue_today:0" if day_offset == 0 else "queue_tomorrow:0"
     schedule_callback = "menu_schedule_generated_plan_day" if day_offset == 0 else "menu_schedule_generated_plan_tomorrow"
@@ -912,7 +944,7 @@ def _moderation_keyboard(
         if has_media:
             rows.append([InlineKeyboardButton("🗑 Убрать медиа", callback_data=f"remove_media:{draft_id}")])
         else:
-            rows.append([InlineKeyboardButton("📎 Прикрепить медиа", callback_data=f"attach_media:{draft_id}")])
+            rows.append([InlineKeyboardButton("📎 Прикрепить медиа", callback_data=f"attach_media_flow:{draft_id}")])
         rows.append([InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")])
         return InlineKeyboardMarkup(rows)
     return InlineKeyboardMarkup([[InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")]])

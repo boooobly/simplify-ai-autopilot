@@ -16,6 +16,7 @@ from bot.handlers import (
     _find_nearest_available_slot,
     _latest_actionable_drafts,
     _moderation_keyboard,
+    _parse_callback_data,
     _queue_day_slots,
     _queue_keyboard,
     _render_collect_text,
@@ -238,6 +239,14 @@ def _run_keyboard_selftest() -> None:
     assert "♻️ Перегенерировать" in draft_texts
     assert "🖼 Прикрепить картинку источника" not in draft_texts
     assert any(button.text == "🔗 Открыть источник" and button.url == "https://example.com/source" for button in draft_buttons)
+    manual_media_buttons = [button for button in draft_buttons if button.text == "📎 Прикрепить медиа"]
+    assert len(manual_media_buttons) == 1
+    manual_media_callback = manual_media_buttons[0].callback_data
+    assert manual_media_callback == "attach_media_flow:5"
+    manual_media_action, manual_media_draft_id, manual_media_slot = _parse_callback_data(manual_media_callback)
+    assert manual_media_draft_id == 5
+    assert manual_media_slot is None
+    assert manual_media_action == "attach_media_flow"
 
     source_image_texts = _keyboard_texts(
         _moderation_keyboard(
@@ -287,6 +296,57 @@ def _run_keyboard_selftest() -> None:
 
     no_source_texts = _keyboard_texts(_moderation_keyboard(5, "draft"))
     assert "♻️ Перегенерировать" not in no_source_texts
+
+
+class _FakeCallbackQuery:
+    def __init__(self, data: str, user_id: int) -> None:
+        self.data = data
+        self.from_user = SimpleNamespace(id=user_id)
+        self.message = SimpleNamespace(photo=None, video=None, animation=None, document=None, caption=None)
+        self.answers: list[tuple[str | None, bool]] = []
+        self.edited_text: str | None = None
+        self.edited_reply_markup = None
+
+    async def answer(self, text: str | None = None, show_alert: bool = False) -> None:
+        self.answers.append((text, show_alert))
+
+    async def edit_message_text(self, text: str, reply_markup=None, link_preview_options=None) -> None:
+        self.edited_text = text
+        self.edited_reply_markup = reply_markup
+
+    async def edit_message_caption(self, caption: str, reply_markup=None) -> None:
+        self.edited_text = caption
+        self.edited_reply_markup = reply_markup
+
+
+async def _run_moderation_media_attach_callback_selftest() -> None:
+    tmp = TemporaryDirectory()
+    db = DraftDatabase(f"{tmp.name}/moderation-media.db")
+    draft_id = db.create_draft("Draft ready for manual media attach")
+    keyboard = _moderation_keyboard(draft_id, "draft")
+    media_buttons = [button for button in _keyboard_buttons(keyboard) if button.text == "📎 Прикрепить медиа"]
+    assert len(media_buttons) == 1
+    callback_data = media_buttons[0].callback_data
+    action, parsed_draft_id, slot = _parse_callback_data(callback_data)
+    assert action == "attach_media_flow"
+    assert parsed_draft_id == draft_id
+    assert slot is None
+
+    settings = SimpleNamespace(admin_id=123, custom_emoji_aliases={})
+    context = SimpleNamespace(bot_data={"settings": settings, "db": db}, user_data={"pending_edit_draft_id": draft_id})
+    query = _FakeCallbackQuery(callback_data, settings.admin_id)
+    update = SimpleNamespace(callback_query=query)
+
+    await handlers.moderation_callback(update, context)
+
+    assert handlers._get_pending_media(context) == draft_id
+    assert "pending_edit_draft_id" not in context.user_data
+    assert query.edited_text is not None
+    assert f"Прикрепление медиа к черновику #{draft_id}" in query.edited_text
+    reply_callbacks = [button.callback_data for button in _keyboard_buttons(query.edited_reply_markup)]
+    assert f"attach_media_done:{draft_id}" in reply_callbacks
+    assert f"attach_media_cancel:{draft_id}" in reply_callbacks
+    tmp.cleanup()
 
 
 async def _run_collect_stats_selftest() -> None:
@@ -393,6 +453,7 @@ def run() -> None:
     _run_latest_actionable_drafts_selftest()
     _run_queue_keyboard_selftest()
     _run_keyboard_selftest()
+    asyncio.run(_run_moderation_media_attach_callback_selftest())
     asyncio.run(_run_collect_stats_selftest())
 
     print("OK")
