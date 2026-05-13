@@ -72,9 +72,42 @@ def run() -> None:
         "900 stars today",
     )
     assert "AI-Trader" in title_ru
-    assert "open-source" in title_ru
-    assert "financial trading" in summary_ru
+    assert "AI-агентами" in title_ru
+    assert "финансового трейдинга" in summary_ru
+    assert "12,345 stars" in summary_ru
+    assert "900 stars today" in summary_ru
     assert "AI-инструменты" in angle_ru or "open-source" in angle_ru
+
+    llm_title, llm_summary, llm_angle = build_github_topic_ru_metadata(
+        "rasbt / LLMs-from-scratch",
+        "Implement a ChatGPT-like LLM in PyTorch from scratch, step by step",
+        "Jupyter Notebook",
+        "94,345",
+        "824 stars today",
+    )
+    assert llm_title == "LLMs-from-scratch - пошаговая сборка ChatGPT-подобной модели на PyTorch"
+    assert "rasbt" not in llm_title
+    assert "LLMs-from-scratch" in llm_title
+    assert "Implement a ChatGPT-like LLM" not in llm_title
+    assert "PyTorch" in llm_title and "PyTorch" in llm_summary
+    assert "ChatGPT" in llm_title and "ChatGPT" in llm_summary
+    assert "LLM" in llm_summary
+    assert "Jupyter Notebook" in llm_summary
+    assert "На GitHub: 94,345 stars, 824 stars today." in llm_summary
+    assert "stars today" in llm_summary
+    assert "LLM устроены изнутри" in llm_angle
+
+    unknown_title, unknown_summary, _ = build_github_topic_ru_metadata(
+        "owner / UnknownRepo",
+        "Fast reliable building blocks for production systems",
+        "Go",
+        "10",
+        None,
+    )
+    assert unknown_title == "UnknownRepo - GitHub-проект по AI/разработке"
+    assert "Описание GitHub: Fast reliable building blocks for production systems." in unknown_summary
+    assert "Формат - Go." in unknown_summary
+    assert "На GitHub: 10 stars." in unknown_summary
 
     cyr_title, cyr_summary, _ = build_github_topic_ru_metadata("owner / РусскийПроект", None)
     assert "РусскийПроект" in cyr_title

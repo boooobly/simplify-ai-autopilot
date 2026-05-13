@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -296,26 +297,139 @@ def _repo_short_name(repo_name: str) -> str:
     return repo_name.split("/")[-1].strip() if "/" in repo_name else repo_name.strip()
 
 
+def _github_description_details_ru(language: str | None, stars: str | None, stars_today: str | None) -> str:
+    details: list[str] = []
+    if language:
+        details.append(f"Формат - {language}.")
+
+    stat_bits: list[str] = []
+    if stars:
+        clean_stars = stars.strip()
+        stat_bits.append(clean_stars if "star" in clean_stars.casefold() else f"{clean_stars} stars")
+    if stars_today:
+        stat_bits.append(stars_today.strip())
+    if stat_bits:
+        details.append(f"На GitHub: {', '.join(stat_bits)}.")
+    return " ".join(details)
+
+
+def _translate_github_description_fragment_ru(text: str) -> str:
+    translated = " ".join((text or "").split()).strip(" .")
+    replacements = [
+        (r"\bChatGPT-like\s+LLM\b", "ChatGPT-подобная LLM"),
+        (r"\bLLMs\b", "LLM"),
+        (r"\bAI agents\b", "AI-агенты"),
+        (r"\bagents\b", "AI-агенты"),
+        (r"\bAI agent\b", "AI-агент"),
+        (r"\bagent\b", "AI-агент"),
+        (r"\bworkflows\b", "рабочие процессы"),
+        (r"\bworkflow\b", "рабочий процесс"),
+        (r"\bimages\b", "изображения"),
+        (r"\bimage\b", "изображения"),
+        (r"\bvideos\b", "видео"),
+        (r"\bvideo\b", "видео"),
+        (r"\baudios\b", "аудио"),
+        (r"\baudio\b", "аудио"),
+        (r"\bfinancial trading\b", "финансового трейдинга"),
+        (r"\bmachine learning\b", "machine learning"),
+    ]
+    for pattern, replacement in replacements:
+        translated = re.sub(pattern, replacement, translated, flags=re.IGNORECASE)
+    translated = re.sub(r"\s+", " ", translated).strip()
+    return translated
+
+
+def _github_description_ru(description: str) -> tuple[str | None, str | None, str | None]:
+    """Return deterministic Russian title phrase, summary sentence and angle for common GitHub descriptions."""
+    clean = " ".join((description or "").split()).strip()
+    if not clean:
+        return None, None, None
+
+    implement_match = re.match(r"(?i)^implement\s+(.+?)(?:,?\s+step by step)?$", clean)
+    if implement_match and "from scratch" in clean.casefold():
+        subject = implement_match.group(1)
+        subject = re.sub(r"(?i)\s+from scratch\b", "", subject).strip(" ,")
+        tech_match = re.search(r"(?i)\s+in\s+([A-Za-z0-9 ._+/#-]+?)$", subject)
+        tech = None
+        if tech_match:
+            tech = tech_match.group(1).strip()
+            subject = subject[: tech_match.start()].strip(" ,")
+
+        if re.fullmatch(r"(?i)(?:an?\s+)?ChatGPT-like\s+LLM", subject):
+            tech_part = f" на {tech}" if tech else ""
+            step_title = "пошаговая " if "step by step" in clean.casefold() else ""
+            title_phrase = f"{step_title}сборка ChatGPT-подобной модели{tech_part}"
+            summary_sentence = f"Репозиторий показывает, как с нуля собрать ChatGPT-подобную LLM{tech_part}."
+            angle = "Можно подать как полезный open-source проект для тех, кто хочет понять, как LLM устроены изнутри."
+            return title_phrase, summary_sentence, angle
+
+        translated_subject = _translate_github_description_fragment_ru(re.sub(r"(?i)^an?\s+", "", subject))
+        tech_part = f" на {tech}" if tech else ""
+        step_title = "пошаговая " if "step by step" in clean.casefold() else ""
+        title_phrase = f"{step_title}сборка {translated_subject}{tech_part} с нуля"
+        summary_sentence = f"Репозиторий показывает, как с нуля собрать {translated_subject}{tech_part}."
+        return title_phrase, summary_sentence, None
+
+    tutorial_match = re.search(r"(?i)\btutorial\b", clean)
+    if tutorial_match:
+        translated = _translate_github_description_fragment_ru(re.sub(r"(?i)\btutorial\b", "", clean).strip(" :-"))
+        title_phrase = "обучающий проект" + (f" по теме: {translated}" if translated else "")
+        summary_sentence = "Репозиторий выглядит как обучающий проект" + (f" по теме: {translated}." if translated else ".")
+        return title_phrase, summary_sentence, None
+
+    framework_match = re.match(r"(?i)^(?:an?\s+)?(?:open-source\s+)?(.+?framework)\s+for\s+(.+)$", clean)
+    if framework_match:
+        raw_framework = framework_match.group(1)
+        if re.fullmatch(r"(?i)multi-agent framework", raw_framework):
+            framework = "фреймворк с AI-агентами"
+        else:
+            framework = _translate_github_description_fragment_ru(raw_framework)
+            framework = re.sub(r"(?i)^framework$", "фреймворк", framework)
+        purpose = _translate_github_description_fragment_ru(framework_match.group(2))
+        title_phrase = f"{framework} для {purpose}"
+        summary_sentence = f"Репозиторий выглядит как {framework} для {purpose}."
+        return title_phrase, summary_sentence, None
+
+    translated = _translate_github_description_fragment_ru(clean)
+    if translated != clean:
+        return translated, f"Репозиторий выглядит как проект про {translated}.", None
+
+    return None, None, None
+
+
 def build_github_topic_ru_metadata(
     repo_name: str, description: str | None = None, language: str | None = None, stars: str | None = None, stars_today: str | None = None
 ) -> tuple[str, str, str]:
     """Build deterministic Russian explanation for a GitHub Trending topic."""
     repo_short = _repo_short_name(repo_name) or "GitHub-проект"
     clean_description = _shorten(description or "")
-    tech_bits = [bit for bit in [language, stars, stars_today] if bit]
-    suffix = f" ({', '.join(tech_bits)})" if tech_bits else ""
+    title_phrase_ru, summary_sentence_ru, angle_override = _github_description_ru(clean_description) if clean_description else (None, None, None)
+    details_ru = _github_description_details_ru(language, stars, stars_today)
+
     if _contains_cyrillic(repo_name) and not clean_description:
         title_ru = repo_name
-    elif clean_description:
-        title_ru = _shorten(f"{repo_short} - open-source проект: {clean_description}", 120)
+    elif title_phrase_ru:
+        title_ru = _shorten(f"{repo_short} - {title_phrase_ru}", 120)
     else:
         title_ru = f"{repo_short} - GitHub-проект по AI/разработке"
 
-    if clean_description:
-        summary_ru = _shorten(f"Репозиторий выглядит как AI/разработческий проект: {clean_description}{suffix}.", 220)
+    if summary_sentence_ru:
+        summary_ru = _shorten(" ".join(bit for bit in [summary_sentence_ru, details_ru] if bit), 260)
+    elif clean_description:
+        summary_ru = _shorten(
+            " ".join(
+                bit
+                for bit in [
+                    f"Репозиторий выглядит как AI/разработческий проект. Описание GitHub: {clean_description}.",
+                    details_ru,
+                ]
+                if bit
+            ),
+            260,
+        )
     else:
         summary_ru = "Похоже на GitHub-проект по AI/разработке. Лучше открыть ссылку и быстро проверить, есть ли там понятная польза для поста."
-    angle_ru = "Можно подать как пример того, какие AI-инструменты и open-source проекты сейчас быстро набирают внимание у разработчиков."
+    angle_ru = angle_override or "Можно подать как пример того, какие AI-инструменты и open-source проекты сейчас быстро набирают внимание у разработчиков."
     return title_ru, summary_ru, angle_ru
 
 
