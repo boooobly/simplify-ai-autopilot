@@ -23,6 +23,7 @@ REQUIRED_KEYS = {
     'CUSTOM_EMOJI_MAP',
     'CUSTOM_EMOJI_ALIASES',
     'CUSTOM_TOPIC_FEEDS',
+    'MAX_TOPIC_AGE_DAYS',
 }
 
 
@@ -32,6 +33,7 @@ REQUIRED_HINTS = [
     'CUSTOM_EMOJI_MAP format: fallback_emoji|custom_emoji_id;...',
     'CUSTOM_EMOJI_ALIASES format: alias|fallback_emoji|custom_emoji_id;...',
     'CUSTOM_TOPIC_FEEDS format: name|group|url,name|group|url',
+    'MAX_TOPIC_AGE_DAYS controls freshness filter for RSS topics (1..60 days).',
     'Daily schedule slots, format: HH:MM,HH:MM,HH:MM',
 ]
 

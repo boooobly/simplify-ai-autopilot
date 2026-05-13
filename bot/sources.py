@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from xml.etree import ElementTree as ET
 
@@ -27,6 +27,7 @@ class TopicItem:
     angle_ru: str | None = None
     reason_ru: str | None = None
     original_description: str | None = None
+    stars_today: str | None = None
     normalized_title: str = ""
     source_group: str = "other"
 
@@ -71,7 +72,15 @@ def _contains_cyrillic(text: str) -> bool:
 
 
 def _with_scoring(topic: TopicItem) -> TopicItem:
-    score, category, reason = score_topic(topic.title, topic.source, topic.url, topic.source_group)
+    score, category, reason = score_topic(
+        topic.title,
+        topic.source,
+        topic.url,
+        topic.source_group,
+        description=topic.original_description,
+        published_at=topic.published_at,
+        stars_today=topic.stars_today,
+    )
     topic.score = score
     topic.category = category
     topic.reason = reason
@@ -108,12 +117,27 @@ def _parse_rss(xml_text: str, source_name: str, source_group: str, max_items: in
     return topics
 
 
+def _format_parsed_dt(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _parse_dt(raw: str) -> str | None:
     if not raw:
         return None
+    value = raw.strip()
+    if not value:
+        return None
     try:
-        return parsedate_to_datetime(raw).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        return _format_parsed_dt(parsedate_to_datetime(value))
     except Exception:
+        pass
+
+    iso_value = value.replace("Z", "+00:00")
+    try:
+        return _format_parsed_dt(datetime.fromisoformat(iso_value))
+    except ValueError:
         return None
 
 
@@ -183,7 +207,7 @@ def _fetch_github_trending_ai() -> list[TopicItem]:
         if not repo_path.startswith("/"):
             continue
         title_ru, summary_ru, angle_ru = build_github_topic_ru_metadata(repo_name, description, language, stars, stars_today)
-        topics.append(_with_scoring(TopicItem(title=f"GitHub Trending: {repo_name}", url=f"https://github.com{repo_path}", source="GitHub Trending AI", published_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), source_group="github", title_ru=title_ru, summary_ru=summary_ru, angle_ru=angle_ru, original_description=description)))
+        topics.append(_with_scoring(TopicItem(title=f"GitHub Trending: {repo_name}", url=f"https://github.com{repo_path}", source="GitHub Trending AI", published_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), source_group="github", title_ru=title_ru, summary_ru=summary_ru, angle_ru=angle_ru, original_description=description, stars_today=stars_today)))
     return topics[:8]
 
 

@@ -2,24 +2,70 @@ from bot.topic_scoring import normalize_topic_title, score_topic
 
 
 def run() -> None:
-    s0, c0, _ = score_topic("OpenAI launches new GPT model", "OpenAI Blog", "https://openai.com", "official_ai")
-    assert c0 in {"model", "news"}
-    assert s0 >= 55
+    useful_tool, useful_category, _ = score_topic(
+        "Free AI video editor app for quick captions and shorts",
+        "Product Hunt",
+        "https://producthunt.com/posts/ai-video-editor",
+        "tools",
+        published_at="2026-05-12 00:00:00",
+    )
+    assert useful_tool >= 80 and useful_category in {"creator", "tool", "mobile"}
 
-    s1, c1, _ = score_topic("Free open-source AI video editor", "GitHub", "https://github.com/x", "tools")
-    assert s1 >= 80 and c1 in {"creator", "tool", "dev", "guide"}
+    funding, funding_category, _ = score_topic(
+        "Enterprise AI startup raises $80M Series B funding",
+        "TechCrunch AI",
+        "https://example.com/funding",
+        "tech_media",
+        published_at="2026-05-12 00:00:00",
+    )
+    assert funding_category == "business"
+    assert funding < useful_tool - 25
+    assert funding < 60
 
-    s2, c2, _ = score_topic("Company raises funding", "News", "https://x", "official_ai")
-    assert c2 == "business" or s2 < 65
+    research, research_category, _ = score_topic(
+        "New AI research paper proposes dataset for abstract reasoning",
+        "arXiv",
+        "https://arxiv.org/abs/123",
+        "tech_media",
+        published_at="2026-05-12 00:00:00",
+    )
+    assert research_category == "research"
+    assert research < 60
 
-    s3, c3, _ = score_topic("AI tool website for removing background", "Tool Hunt", "https://example.com", "tools")
-    assert c3 == "tool"
+    github_clear, github_clear_category, _ = score_topic(
+        "GitHub Trending: owner / ClipWizard",
+        "GitHub Trending AI",
+        "https://github.com/owner/clipwizard",
+        "github",
+        description="Open-source local app and browser extension for AI video editing workflow automation",
+        stars_today="420 stars today",
+        published_at="2026-05-12 00:00:00",
+    )
+    github_empty, _, github_empty_reason = score_topic(
+        "GitHub Trending: owner / llm-kernel-bindings",
+        "GitHub Trending AI",
+        "https://github.com/owner/llm-kernel-bindings",
+        "github",
+        description="",
+        stars_today="12 stars today",
+        published_at="2026-05-12 00:00:00",
+    )
+    assert github_clear_category in {"tool", "creator", "agent", "dev"}
+    assert github_clear >= github_empty + 20
+    assert github_clear < 100
+    assert "GitHub без описания" in github_empty_reason
 
-    s4, c4, r4 = score_topic("GitHub repo for AI coding agent", "GitHub", "https://github.com/example/repo", "github")
-    assert c4 in {"dev", "agent", "tool"} or (s4 >= 70 and "разработка/GitHub" in r4)
+    spam, _, _ = score_topic(
+        "Best AI crypto casino airdrop and token presale",
+        "Spam",
+        "https://example.com/casino",
+        "custom",
+        published_at="2026-05-12 00:00:00",
+    )
+    assert spam < 35
 
-    s5, c5, _ = score_topic("New AI research paper on alignment", "arXiv", "https://arxiv.org/abs/123", "tech_media")
-    assert c5 == "research"
+    missing_date, _, reason = score_topic("AI tool for prompts", "Blog", "https://example.com", "tech_media")
+    assert "нет даты" in reason
 
     assert normalize_topic_title("The new GPT-5 release!!!") == "gpt 5 release"
 

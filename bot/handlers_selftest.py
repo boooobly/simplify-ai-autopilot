@@ -1,10 +1,46 @@
+import asyncio
+from datetime import datetime, timedelta, timezone
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+
+from bot.database import DraftDatabase
+from bot.sources import TopicItem, _with_scoring
 from bot.handlers import (
     _build_media_preview_caption,
     _build_moderation_text,
     _failed_drafts_keyboard,
     _render_failed_drafts_text,
     _send_moderation_preview,
+    _collect_topics_with_stats,
+    _render_collect_text,
 )
+
+
+async def _run_collect_stats_selftest() -> None:
+    tmp = TemporaryDirectory()
+    db = DraftDatabase(f"{tmp.name}/topics.db")
+    fresh_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    old_date = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+    items = [
+        _with_scoring(TopicItem("Fresh AI tool app for video captions", "https://example.com/fresh", "Test", fresh_date, source_group="tools")),
+        _with_scoring(TopicItem("Old AI tool app for video captions", "https://example.com/old", "Test", old_date, source_group="tech_media")),
+        _with_scoring(TopicItem("AI tool without date for prompts", "https://example.com/no-date", "Test", None, source_group="tech_media")),
+    ]
+    stats, all_items, inserted = await _collect_topics_with_stats(
+        db,
+        items=items,
+        settings=SimpleNamespace(max_topic_age_days=14, has_ai_provider=False),
+    )
+    assert stats.total == 3
+    assert stats.stale == 1
+    assert stats.missing_date == 1
+    assert stats.new >= 1
+    assert any(item.url == "https://example.com/fresh" for item in inserted)
+    assert all_items == items
+    summary = _render_collect_text(stats, all_items, inserted)
+    tmp.cleanup()
+    assert "Старые: 1" in summary
+    assert "Без даты: 1" in summary
 
 
 def run() -> None:
@@ -64,6 +100,8 @@ def run() -> None:
     assert second_row[0].callback_data == "draft_info:43"
     assert second_row[1].text == "🔁 Восстановить #43"
     assert second_row[1].callback_data == "restore_draft:43"
+
+    asyncio.run(_run_collect_stats_selftest())
 
     print("OK")
 
