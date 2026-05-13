@@ -318,33 +318,133 @@ def _parse_callback_data(data: str) -> tuple[str, int, str | None]:
     if data.startswith("schedule_slot:"):
         action, draft_id_raw, slot = data.split(":", 2)
         return action, int(draft_id_raw), slot
+    if data.startswith("queue_pick_slot:"):
+        action, day_offset_raw, slot = data.split(":", 2)
+        return action, int(day_offset_raw), slot
+    if data.startswith("queue_schedule_draft:"):
+        action, draft_id_raw, day_offset_raw, slot = data.split(":", 3)
+        return action, int(draft_id_raw), f"{day_offset_raw}:{slot}"
     action, draft_id_raw = data.split(":", 1)
     return action, int(draft_id_raw), None
 
 
+def _can_publish(status: str | None) -> bool:
+    return status in {"draft", "approved", "scheduled"}
+
+
+def _can_schedule(status: str | None) -> bool:
+    return status in ACTIONABLE_DRAFT_STATUSES
+
+
+def _can_edit(status: str | None) -> bool:
+    return status in ACTIONABLE_DRAFT_STATUSES
+
+
+def _status_guard_message(action: str, status: str | None) -> str:
+    if status == "published":
+        if action == "schedule":
+            return "Опубликованный черновик уже нельзя планировать."
+        if action == "publish":
+            return "Этот черновик уже опубликован."
+        if action == "edit":
+            return "Опубликованный черновик нельзя редактировать."
+    if status == "rejected":
+        if action == "schedule":
+            return "Отклонённый черновик нельзя планировать."
+        if action == "publish":
+            return "Этот черновик отклонён. Сначала создай новый или восстанови его позже."
+        if action == "edit":
+            return "Отклонённый черновик нельзя редактировать."
+    if status == "publishing":
+        return "Черновик сейчас публикуется. Подожди немного."
+    if status == "failed":
+        return "Черновик в статусе failed. Сначала верни его в черновики."
+    if status == "scheduled" and action == "edit":
+        return "Запланированный черновик уже в очереди. Сначала сними его с очереди позже."
+    if status == "scheduled" and action == "schedule":
+        return "Черновик уже запланирован."
+    return f"Это действие недоступно для текущего статуса: {status or 'unknown'}."
+
+
+def _schedule_keyboard(draft_id: int, slots: list[str]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(slot, callback_data=f"schedule_slot:{draft_id}:{slot}")] for slot in slots]
+    )
+
+
+def _get_day_range(day_offset: int, timezone_str: str) -> tuple[datetime, datetime]:
+    tz = ZoneInfo(timezone_str)
+    now_local = datetime.now(tz)
+    start = now_local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=day_offset)
+    return start, start + timedelta(days=1)
+
+
 def _queue_draft_ids_for_day(db: DraftDatabase, settings, day_offset: int) -> list[int]:
-    start_local, end_local = _get_day_range(day_offset, settings.schedule_timezone)
-    start_utc = start_local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
-    end_utc = end_local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
-    return [int(d["id"]) for d in db.list_scheduled_drafts_between(start_utc, end_utc)]
+    return [int(slot["draft"]["id"]) for slot in _queue_day_slots(db, settings, day_offset) if slot.get("draft")]
 
 
-def _empty_slots_for_day(db: DraftDatabase, settings, day_offset: int) -> list[str]:
+def _normalize_slot_hhmm(slot_hhmm: str) -> str:
+    raw = str(slot_hhmm or "").strip()
+    if len(raw) == 4 and raw.isdigit():
+        return f"{raw[:2]}:{raw[2:]}"
+    return raw
+
+
+def _slot_callback_hhmm(slot: str) -> str:
+    return _normalize_slot_hhmm(slot).replace(":", "")
+
+
+def _short_post_preview(content: str | None, limit: int = 90) -> str:
+    preview = " ".join(str(content or "").strip().split())
+    if not preview:
+        return "[пусто]"
+    if len(preview) <= limit:
+        return preview
+    return preview[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _queue_day_slots(db: DraftDatabase, settings, day_offset: int) -> list[dict]:
+    tz = ZoneInfo(settings.schedule_timezone)
     start_local, end_local = _get_day_range(day_offset, settings.schedule_timezone)
     start_utc = start_local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
     end_utc = end_local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
     drafts = db.list_scheduled_drafts_between(start_utc, end_utc)
-    busy_slots: set[str] = set()
+    by_slot: dict[str, dict] = {}
+    extras_by_slot: dict[str, list[dict]] = {}
     for draft in drafts:
         scheduled_raw = str(draft.get("scheduled_at") or "")
+        if not scheduled_raw:
+            continue
         scheduled_utc = datetime.strptime(scheduled_raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
-        busy_slots.add(scheduled_utc.astimezone(ZoneInfo(settings.schedule_timezone)).strftime("%H:%M"))
-    return [slot for slot in settings.daily_post_slots if slot not in busy_slots]
+        hhmm = scheduled_utc.astimezone(tz).strftime("%H:%M")
+        if hhmm in by_slot:
+            extras_by_slot.setdefault(hhmm, []).append(draft)
+        else:
+            by_slot[hhmm] = draft
+    result: list[dict] = []
+    for slot in settings.daily_post_slots:
+        normalized = _normalize_slot_hhmm(slot)
+        draft = by_slot.get(normalized)
+        result.append(
+            {
+                "slot": normalized,
+                "status": "occupied" if draft else "free",
+                "draft": draft,
+                "preview": _short_post_preview(draft.get("content") if draft else None),
+                "extra_drafts": extras_by_slot.get(normalized, []),
+            }
+        )
+    return result
+
+
+def _empty_slots_for_day(db: DraftDatabase, settings, day_offset: int) -> list[str]:
+    return [str(slot["slot"]) for slot in _queue_day_slots(db, settings, day_offset) if slot.get("status") == "free"]
 
 
 
 def _parse_slot_hhmm(slot: str) -> tuple[int, int]:
-    hour, minute = map(int, slot.split(":", 1))
+    normalized = _normalize_slot_hhmm(slot)
+    hour, minute = map(int, normalized.split(":", 1))
     if hour < 0 or hour > 23 or minute < 0 or minute > 59:
         raise ValueError(f"Некорректный слот времени: {slot}")
     return hour, minute
@@ -375,10 +475,11 @@ def _find_nearest_available_slot(db: DraftDatabase, settings) -> datetime:
         busy_slots = _busy_slots_for_local_day(db, settings, day_start)
         for slot in slots:
             hour, minute = _parse_slot_hhmm(slot)
+            normalized_slot = _normalize_slot_hhmm(slot)
             candidate = day_start.replace(hour=hour, minute=minute, second=0, microsecond=0)
             if candidate <= now_local:
                 continue
-            if slot in busy_slots:
+            if normalized_slot in busy_slots:
                 continue
             return candidate
     raise ValueError("Нет свободных слотов на ближайшие 7 дней.")
@@ -389,6 +490,113 @@ def _schedule_draft_to_nearest_slot(db: DraftDatabase, settings, draft_id: int) 
     scheduled_utc = scheduled_local.astimezone(ZoneInfo("UTC"))
     db.schedule_draft(draft_id, scheduled_utc.strftime("%Y-%m-%d %H:%M:%S"))
     return scheduled_local.strftime("%d.%m %H:%M")
+
+
+def _latest_actionable_drafts(db: DraftDatabase, limit: int = 10) -> list[dict]:
+    rows = db.list_drafts(limit=max(limit * 5, 50))
+    result: list[dict] = []
+    for draft in rows:
+        if str(draft.get("status") or "") not in ACTIONABLE_DRAFT_STATUSES:
+            continue
+        if draft.get("scheduled_at"):
+            continue
+        result.append(draft)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _render_queue_day_text(db: DraftDatabase, settings, day_offset: int) -> str:
+    day_name = "сегодня" if day_offset == 0 else "завтра" if day_offset == 1 else f"через {day_offset} дн."
+    slots = _queue_day_slots(db, settings, day_offset)
+    free_count = sum(1 for slot in slots if slot.get("status") == "free")
+    occupied_count = len(slots) - free_count
+    lines = [f"📅 Очередь на {day_name}", f"Таймзона: {settings.schedule_timezone}", ""]
+    for slot in slots:
+        if slot.get("draft"):
+            draft = slot["draft"]
+            lines.extend([f"{slot['slot']} - #{draft['id']} - запланирован", str(slot.get("preview") or "[пусто]"), ""])
+        else:
+            lines.append(f"{slot['slot']} - свободно")
+    if lines and lines[-1] != "":
+        lines.append("")
+    lines.extend([f"Свободных слотов: {free_count}", f"Занятых слотов: {occupied_count}"])
+    return "\n".join(lines).rstrip()
+
+
+def _render_queue_text(db: DraftDatabase, settings, day_offset: int) -> str:
+    return _render_queue_day_text(db, settings, day_offset)
+
+
+def _is_local_slot_free(db: DraftDatabase, settings, day_offset: int, slot_hhmm: str) -> bool:
+    normalized = _normalize_slot_hhmm(slot_hhmm)
+    return any(slot.get("slot") == normalized and slot.get("status") == "free" for slot in _queue_day_slots(db, settings, day_offset))
+
+
+def _schedule_draft_to_local_slot(db: DraftDatabase, settings, draft_id: int, day_offset: int, slot_hhmm: str) -> str:
+    normalized_slot = _normalize_slot_hhmm(slot_hhmm)
+    configured_slots = [_normalize_slot_hhmm(slot) for slot in settings.daily_post_slots]
+    if normalized_slot not in configured_slots:
+        raise ValueError("Такого слота нет в настройках расписания.")
+    draft = db.get_draft(draft_id)
+    if not draft:
+        raise ValueError(f"Черновик #{draft_id} не найден.")
+    status = str(draft.get("status") or "")
+    if status not in ACTIONABLE_DRAFT_STATUSES:
+        raise ValueError(_status_guard_message("schedule", status))
+    if draft.get("scheduled_at"):
+        raise ValueError(f"Черновик #{draft_id} уже запланирован.")
+    tz = ZoneInfo(settings.schedule_timezone)
+    now_local = datetime.now(tz)
+    day_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=day_offset)
+    hour, minute = _parse_slot_hhmm(normalized_slot)
+    scheduled_local = day_start.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if scheduled_local <= now_local:
+        raise ValueError("Этот слот уже в прошлом. Выбери другой слот.")
+    if not _is_local_slot_free(db, settings, day_offset, normalized_slot):
+        raise ValueError("Этот слот уже занят. Обнови очередь и выбери свободный слот.")
+    scheduled_utc = scheduled_local.astimezone(ZoneInfo("UTC"))
+    db.schedule_draft(draft_id, scheduled_utc.strftime("%Y-%m-%d %H:%M:%S"))
+    return scheduled_local.strftime("%d.%m %H:%M")
+
+
+def _queue_keyboard(db: DraftDatabase, settings, day_offset: int) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    has_actionable = bool(_latest_actionable_drafts(db, limit=1))
+    for slot in _queue_day_slots(db, settings, day_offset):
+        draft = slot.get("draft")
+        if draft:
+            draft_id = int(draft["id"])
+            rows.append([
+                InlineKeyboardButton(f"👀 Открыть #{draft_id}", callback_data=f"draft_info:{draft_id}"),
+                InlineKeyboardButton(f"↩️ Снять с очереди #{draft_id}", callback_data=f"unschedule:{draft_id}"),
+            ])
+        elif has_actionable:
+            callback_slot = _slot_callback_hhmm(str(slot["slot"]))
+            rows.append([InlineKeyboardButton(f"➕ Поставить черновик {slot['slot']}", callback_data=f"queue_pick_slot:{day_offset}:{callback_slot}")])
+    if day_offset == 0:
+        rows.extend([
+            [InlineKeyboardButton("🔄 Обновить", callback_data="queue_today:0")],
+            [InlineKeyboardButton("📅 Завтра", callback_data="queue_tomorrow:0")],
+        ])
+    else:
+        rows.extend([
+            [InlineKeyboardButton("🔄 Обновить", callback_data="queue_tomorrow:0")],
+            [InlineKeyboardButton("📅 Сегодня", callback_data="queue_today:0")],
+        ])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _queue_draft_pick_keyboard(db: DraftDatabase, day_offset: int, slot_hhmm: str, limit: int = 10) -> InlineKeyboardMarkup:
+    normalized_slot = _normalize_slot_hhmm(slot_hhmm)
+    callback_slot = _slot_callback_hhmm(normalized_slot)
+    rows: list[list[InlineKeyboardButton]] = []
+    for draft in _latest_actionable_drafts(db, limit=limit):
+        draft_id = int(draft["id"])
+        rows.append([InlineKeyboardButton(f"#{draft_id} — {_short_post_preview(draft.get('content'), 45)}", callback_data=f"queue_schedule_draft:{draft_id}:{day_offset}:{callback_slot}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад к очереди", callback_data="queue_today:0" if day_offset == 0 else "queue_tomorrow:0")])
+    return InlineKeyboardMarkup(rows)
 
 
 def _select_daily_plan_topics(db: DraftDatabase, limit: int) -> list[dict]:
@@ -477,8 +685,6 @@ def _main_menu_text() -> str:
     return "🤖 Simplify AI Autopilot\n\nВыбери действие:"
 
 
-
-
 def _clear_pending_plan_schedule(context) -> None:
     context.user_data.pop("pending_plan_schedule_day", None)
     context.user_data.pop("pending_plan_schedule_items", None)
@@ -493,6 +699,8 @@ def _generated_plan_keyboard(day_offset: int, has_created: bool) -> InlineKeyboa
     rows.append([InlineKeyboardButton("📅 Открыть очередь", callback_data=queue_callback)])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")])
     return InlineKeyboardMarkup(rows) if rows else None
+
+
 def _main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -514,7 +722,7 @@ def _back_to_menu_keyboard() -> InlineKeyboardMarkup:
 
 
 def _settings_text(settings) -> str:
-    ai_provider = "OpenRouter" if settings.openrouter_api_key else ("OpenAI" if settings.openai_api_key else "не настроен")
+    ai_provider = _ai_provider_for_status(settings)
     return (
         "⚙️ Настройки\n\n"
         f"Провайдер ИИ: {ai_provider}\n"
@@ -665,39 +873,49 @@ def _moderation_keyboard(
     source_url: str | None = None,
     source_image_url: str | None = None,
 ) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
     if status == "scheduled":
-        rows = [
-            [InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")],
-            [InlineKeyboardButton("✅ Опубликовать сейчас", callback_data=f"publish:{draft_id}")],
-            [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")],
-        ]
-    elif status == "publishing":
-        rows = [[InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")]]
-    elif status == "failed":
-        rows = [
-            [InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")],
-            [InlineKeyboardButton("🔁 Вернуть в черновики", callback_data=f"restore_draft:{draft_id}")],
-            [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")],
-        ]
-    elif status in {"published", "rejected"}:
-        rows = [[InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")]]
-    else:
-        rows = [
-            [InlineKeyboardButton("✅ Опубликовать", callback_data=f"publish:{draft_id}")],
-            [InlineKeyboardButton("🗓️ Запланировать", callback_data=f"schedule:{draft_id}")],
-            [InlineKeyboardButton("📅 В ближайший слот", callback_data=f"schedule_nearest:{draft_id}")],
-            [InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")],
-            *([[InlineKeyboardButton("♻️ Перегенерировать", callback_data=f"regenerate:{draft_id}")]] if source_url else []),
-            [InlineKeyboardButton("✨ Улучшить Claude", callback_data=f"polish:{draft_id}")],
-            [InlineKeyboardButton("✏️ Редактировать текст", callback_data=f"edit_text:{draft_id}")],
-            [InlineKeyboardButton("📎 Прикрепить медиа", callback_data=f"attach_media_flow:{draft_id}")],
-            *([[InlineKeyboardButton("🖼 Прикрепить картинку источника", callback_data=f"attach_source_image:{draft_id}")]] if source_image_url and not has_media else []),
-            *([[InlineKeyboardButton("🗑 Убрать медиа", callback_data=f"remove_media:{draft_id}")]] if has_media else []),
-            [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")],
-        ]
-    if source_url:
-        rows.append([InlineKeyboardButton("🔗 Открыть источник", url=source_url)])
-    return InlineKeyboardMarkup(rows)
+        rows.extend(
+            [
+                [InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")],
+                [InlineKeyboardButton("✅ Опубликовать сейчас", callback_data=f"publish:{draft_id}")],
+                [InlineKeyboardButton("↩️ Снять с очереди", callback_data=f"unschedule:{draft_id}")],
+                [InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")],
+            ]
+        )
+        return InlineKeyboardMarkup(rows)
+    if status == "published":
+        return InlineKeyboardMarkup([[InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")]])
+    if status == "failed":
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")],
+                [InlineKeyboardButton("🔁 Восстановить", callback_data=f"restore_draft:{draft_id}")],
+            ]
+        )
+    if status in ACTIONABLE_DRAFT_STATUSES:
+        rows.extend(
+            [
+                [InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")],
+                [InlineKeyboardButton("✅ Опубликовать", callback_data=f"publish:{draft_id}")],
+                [InlineKeyboardButton("🗓️ Запланировать", callback_data=f"schedule:{draft_id}")],
+                [InlineKeyboardButton("📅 В ближайший слот", callback_data=f"schedule_nearest:{draft_id}")],
+                [InlineKeyboardButton("✨ Улучшить", callback_data=f"polish:{draft_id}")],
+                [InlineKeyboardButton("✏️ Редактировать текст", callback_data=f"edit_text:{draft_id}")],
+            ]
+        )
+        if source_url:
+            rows.append([InlineKeyboardButton("🔗 Открыть источник", url=source_url)])
+            rows.append([InlineKeyboardButton("♻️ Перегенерировать", callback_data=f"regenerate:{draft_id}")])
+        if source_image_url and not has_media:
+            rows.append([InlineKeyboardButton("🖼 Прикрепить картинку источника", callback_data=f"attach_source_image:{draft_id}")])
+        if has_media:
+            rows.append([InlineKeyboardButton("🗑 Убрать медиа", callback_data=f"remove_media:{draft_id}")])
+        else:
+            rows.append([InlineKeyboardButton("📎 Прикрепить медиа", callback_data=f"attach_media:{draft_id}")])
+        rows.append([InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{draft_id}")])
+        return InlineKeyboardMarkup(rows)
+    return InlineKeyboardMarkup([[InlineKeyboardButton("👀 Показать пост", callback_data=f"preview:{draft_id}")]])
 
 
 def _moderation_keyboard_for_draft(draft_id: int, draft: dict[str, object]) -> InlineKeyboardMarkup:
@@ -708,138 +926,6 @@ def _moderation_keyboard_for_draft(draft_id: int, draft: dict[str, object]) -> I
         source_url=draft.get("source_url"),
         source_image_url=draft.get("source_image_url"),
     )
-
-
-def _set_pending_edit(context: ContextTypes.DEFAULT_TYPE, draft_id: int) -> None:
-    context.user_data["pending_edit_draft_id"] = draft_id
-
-
-def _get_pending_edit(context: ContextTypes.DEFAULT_TYPE) -> int | None:
-    draft_id = context.user_data.get("pending_edit_draft_id")
-    return int(draft_id) if isinstance(draft_id, int) else None
-
-
-def _clear_pending_edit(context: ContextTypes.DEFAULT_TYPE) -> None:
-    context.user_data.pop("pending_edit_draft_id", None)
-
-
-def _set_pending_media(context: ContextTypes.DEFAULT_TYPE, draft_id: int) -> None:
-    context.user_data["pending_media_draft_id"] = draft_id
-    context.user_data["pending_media_items"] = []
-
-
-def _get_pending_media(context: ContextTypes.DEFAULT_TYPE) -> int | None:
-    draft_id = context.user_data.get("pending_media_draft_id")
-    return int(draft_id) if isinstance(draft_id, int) else None
-
-
-def _clear_pending_media(context: ContextTypes.DEFAULT_TYPE) -> None:
-    context.user_data.pop("pending_media_draft_id", None)
-    context.user_data.pop("pending_media_items", None)
-
-
-def _can_publish(status: str | None) -> bool:
-    return status in {"draft", "approved", "scheduled"}
-
-
-def _can_schedule(status: str | None) -> bool:
-    return status in {"draft", "approved"}
-
-
-def _can_edit(status: str | None) -> bool:
-    return status in {"draft", "approved"}
-
-
-def _status_guard_message(action: str, status: str | None) -> str:
-    if status == "published":
-        if action == "publish":
-            return "Этот черновик уже опубликован."
-        if action == "schedule":
-            return "Опубликованный черновик уже нельзя планировать."
-        return "Опубликованный черновик уже нельзя менять."
-    if status == "rejected" and action == "schedule":
-        return "Отклонённый черновик нельзя планировать."
-    if status == "rejected" and action == "publish":
-        return "Этот черновик отклонён. Сначала создай новый или восстанови его позже."
-    if status == "publishing":
-        return "Черновик сейчас публикуется. Подожди немного."
-    if status == "failed":
-        return "Черновик в статусе failed. Сначала верни его в черновики."
-    if status == "scheduled" and action == "edit":
-        return "Запланированный черновик уже в очереди. Сначала сними его с очереди позже."
-    return f"Это действие недоступно для текущего статуса: {status or 'unknown'}."
-
-
-def _schedule_keyboard(draft_id: int, slots: list[str]) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(slot, callback_data=f"schedule_slot:{draft_id}:{slot}")] for slot in slots]
-    )
-
-
-def _get_day_range(day_offset: int, timezone_str: str) -> tuple[datetime, datetime]:
-    tz = ZoneInfo(timezone_str)
-    now_local = datetime.now(tz)
-    start = now_local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=day_offset)
-    return start, start + timedelta(days=1)
-
-
-def _queue_keyboard(day_offset: int, draft_ids: list[int]) -> InlineKeyboardMarkup:
-    rows = []
-    for draft_id in draft_ids:
-        rows.append([InlineKeyboardButton(f"Снять #{draft_id} с очереди", callback_data=f"unschedule:{draft_id}")])
-    if day_offset == 0:
-        rows.extend([
-            [InlineKeyboardButton("🔄 Обновить", callback_data="queue_today:0")],
-            [InlineKeyboardButton("📅 Завтра", callback_data="queue_tomorrow:0")],
-        ])
-    else:
-        rows.extend([
-            [InlineKeyboardButton("🔄 Обновить", callback_data="queue_tomorrow:0")],
-            [InlineKeyboardButton("📅 Сегодня", callback_data="queue_today:0")],
-        ])
-    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")])
-    return InlineKeyboardMarkup(rows)
-
-
-def _render_queue_text(db: DraftDatabase, settings, day_offset: int) -> str:
-    day_name = "сегодня" if day_offset == 0 else "завтра"
-    start_local, end_local = _get_day_range(day_offset, settings.schedule_timezone)
-    start_utc = start_local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
-    end_utc = end_local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%d %H:%M:%S")
-    drafts = db.list_scheduled_drafts_between(start_utc, end_utc)
-    slots_map = {slot: None for slot in settings.daily_post_slots}
-    extra: list[dict[str, object]] = []
-    lines = [f"📅 План публикаций на {day_name}", "", "Слоты:"]
-    for draft in drafts:
-        scheduled_raw = str(draft.get("scheduled_at") or "")
-        scheduled_utc = datetime.strptime(scheduled_raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
-        scheduled_local = scheduled_utc.astimezone(ZoneInfo(settings.schedule_timezone))
-        hhmm = scheduled_local.strftime("%H:%M")
-        if hhmm in slots_map and slots_map[hhmm] is None:
-            slots_map[hhmm] = draft
-        else:
-            extra.append(draft)
-    for slot in settings.daily_post_slots:
-        bound = slots_map[slot]
-        lines.append(f"{slot} - #{bound['id']} scheduled" if bound else f"{slot} - пусто")
-    if not drafts:
-        lines.extend(["", "На этот день пока ничего не запланировано."])
-        return "\n".join(lines)
-    lines.extend(["", "Запланировано:"])
-    for draft in drafts:
-        scheduled_raw = str(draft.get("scheduled_at") or "")
-        scheduled_utc = datetime.strptime(scheduled_raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
-        local_time = scheduled_utc.astimezone(ZoneInfo(settings.schedule_timezone)).strftime("%H:%M")
-        snippet = (str(draft.get("content") or "").strip()[:90] or "[пусто]").replace("\n", " ")
-        lines.extend([f"#{draft['id']} - {local_time}", f"Текст: {snippet}", ""])
-    if extra:
-        lines.append("Дополнительно:")
-        for draft in extra:
-            scheduled_raw = str(draft.get("scheduled_at") or "")
-            scheduled_utc = datetime.strptime(scheduled_raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=ZoneInfo("UTC"))
-            local_time = scheduled_utc.astimezone(ZoneInfo(settings.schedule_timezone)).strftime("%H:%M")
-            lines.append(f"#{draft['id']} - {local_time}")
-    return "\n".join(lines).rstrip()
 
 
 def _preview_keyboard(draft_id: int) -> InlineKeyboardMarkup:
@@ -1295,7 +1381,7 @@ async def _handle_navigation_text(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text(summary, reply_markup=_generated_plan_keyboard(0, has_created))
         return True
     if text == NAV_QUEUE:
-        await update.message.reply_text(_render_queue_text(db, settings, day_offset=0), reply_markup=_queue_keyboard(0, _queue_draft_ids_for_day(db, settings, 0)))
+        await update.message.reply_text(_render_queue_text(db, settings, day_offset=0), reply_markup=_queue_keyboard(db, settings, 0))
         return True
     if text == NAV_DRAFTS:
         await drafts_command(update, context)
@@ -1456,7 +1542,7 @@ async def queue_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if update.message:
         await update.message.reply_text(
             _render_queue_text(db, settings, day_offset=0),
-            reply_markup=_queue_keyboard(0, _queue_draft_ids_for_day(db, settings, 0)),
+            reply_markup=_queue_keyboard(db, settings, 0),
         )
 
 
@@ -1468,7 +1554,7 @@ async def queue_tomorrow_command(update: Update, context: ContextTypes.DEFAULT_T
     if update.message:
         await update.message.reply_text(
             _render_queue_text(db, settings, day_offset=1),
-            reply_markup=_queue_keyboard(1, _queue_draft_ids_for_day(db, settings, 1)),
+            reply_markup=_queue_keyboard(db, settings, 1),
         )
 
 
@@ -2460,7 +2546,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await _edit_callback_message(
                 query,
                 _render_queue_text(db, settings, day_offset=0),
-                reply_markup=_queue_keyboard(0, _queue_draft_ids_for_day(db, settings, 0)),
+                reply_markup=_queue_keyboard(db, settings, 0),
             )
             return
 
@@ -2468,7 +2554,58 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await _edit_callback_message(
                 query,
                 _render_queue_text(db, settings, day_offset=1),
-                reply_markup=_queue_keyboard(1, _queue_draft_ids_for_day(db, settings, 1)),
+                reply_markup=_queue_keyboard(db, settings, 1),
+            )
+            return
+
+        if action == "queue_pick_slot":
+            day_offset = draft_id
+            normalized_slot = _normalize_slot_hhmm(slot or "")
+            configured_slots = [_normalize_slot_hhmm(item) for item in settings.daily_post_slots]
+            if normalized_slot not in configured_slots:
+                await _edit_callback_message(query, "Такого слота нет в настройках расписания.")
+                return
+            tz = ZoneInfo(settings.schedule_timezone)
+            now_local = datetime.now(tz)
+            day_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=day_offset)
+            hour, minute = _parse_slot_hhmm(normalized_slot)
+            selected_local = day_start.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if selected_local <= now_local:
+                await _edit_callback_message(query, "Этот слот уже в прошлом. Выбери другой слот.", reply_markup=_queue_keyboard(db, settings, day_offset))
+                return
+            if not _is_local_slot_free(db, settings, day_offset, normalized_slot):
+                await _edit_callback_message(query, "Этот слот уже занят. Обнови очередь и выбери свободный слот.", reply_markup=_queue_keyboard(db, settings, day_offset))
+                return
+            drafts = _latest_actionable_drafts(db, limit=10)
+            if not drafts:
+                await _edit_callback_message(query, "Нет черновиков в статусе draft или approved для постановки в очередь.", reply_markup=_queue_keyboard(db, settings, day_offset))
+                return
+            await _edit_callback_message(
+                query,
+                f"Выбери черновик для слота {selected_local.strftime('%d.%m %H:%M')}:",
+                reply_markup=_queue_draft_pick_keyboard(db, day_offset, normalized_slot),
+            )
+            return
+
+        if action == "queue_schedule_draft":
+            if not slot or ":" not in slot:
+                await _edit_callback_message(query, "Некорректный слот времени.")
+                return
+            day_offset_raw, slot_hhmm = slot.split(":", 1)
+            try:
+                day_offset = int(day_offset_raw)
+            except ValueError:
+                await _edit_callback_message(query, "Некорректный день очереди.")
+                return
+            try:
+                scheduled_text = _schedule_draft_to_local_slot(db, settings, draft_id, day_offset, slot_hhmm)
+            except ValueError as exc:
+                await _edit_callback_message(query, str(exc), reply_markup=_queue_keyboard(db, settings, day_offset))
+                return
+            await _edit_callback_message(
+                query,
+                f"Черновик #{draft_id} поставлен на {scheduled_text}",
+                reply_markup=_queue_keyboard(db, settings, day_offset),
             )
             return
 
@@ -2578,7 +2715,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await _edit_callback_message(
                 query,
                 f"Черновик #{draft_id} поставлен в ближайший слот: {scheduled_text}",
-                reply_markup=_queue_keyboard(0, _queue_draft_ids_for_day(db, settings, 0)),
+                reply_markup=_queue_keyboard(db, settings, 0),
             )
 
         elif action == "regenerate":
@@ -2626,7 +2763,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await _edit_callback_message(
                 query,
                 "Черновик #{0} снят с очереди.".format(draft_id),
-                reply_markup=_queue_keyboard(0, _queue_draft_ids_for_day(db, settings, 0)),
+                reply_markup=_queue_keyboard(db, settings, 0),
             )
 
         elif action == "preview":
@@ -3044,7 +3181,7 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await _edit_callback_message(
             query,
             _render_queue_text(db, settings, day_offset=0),
-            reply_markup=_queue_keyboard(0, _queue_draft_ids_for_day(db, settings, 0)),
+            reply_markup=_queue_keyboard(db, settings, 0),
         )
     elif data == "menu_plan_day":
         await _send_daily_plan(context=context, settings=settings, db=db, day_offset=0, summary_query=query)
