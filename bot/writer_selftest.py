@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 import bot.writer as writer
-from bot.writer import GenerationResult, _ensure_custom_emoji_markers, fetch_page_content, fetch_page_content_details, rewrite_post_draft
+from bot.writer import GenerationResult, _ensure_custom_emoji_markers, fetch_page_content, fetch_page_content_details, generate_post_draft_from_topic_metadata, rewrite_post_draft
 
 
 class _Response:
@@ -115,9 +115,56 @@ def _assert_rewrite_prompts() -> None:
         pass
 
 
+
+def _assert_topic_metadata_generation() -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fake_generate(api_key, model, user_prompt, system_prompt, base_url=None, extra_headers=None, max_tokens=900):
+        calls.append((user_prompt, system_prompt))
+        return GenerationResult(
+            content="Источник: https://reddit.com/r/LocalLLaMA/comments/test\n[[EMOJI:screen_card]] Обсуждают новый AI-инструмент по описанию темы.\n\n[[EMOJI:link]] Детали: [[LINK:открыть обсуждение|https://reddit.com/r/LocalLLaMA/comments/test]]",
+            prompt_tokens=11,
+            completion_tokens=22,
+            total_tokens=33,
+            model=model,
+        )
+
+    original = writer._generate_with_chat_completion
+    writer._generate_with_chat_completion = fake_generate
+    try:
+        result = generate_post_draft_from_topic_metadata(
+            api_key="key",
+            model="model-x",
+            topic_title="New AI tool v2.1",
+            topic_title_ru="Новый AI-инструмент v2.1",
+            topic_summary_ru="Краткое описание сохранено в теме.",
+            topic_angle_ru="Почему это полезно админам канала.",
+            topic_original_description="Original Reddit description",
+            topic_source="Reddit",
+            topic_source_group="reddit",
+            topic_category="tools",
+            source_url="https://reddit.com/r/LocalLLaMA/comments/test",
+            max_chars=500,
+            soft_chars=350,
+        )
+    finally:
+        writer._generate_with_chat_completion = original
+
+    assert len(calls) == 1
+    prompt = calls[0][0]
+    assert "Полная страница источника не была прочитана" in prompt
+    assert "Не выдумывай факты" in prompt
+    assert "New AI tool v2.1" in prompt
+    assert "Новый AI-инструмент v2.1" in prompt
+    assert "Источник:" not in result.content
+    assert result.prompt_tokens == 11
+    assert result.model == "model-x"
+
+
 def main() -> None:
     _assert_preview_extraction()
     _assert_rewrite_prompts()
+    _assert_topic_metadata_generation()
 
     out = _ensure_custom_emoji_markers("🤖 MiniMax-M1: миллион токенов", title="MiniMax-M1")
     assert out.startswith("[[EMOJI:screen_card]]")

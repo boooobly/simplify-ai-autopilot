@@ -7,6 +7,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from telegram import KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, ReplyKeyboardMarkup, Update
@@ -58,6 +59,7 @@ from bot.writer import (
     find_first_url,
     generate_post_draft,
     generate_post_draft_from_page,
+    generate_post_draft_from_topic_metadata,
     normalize_url,
     translate_topic_title_to_ru,
     enrich_topic_metadata_ru,
@@ -715,6 +717,10 @@ async def _run_generate_post_draft_from_page(*args, **kwargs):
     return await asyncio.to_thread(generate_post_draft_from_page, *args, **kwargs)
 
 
+async def _run_generate_post_draft_from_topic_metadata(*args, **kwargs):
+    return await asyncio.to_thread(generate_post_draft_from_topic_metadata, *args, **kwargs)
+
+
 async def _run_polish_post_draft(*args, **kwargs):
     return await asyncio.to_thread(polish_post_draft, *args, **kwargs)
 
@@ -1041,6 +1047,68 @@ def _extract_draft_id_from_text(message_text: str) -> int | None:
         else:
             break
     return int(digits) if digits else None
+
+
+TOPIC_METADATA_FALLBACK_NOTE = "Источник не удалось прочитать напрямую, поэтому черновик создан по сохранённому описанию темы. Проверь факты перед публикацией."
+
+
+def _is_blocked_source_url(url: str) -> bool:
+    try:
+        hostname = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return hostname == "reddit.com" or hostname.endswith(".reddit.com")
+
+
+def _should_use_topic_metadata_fallback(url: str, error: BaseException | None = None) -> bool:
+    if _is_blocked_source_url(url):
+        return True
+    if error is None:
+        return False
+    message = str(error).casefold()
+    fallback_markers = (
+        "403 client error",
+        "403",
+        "401",
+        "429",
+        "blocked",
+        "forbidden",
+        "too little page text",
+        "not enough text",
+        "слишком мало полезного текста",
+        "не содержит html",
+        "non-html",
+        "not html",
+        "content-type",
+    )
+    return any(marker in message for marker in fallback_markers)
+
+
+async def _generate_topic_metadata_fallback_draft(
+    *,
+    api_key: str,
+    settings,
+    topic: dict[str, object],
+    base_url: str | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> GenerationResult:
+    return await _run_generate_post_draft_from_topic_metadata(
+        api_key=api_key,
+        model=settings.model_draft,
+        topic_title=str(topic.get("title") or ""),
+        topic_title_ru=str(topic.get("title_ru") or ""),
+        topic_summary_ru=str(topic.get("summary_ru") or ""),
+        topic_angle_ru=str(topic.get("angle_ru") or ""),
+        topic_original_description=str(topic.get("original_description") or ""),
+        topic_source=str(topic.get("source") or ""),
+        topic_source_group=str(topic.get("source_group") or ""),
+        topic_category=str(topic.get("category") or ""),
+        source_url=str(topic.get("url") or ""),
+        max_chars=settings.post_max_chars,
+        soft_chars=settings.post_soft_chars,
+        base_url=base_url,
+        extra_headers=extra_headers,
+    )
 
 
 async def _generate_url_draft_with_fallback(
@@ -1578,40 +1646,67 @@ async def _create_draft_from_topic(
             return None, "ИИ-провайдер не настроен."
         api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
         logger.info("topic_generate provider=%s model=%s", provider, settings.model_draft)
-        details = await _run_fetch_page_content_details(topic["url"])
-        generation_result, used_fallback, _operation = await _generate_url_draft_with_fallback(
-            api_key=api_key,
-            settings=settings,
-            source_url=topic["url"],
-            title=details.title,
-            page_text=details.text,
-            base_url=base_url,
-            extra_headers=extra_headers,
-        )
+        source_url = str(topic.get("url") or "")
+        details = None
+        used_metadata_fallback = False
+        operation = "topic_generate"
+        try:
+            if _is_blocked_source_url(source_url):
+                raise RuntimeError("Blocked source URL: using saved topic metadata fallback")
+            details = await _run_fetch_page_content_details(source_url)
+            generation_result, used_fallback, _operation = await _generate_url_draft_with_fallback(
+                api_key=api_key,
+                settings=settings,
+                source_url=source_url,
+                title=details.title,
+                page_text=details.text,
+                base_url=base_url,
+                extra_headers=extra_headers,
+            )
+        except Exception as fetch_or_generation_exc:
+            if not _should_use_topic_metadata_fallback(source_url, fetch_or_generation_exc):
+                raise
+            logger.warning(
+                "Using topic metadata fallback for topic_id=%s source_url=%s: %s",
+                topic_id,
+                source_url,
+                fetch_or_generation_exc,
+            )
+            generation_result = await _generate_topic_metadata_fallback_draft(
+                api_key=api_key,
+                settings=settings,
+                topic=topic,
+                base_url=base_url,
+                extra_headers=extra_headers,
+            )
+            used_fallback = False
+            used_metadata_fallback = True
+            operation = "generate_topic_metadata_fallback"
         if not generation_result.content.strip():
             return None, EMPTY_AI_REPLY_TEXT
+        source_image_url = details.preview_image_url if details else None
         new_draft_id = db.create_draft(
             generation_result.content,
-            source_url=topic["url"],
-            source_image_url=details.preview_image_url,
+            source_url=source_url,
+            source_image_url=source_image_url,
         )
         estimated_cost = estimate_ai_cost(provider, generation_result.prompt_tokens, generation_result.completion_tokens, settings)
         db.record_ai_usage(
             provider=provider,
             model=generation_result.model or settings.model_draft,
-            operation="topic_generate",
+            operation=operation,
             prompt_tokens=generation_result.prompt_tokens,
             completion_tokens=generation_result.completion_tokens,
             total_tokens=generation_result.total_tokens,
             estimated_cost_usd=estimated_cost,
-            source_url=topic["url"],
+            source_url=source_url,
             draft_id=new_draft_id,
         )
         logger.info(
             "AI usage provider=%s model=%s operation=%s prompt=%s completion=%s total=%s cost=%s",
             provider,
             generation_result.model or settings.model_draft,
-            "topic_generate",
+            operation,
             generation_result.prompt_tokens,
             generation_result.completion_tokens,
             generation_result.total_tokens,
@@ -1623,16 +1718,24 @@ async def _create_draft_from_topic(
             settings.admin_id,
             new_draft_id,
             generation_result.content,
-            topic["url"],
-            source_image_url=details.preview_image_url,
+            source_url,
+            source_image_url=source_image_url,
         )
         if used_fallback:
             logger.info(
                 "Topic draft created with fallback model: topic_id=%s draft_id=%s source_url=%s",
                 topic_id,
                 new_draft_id,
-                topic["url"],
+                source_url,
             )
+        if used_metadata_fallback:
+            logger.info(
+                "Topic draft created from metadata fallback: topic_id=%s draft_id=%s source_url=%s",
+                topic_id,
+                new_draft_id,
+                source_url,
+            )
+            return new_draft_id, TOPIC_METADATA_FALLBACK_NOTE
         return new_draft_id, None
     except Exception as exc:
         logger.exception("Failed to create topic draft: topic_id=%s", topic_id)
@@ -2654,7 +2757,10 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             if new_draft_id is None:
                 await _edit_callback_message(query, error or "Не удалось создать черновик.")
                 return
-            await _edit_callback_message(query, f"Создан черновик #{new_draft_id} из темы #{topic_id}.")
+            success_text = f"Создан черновик #{new_draft_id} из темы #{topic_id}."
+            if error:
+                success_text = f"{success_text}\n\n⚠️ {error}"
+            await _edit_callback_message(query, success_text)
             return
 
         if action == "queue_today":

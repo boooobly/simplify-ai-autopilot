@@ -358,6 +358,71 @@ def _rewrite_post_draft_instruction(mode: str) -> str:
     except KeyError as exc:
         raise ValueError(f"Unsupported rewrite mode: {mode}") from exc
 
+def generate_post_draft_from_topic_metadata(
+    *,
+    api_key: str,
+    model: str,
+    topic_title: str,
+    topic_title_ru: str | None = None,
+    topic_summary_ru: str | None = None,
+    topic_angle_ru: str | None = None,
+    topic_original_description: str | None = None,
+    topic_source: str | None = None,
+    topic_source_group: str | None = None,
+    topic_category: str | None = None,
+    source_url: str | None = None,
+    max_chars: int = 1400,
+    soft_chars: int = 1100,
+    base_url: str | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> GenerationResult:
+    style = _load_style_prompt() + "\n\n" + SIMPLIFY_AI_STYLE_GUIDE + "\n\n" + SIMPLIFY_AI_EMOJI_ALIAS_GUIDE
+    metadata_lines = [
+        f"Original title: {(topic_title or '').strip()[:500]}",
+        f"Russian title: {(topic_title_ru or '').strip()[:500]}",
+        f"Russian summary: {(topic_summary_ru or '').strip()[:900]}",
+        f"Russian angle: {(topic_angle_ru or '').strip()[:700]}",
+        f"Original description: {(topic_original_description or '').strip()[:1200]}",
+        f"Source name: {(topic_source or '').strip()[:200]}",
+        f"Source group: {(topic_source_group or '').strip()[:120]}",
+        f"Category: {(topic_category or '').strip()[:120]}",
+        f"Source URL for moderation context: {(source_url or '').strip()[:600]}",
+    ]
+    user_prompt = (
+        "Создай один готовый Telegram-пост для @simplify_ai по сохранённым метаданным темы. "
+        "Полная страница источника не была прочитана, поэтому не притворяйся, что видел статью или тред целиком. "
+        "Опирайся только на метаданные ниже: title, title_ru, summary_ru, angle_ru, original_description, source, source_group, category и URL. "
+        "Не выдумывай факты, цифры, цитаты, даты, бенчмарки, названия функций и обещания сверх этих метаданных. "
+        "Если деталей мало, пиши осторожно: 'похоже', 'заявлено', 'обсуждают', 'по описанию темы'. "
+        "Сохраняй важные названия продуктов, репозиториев, моделей, компаний и версии без искажений. "
+        "Соблюдай стиль-гайд ниже как основные правила. "
+        "Структура: короткий заголовок, 1-2 простых вводных предложения, практический смысл простыми словами, короткая финальная мысль, если уместно. "
+        "Для заголовка, CTA и финальной мысли используй custom emoji aliases через маркеры [[EMOJI:alias]], а не raw emoji. "
+        "Если есть подходящий alias, не используй обычные emoji. Для финальной мысли используй [[EMOJI:thought]], для CTA-строки используй [[EMOJI:link]]. "
+        "Для generic AI/tool/model news используй [[EMOJI:screen_card]] или [[EMOJI:fire]]. Для MiniMax, Mistral, Qwen, Llama и других без отдельного alias используй [[EMOJI:screen_card]]. "
+        "Используй [[EMOJI:claude]] для Claude/Anthropic, [[EMOJI:chatgpt]] для ChatGPT/OpenAI/GPT, [[EMOJI:deepseek]] для DeepSeek, [[EMOJI:google]] для Google/Gemini/DeepMind. "
+        "Для GitHub используй [[EMOJI:github]], для Photoshop/Adobe [[EMOJI:photoshop]], для Windows [[EMOJI:windows]], для Telegram [[EMOJI:telegram]], для privacy/security/VPN [[EMOJI:lock]], для web/services [[EMOJI:web]]. "
+        "Для перечислений используй обычные строки с ➖. Бот сам превратит подряд идущие пункты в цитату Telegram. "
+        "Не используй '▌', markdown blockquote или HTML. "
+        "Пиши живо и по-человечески: без сухого пресс-релизного стиля, без корпоративного тона, без AI-клише. "
+        "Не используй фразы: 'не про..., а про...', 'главный вывод простой', 'важно отметить', 'давайте разберем', 'в заключение'. "
+        "Не используй эм-даш и кавычки-ёлочки. "
+        "Не добавляй строку Источник в сам пост. URL хранится отдельно в модерации. "
+        "Если пост про инструмент/сервис/репозиторий/приложение/демо/гайд и URL есть, можно добавить короткую CTA-ссылку через [[LINK:text|url]]. "
+        "Используй только маркеры [[LINK:text|url]] и никогда не выводи голые URL. Не выдумывай ссылки. "
+        f"Желательная длина до {soft_chars} символов. Жёсткий максимум {max_chars} символов. Не обрывай мысль. "
+        "Верни только финальный текст поста без комментариев и без markdown-блоков.\n\n"
+        "Метаданные темы:\n" + "\n".join(metadata_lines)
+    )
+    logger.info("Генерация черновика по метаданным темы: model=%s", model)
+    result = _generate_with_chat_completion(api_key, model, user_prompt, style, base_url, extra_headers)
+    final_text = _limit_text_safely(_strip_source_lines(result.content), limit=max_chars)
+    if not _has_meaningful_body(final_text, source_url=source_url):
+        raise EmptyAIResponseError("AI model returned empty content")
+    result.content = _ensure_custom_emoji_markers(final_text, source_url=source_url, title=topic_title_ru or topic_title)
+    return result
+
+
 def generate_post_draft(
     api_key: str,
     model: str,
