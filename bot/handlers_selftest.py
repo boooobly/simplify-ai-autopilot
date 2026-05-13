@@ -21,6 +21,7 @@ from bot.handlers import (
     _parse_callback_data,
     _queue_day_slots,
     _queue_keyboard,
+    _render_cleanup_preview_text,
     _render_collect_text,
     _render_queue_day_text,
     _rewrite_action_config,
@@ -369,6 +370,77 @@ class _FakeCallbackQuery:
         self.edited_reply_markup = reply_markup
 
 
+
+def _run_cleanup_ui_selftest() -> None:
+    counts = {
+        "old_rejected_topics": 1,
+        "old_used_topics": 2,
+        "old_new_topics": 3,
+        "old_rejected_drafts": 4,
+        "old_failed_drafts": 5,
+        "stale_draft_drafts": 6,
+        "total": 21,
+    }
+    text = _render_cleanup_preview_text(counts)
+    for phrase in [
+        "Старые отклонённые темы",
+        "Старые использованные темы",
+        "Старые новые темы",
+        "Старые отклонённые черновики",
+        "Старые failed-черновики",
+        "Залежавшиеся нетронутые draft-черновики",
+        "Всего строк к удалению: 21",
+        "ai_usage не удаляются",
+    ]:
+        assert phrase in text
+    action, parsed_id, slot = _parse_callback_data("cleanup_confirm:0")
+    assert (action, parsed_id, slot) == ("cleanup_confirm", 0, None)
+    action, parsed_id, slot = _parse_callback_data("cleanup_cancel:0")
+    assert (action, parsed_id, slot) == ("cleanup_cancel", 0, None)
+    forbidden = ("Shorts", "Reels", "TikTok", "video", "Видео", "видео")
+    assert not any(word in text for word in forbidden)
+    keyboard = handlers._cleanup_keyboard()
+    buttons = _keyboard_buttons(keyboard)
+    assert [button.callback_data for button in buttons] == ["cleanup_confirm:0", "cleanup_cancel:0"]
+    assert not any(word in button.text for button in buttons for word in forbidden)
+    assert not any(word in (button.callback_data or "") for button in buttons for word in forbidden)
+
+
+async def _run_cleanup_callback_selftest() -> None:
+    tmp = TemporaryDirectory()
+    db = DraftDatabase(f"{tmp.name}/cleanup-callback.db")
+    with db._connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO topic_candidates (title, url, source, status, created_at, last_seen_at)
+            VALUES ('old', 'https://cleanup-callback/old', 'selftest', 'rejected', '2000-01-01 00:00:00', '2000-01-01 00:00:00')
+            """
+        )
+        conn.commit()
+    settings = SimpleNamespace(admin_id=123, custom_emoji_aliases={})
+    context = SimpleNamespace(
+        bot_data={"settings": settings, "db": db},
+        user_data={
+            handlers.CLEANUP_PREVIEW_GENERATED_AT_KEY: handlers.datetime.now(timezone.utc).timestamp(),
+            handlers.CLEANUP_PREVIEW_COUNTS_KEY: db.cleanup_preview(),
+        },
+    )
+    query = _FakeCallbackQuery("cleanup_confirm:0", settings.admin_id)
+    update = SimpleNamespace(callback_query=query)
+    await handlers.moderation_callback(update, context)
+    assert query.edited_text is not None
+    assert "Очистка базы выполнена" in query.edited_text
+    assert db.cleanup_preview()["total"] == 0
+    assert handlers.CLEANUP_PREVIEW_COUNTS_KEY not in context.user_data
+
+    context.user_data[handlers.CLEANUP_PREVIEW_COUNTS_KEY] = {"total": 0}
+    context.user_data[handlers.CLEANUP_PREVIEW_GENERATED_AT_KEY] = handlers.datetime.now(timezone.utc).timestamp()
+    cancel_query = _FakeCallbackQuery("cleanup_cancel:0", settings.admin_id)
+    await handlers.moderation_callback(SimpleNamespace(callback_query=cancel_query), context)
+    assert cancel_query.edited_text == "Очистка отменена."
+    assert handlers.CLEANUP_PREVIEW_COUNTS_KEY not in context.user_data
+    tmp.cleanup()
+
 async def _run_moderation_media_attach_callback_selftest() -> None:
     tmp = TemporaryDirectory()
     db = DraftDatabase(f"{tmp.name}/moderation-media.db")
@@ -503,7 +575,9 @@ def run() -> None:
     _run_latest_actionable_drafts_selftest()
     _run_queue_keyboard_selftest()
     _run_keyboard_selftest()
+    _run_cleanup_ui_selftest()
     asyncio.run(_run_moderation_media_attach_callback_selftest())
+    asyncio.run(_run_cleanup_callback_selftest())
     asyncio.run(_run_collect_stats_selftest())
 
     print("OK")
