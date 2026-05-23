@@ -1018,6 +1018,157 @@ async def _run_github_metadata_ai_preferred_selftest() -> None:
     tmp.cleanup()
 
 
+async def _run_topic_enrichment_ai_score_updates_selftest() -> None:
+    tmp = TemporaryDirectory()
+    db = DraftDatabase(f"{tmp.name}/ai-score.db")
+    settings = _topic_settings()
+    item = TopicItem(
+        "Useful AI note-taking tool launches",
+        "https://example.com/ai-score",
+        "Product Hunt",
+        "2026-05-13 10:00:00",
+        category="tool",
+        score=70,
+        reason="детерминированная причина",
+        reason_ru="Хорошая тема: есть практическая польза.",
+        normalized_title="useful ai note taking tool launches",
+        source_group="tools",
+    )
+    db.upsert_topic_candidate_with_reason(item.title, item.url, item.source, item.published_at, item.category, item.score, item.reason, item.normalized_title, item.source_group, item.title_ru, item.summary_ru, item.angle_ru, item.reason_ru, item.original_description)
+    original_enrich = handlers._run_enrich_topic_metadata_ru
+
+    async def fake_enrich(**kwargs):
+        return GenerationResult(
+            content=(
+                "title_ru: Полезный AI-инструмент для заметок\n"
+                "summary_ru: Сервис помогает быстро превращать встречи в понятные заметки.\n"
+                "angle_ru: Можно показать практический сценарий для обычных пользователей.\n"
+                "reason_ru: Практичный запуск с понятной пользой.\n"
+                "ai_value_score: 95\n"
+                "ai_value_reason_ru: полезно для широкого круга читателей\n"
+                "audience_fit_ru: хорошо подходит новичкам @simplify_ai"
+            ),
+            model=kwargs["model"],
+        )
+
+    handlers._run_enrich_topic_metadata_ru = fake_enrich
+    try:
+        await handlers._enrich_topic_metadata_if_available(item, settings, db)
+    finally:
+        handlers._run_enrich_topic_metadata_ru = original_enrich
+
+    stored = db.find_topic_candidate_by_url(item.url)
+    assert stored is not None
+    assert stored["score"] == 79
+    assert stored["deterministic_score"] == 70
+    assert "AI-оценка" in stored["reason_ru"]
+    assert item.score == 79
+    tmp.cleanup()
+
+
+async def _run_topic_enrichment_missing_ai_score_keeps_baseline_selftest() -> None:
+    tmp = TemporaryDirectory()
+    db = DraftDatabase(f"{tmp.name}/no-ai-score.db")
+    settings = _topic_settings()
+    item = TopicItem(
+        "Narrow AI kernel bindings update",
+        "https://example.com/no-ai-score",
+        "GitHub Trending AI",
+        "2026-05-13 10:00:00",
+        category="dev",
+        score=85,
+        reason="детерминированная причина",
+        reason_ru="Хорошая тема: есть технический сигнал.",
+        normalized_title="narrow ai kernel bindings update",
+        source_group="github",
+    )
+    db.upsert_topic_candidate_with_reason(item.title, item.url, item.source, item.published_at, item.category, item.score, item.reason, item.normalized_title, item.source_group, item.title_ru, item.summary_ru, item.angle_ru, item.reason_ru, item.original_description)
+    original_enrich = handlers._run_enrich_topic_metadata_ru
+
+    async def fake_enrich(**kwargs):
+        return GenerationResult(
+            content=(
+                "title_ru: Узкое обновление AI kernel bindings\n"
+                "summary_ru: Репозиторий обновляет низкоуровневые биндинги для AI-разработки.\n"
+                "angle_ru: Лучше брать только если нужен технический разбор.\n"
+                "reason_ru: Тема техническая и требует ручной проверки.\n"
+                "ai_value_score: не число\n"
+                "ai_value_reason_ru: слишком узко\n"
+                "audience_fit_ru: слабо подходит новичкам"
+            ),
+            model=kwargs["model"],
+        )
+
+    handlers._run_enrich_topic_metadata_ru = fake_enrich
+    try:
+        await handlers._enrich_topic_metadata_if_available(item, settings, db)
+    finally:
+        handlers._run_enrich_topic_metadata_ru = original_enrich
+
+    stored = db.find_topic_candidate_by_url(item.url)
+    assert stored is not None
+    assert stored["score"] == 85
+    assert stored["reason_ru"] == "Тема техническая и требует ручной проверки."
+    assert "AI-оценка" not in stored["reason_ru"]
+    tmp.cleanup()
+
+
+async def _run_topic_reenrich_ai_score_refresh_selftest() -> None:
+    tmp = TemporaryDirectory()
+    db = DraftDatabase(f"{tmp.name}/reenrich-ai-score.db")
+    settings = _topic_settings()
+    topic_id = _insert_topic(db, url="https://example.com/reenrich-ai-score")
+    original_enrich = handlers._run_enrich_topic_metadata_ru
+
+    async def fake_enrich(**kwargs):
+        return GenerationResult(
+            content=(
+                "title_ru: Новый русский заголовок темы\n"
+                "summary_ru: Новая русская сводка темы.\n"
+                "angle_ru: Новый русский ракурс темы.\n"
+                "reason_ru: Новая русская причина важности.\n"
+                "ai_value_score: 20\n"
+                "ai_value_reason_ru: слишком технически для новичков\n"
+                "audience_fit_ru: подходит только небольшой части аудитории"
+            ),
+            model=kwargs["model"],
+        )
+
+    handlers._run_enrich_topic_metadata_ru = fake_enrich
+    try:
+        updated, error = await handlers._reenrich_topic_candidate_display_metadata(topic_id, settings, db)
+    finally:
+        handlers._run_enrich_topic_metadata_ru = original_enrich
+
+    assert error is None
+    assert updated is not None
+    assert updated["score"] == 76
+    assert "AI-оценка" in updated["reason_ru"]
+    assert "слишком технически" in updated["reason_ru"]
+    tmp.cleanup()
+
+
+def _run_topic_card_final_score_concise_selftest() -> None:
+    topic = {
+        "id": 42,
+        "score": 79,
+        "category": "tool",
+        "title": "Useful AI note-taking tool launches",
+        "title_ru": "Полезный AI-инструмент для заметок",
+        "summary_ru": "Сервис помогает быстро превращать встречи в понятные заметки.",
+        "angle_ru": "Можно показать практический сценарий для обычных пользователей.",
+        "reason_ru": "Хорошая тема: есть практическая польза. AI-оценка: полезно для широкого круга читателей.",
+        "source": "Product Hunt",
+        "source_group": "tools",
+        "url": "https://example.com/card",
+    }
+    card = handlers._topic_card_text(topic)
+    assert "Тема #42 - 79" in card
+    assert "Почему: Хорошая тема" in card
+    assert "AI-оценка" in card
+    assert len(card) < 700
+
+
 async def _run_topic_enrichment_failure_fallback_selftest() -> None:
     tmp = TemporaryDirectory()
     db = DraftDatabase(f"{tmp.name}/fallback.db")
@@ -1133,6 +1284,10 @@ def run() -> None:
     asyncio.run(_run_weak_topic_metadata_overwrite_selftest())
     asyncio.run(_run_good_topic_metadata_no_overwrite_selftest())
     asyncio.run(_run_github_metadata_ai_preferred_selftest())
+    asyncio.run(_run_topic_enrichment_ai_score_updates_selftest())
+    asyncio.run(_run_topic_enrichment_missing_ai_score_keeps_baseline_selftest())
+    asyncio.run(_run_topic_reenrich_ai_score_refresh_selftest())
+    _run_topic_card_final_score_concise_selftest()
     asyncio.run(_run_topic_enrichment_failure_fallback_selftest())
     asyncio.run(_run_topic_403_fallback_and_failure_selftest())
     asyncio.run(_run_topic_callback_warning_selftest())

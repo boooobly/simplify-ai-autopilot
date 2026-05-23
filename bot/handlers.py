@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -49,6 +50,7 @@ from bot.queue_helpers import (
     _busy_slots_for_local_day,
 )
 from bot.telegram_formatting import strip_quote_markers
+from bot.topic_scoring import hybrid_topic_score
 from bot.sources import SourceReport, collect_topics, collect_topics_with_diagnostics
 from bot.topic_display import is_weak_topic_metadata, related_sources_summary, topic_angle_ru, topic_compact_preview_ru, topic_display_reason, topic_display_title, topic_original_title_line, topic_summary_ru
 from bot.writer import (
@@ -801,10 +803,43 @@ async def _translate_topic_title_if_available(item, settings, db: DraftDatabase)
     )
 
 
-def _parse_topic_metadata_result_content(content: str) -> tuple[str, str, str, str] | None:
+def _parse_ai_value_score(value: object) -> int | None:
+    text = str(value or "").strip()
+    match = re.search(r"-?\d{1,3}", text)
+    if not match:
+        return None
+    score = int(match.group(0))
+    if not 0 <= score <= 100:
+        return None
+    return score
+
+
+def _short_topic_reason_part(text: str, limit: int = 150) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "").strip()).strip(" .")
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: limit - 1].rsplit(" ", 1)[0].rstrip(" .,;") + "…"
+
+
+def _combined_topic_reason_ru(deterministic_reason_ru: str, ai_reason_ru: str = "", audience_fit_ru: str = "") -> str:
+    base = _short_topic_reason_part(deterministic_reason_ru, 145)
+    extras = []
+    ai = _short_topic_reason_part(ai_reason_ru, 115)
+    fit = _short_topic_reason_part(audience_fit_ru, 115)
+    if ai:
+        extras.append(ai)
+    if fit and fit.casefold() != ai.casefold():
+        extras.append(fit)
+    if extras:
+        suffix = _short_topic_reason_part("; ".join(extras), 155)
+        return f"{base}. AI-оценка: {suffix}." if base else f"AI-оценка: {suffix}."
+    return deterministic_reason_ru
+
+
+def _parse_topic_metadata_result_content(content: str) -> dict[str, str] | None:
     values = _parse_topic_metadata_fields(content)
     if all(values.get(k) for k in ("title_ru", "summary_ru", "angle_ru", "reason_ru")):
-        return values["title_ru"], values["summary_ru"], values["angle_ru"], values["reason_ru"]
+        return values
     return None
 
 
@@ -842,7 +877,21 @@ async def _reenrich_topic_candidate_display_metadata(
     parsed = _parse_topic_metadata_result_content(result.content)
     if parsed is None:
         return None, "Модель вернула ответ, но бот не смог разобрать формат."
-    title_ru, summary_ru, angle_ru, reason_ru = parsed
+    title_ru = parsed["title_ru"]
+    summary_ru = parsed["summary_ru"]
+    angle_ru = parsed["angle_ru"]
+    ai_score = _parse_ai_value_score(parsed.get("ai_value_score"))
+    deterministic_reason_ru = str(topic.get("reason_ru") or parsed["reason_ru"] or "")
+    final_score = hybrid_topic_score(int(topic.get("deterministic_score") or topic.get("score") or 0), ai_score)
+    reason_ru = (
+        _combined_topic_reason_ru(
+            deterministic_reason_ru,
+            parsed.get("ai_value_reason_ru", ""),
+            parsed.get("audience_fit_ru", ""),
+        )
+        if ai_score is not None
+        else parsed["reason_ru"]
+    )
     if not all([title_ru, summary_ru, angle_ru, reason_ru]):
         return None, "Модель вернула ответ, но бот не смог разобрать формат."
     if not _looks_like_useful_russian_metadata(
@@ -855,6 +904,7 @@ async def _reenrich_topic_candidate_display_metadata(
         summary_ru=summary_ru,
         angle_ru=angle_ru,
         reason_ru=reason_ru,
+        score=final_score if ai_score is not None else None,
     )
     estimated_cost = estimate_ai_cost(provider, result.prompt_tokens, result.completion_tokens, settings)
     db.record_ai_usage(
@@ -927,7 +977,21 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
     if parsed is None:
         _apply_topic_enrichment_fallback(item, db)
         return
-    title_ru, summary_ru, angle_ru, reason_ru = parsed
+    title_ru = parsed["title_ru"]
+    summary_ru = parsed["summary_ru"]
+    angle_ru = parsed["angle_ru"]
+    ai_score = _parse_ai_value_score(parsed.get("ai_value_score"))
+    deterministic_reason_ru = existing_reason_ru or item.reason_ru or parsed["reason_ru"]
+    final_score = hybrid_topic_score(item.score, ai_score)
+    reason_ru = (
+        _combined_topic_reason_ru(
+            deterministic_reason_ru,
+            parsed.get("ai_value_reason_ru", ""),
+            parsed.get("audience_fit_ru", ""),
+        )
+        if ai_score is not None
+        else parsed["reason_ru"]
+    )
     if not all([title_ru, summary_ru, angle_ru, reason_ru]) or is_weak_topic_metadata(
         title_ru, summary_ru, angle_ru, original_title=item.title
     ):
@@ -945,24 +1009,30 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
         item.summary_ru = summary_ru
         item.angle_ru = angle_ru
         item.reason_ru = reason_ru
+        if ai_score is not None:
+            item.score = final_score
         db.force_update_topic_candidate_display_fields(
             int(topic["id"]),
             title_ru=title_ru,
             summary_ru=summary_ru,
             angle_ru=angle_ru,
             reason_ru=reason_ru,
+            score=final_score if ai_score is not None else None,
         )
     else:
         item.title_ru = existing_title_ru or title_ru
         item.summary_ru = existing_summary_ru or summary_ru
         item.angle_ru = existing_angle_ru or angle_ru
-        item.reason_ru = existing_reason_ru or reason_ru
+        item.reason_ru = reason_ru if ai_score is not None else (existing_reason_ru or reason_ru)
+        if ai_score is not None:
+            item.score = final_score
         db.update_topic_candidate_display_fields(
             int(topic["id"]),
             title_ru=title_ru,
             summary_ru=summary_ru,
             angle_ru=angle_ru,
             reason_ru=reason_ru,
+            score=final_score if ai_score is not None else None,
         )
     estimated_cost = estimate_ai_cost(provider, result.prompt_tokens, result.completion_tokens, settings)
     db.record_ai_usage(

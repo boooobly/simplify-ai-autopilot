@@ -1,4 +1,4 @@
-from bot.topic_scoring import canonical_topic_key, is_similar_topic_key, normalize_topic_title, score_topic
+from bot.topic_scoring import canonical_topic_key, hybrid_topic_score, is_similar_topic_key, normalize_topic_title, score_topic
 
 
 def run() -> None:
@@ -81,6 +81,15 @@ def run() -> None:
         canonical_topic_key("OpenAI releases Sora video editing tools"),
     )
     assert not is_similar_topic_key("openai chatgpt", "openai chatgpt plus")
+
+    assert hybrid_topic_score(70, None) == 70
+    assert hybrid_topic_score(70, 95) == 79
+    assert hybrid_topic_score(85, 20) == 70
+    assert hybrid_topic_score(40, 100) == 55
+    assert hybrid_topic_score(0, 100) == 15
+    assert hybrid_topic_score(100, 0) == 85
+    assert hybrid_topic_score(65, 90) > 65
+    assert hybrid_topic_score(85, 40) < 85
 
 
 if __name__ == "__main__":
