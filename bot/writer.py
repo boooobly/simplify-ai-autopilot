@@ -186,6 +186,9 @@ def _topic_metadata_key_map() -> dict[str, str]:
         "summary_ru": ["summary_ru", "summary", "о чем", "о чём", "кратко", "описание", "суть"],
         "angle_ru": ["angle_ru", "angle", "идея", "ракурс", "подача"],
         "reason_ru": ["reason_ru", "reason", "importance", "why", "почему", "важность", "причина"],
+        "ai_value_score": ["ai_value_score", "value_score", "score", "оценка ценности", "ценность", "ai оценка", "ai-оценка"],
+        "ai_value_reason_ru": ["ai_value_reason_ru", "ai_value_reason", "ai_reason", "причина ai", "ai причина", "пояснение ai", "ai-пояснение"],
+        "audience_fit_ru": ["audience_fit_ru", "audience_fit", "fit", "соответствие аудитории", "подходит аудитории", "аудитория"],
     }
     return {alias.casefold(): target for target, names in aliases.items() for alias in names}
 
@@ -244,14 +247,32 @@ def _parse_topic_metadata_fields(content: str) -> dict[str, str]:
             numbered.append((int(match.group(1)), _clean_topic_metadata_value(match.group(2))))
     if len(numbered) >= 4:
         ordered = [value for _, value in sorted(numbered, key=lambda item: item[0]) if value]
-        for key, value in zip(("title_ru", "summary_ru", "angle_ru", "reason_ru"), ordered):
+        ordered_keys = (
+            "title_ru",
+            "summary_ru",
+            "angle_ru",
+            "reason_ru",
+            "ai_value_score",
+            "ai_value_reason_ru",
+            "audience_fit_ru",
+        )
+        for key, value in zip(ordered_keys, ordered):
             values.setdefault(key, value)
         if all(values.get(k) for k in ("title_ru", "summary_ru", "angle_ru", "reason_ru")):
             return values
 
     lines = _meaningful_topic_lines(cleaned_content)
     if len(lines) >= 4 and not any(":" in line for line in lines[:4]):
-        for key, value in zip(("title_ru", "summary_ru", "angle_ru", "reason_ru"), lines[:4]):
+        plain_keys = (
+            "title_ru",
+            "summary_ru",
+            "angle_ru",
+            "reason_ru",
+            "ai_value_score",
+            "ai_value_reason_ru",
+            "audience_fit_ru",
+        )
+        for key, value in zip(plain_keys, lines[:7]):
             values.setdefault(key, value)
         if all(values.get(k) for k in ("title_ru", "summary_ru", "angle_ru", "reason_ru")):
             return values
@@ -303,11 +324,19 @@ def enrich_topic_metadata_ru(
     system_prompt = (
         "Ты помогаешь администратору русскоязычного Telegram-канала @simplify_ai быстро понять тему. "
         "Пиши только по-русски, кроме неизменяемых имен. "
-        "Верни ровно четыре поля и ничего больше: title_ru, summary_ru, angle_ru, reason_ru. "
+        "Верни ровно семь полей и ничего больше: title_ru, summary_ru, angle_ru, reason_ru, "
+        "ai_value_score, ai_value_reason_ru, audience_fit_ru. "
         "title_ru должен быть понятным с первого взгляда русским заголовком, а не буквальным переводом. "
         "summary_ru одной короткой фразой объясняет, что это такое. "
         "angle_ru предлагает спокойный редакционный угол для @simplify_ai. "
         "reason_ru кратко объясняет важность темы для админа. "
+        "ai_value_score — целое число 0-100: насколько тема ценна для @simplify_ai. "
+        "ai_value_reason_ru — очень коротко почему такая оценка. "
+        "audience_fit_ru — коротко подходит ли тема аудитории @simplify_ai. "
+        "Аудитория @simplify_ai: в основном новички и AI-curious пользователи; формат — короткие Telegram-посты. "
+        "Практичные инструменты, полезные обновления, демо и ясные примеры оценивай выше. "
+        "Корпоративный PR, узкие dev-only репозитории, расплывчатые исследования и старые новости оценивай ниже. "
+        "GitHub-репозитории могут получить высокий балл только если назначение понятно и полезно; не завышай оценку только из-за звезд. "
         "Не переводи и не искажай названия репозиториев, продуктов, моделей, фреймворков, компаний и версий: "
         "PyTorch, ChatGPT, LLM, Jupyter Notebook, GitHub, Hugging Face и похожие имена оставляй как есть. "
         "Для GitHub тем сохраняй короткое имя репозитория в начале title_ru, если оно есть. "
@@ -320,7 +349,8 @@ def enrich_topic_metadata_ru(
         f"Description: {(description or '')[:500]}\n\n"
         "Пример хорошего GitHub TITLE: LLMs-from-scratch - пошаговая сборка ChatGPT-подобной модели на PyTorch\n"
         "Пример плохого TITLE: LLMs-from-scratch - open-source проект: Implement a ChatGPT-like LLM in PyTorch from scratch, step by step\n\n"
-        "Format:\ntitle_ru: ...\nsummary_ru: ...\nangle_ru: ...\nreason_ru: ..."
+        "Format:\ntitle_ru: ...\nsummary_ru: ...\nangle_ru: ...\nreason_ru: ...\n"
+        "ai_value_score: 0-100\nai_value_reason_ru: ...\naudience_fit_ru: ..."
     )
     try:
         result = _generate_with_chat_completion(
@@ -343,6 +373,9 @@ def enrich_topic_metadata_ru(
     summary_ru = values["summary_ru"][:260]
     angle_ru = values["angle_ru"][:260]
     reason_ru = values["reason_ru"][:220]
+    ai_value_score = values.get("ai_value_score", "")[:20]
+    ai_value_reason_ru = values.get("ai_value_reason_ru", "")[:180]
+    audience_fit_ru = values.get("audience_fit_ru", "")[:180]
     if not _looks_like_useful_russian_metadata(title_ru, summary_ru, angle_ru, original_title=clean_title):
         _log_invalid_topic_metadata(
             model,
@@ -351,7 +384,17 @@ def enrich_topic_metadata_ru(
             result.content,
         )
         return None
-    result.content = "\n".join([title_ru, summary_ru, angle_ru, reason_ru])
+    result.content = "\n".join(
+        [
+            f"title_ru: {title_ru}",
+            f"summary_ru: {summary_ru}",
+            f"angle_ru: {angle_ru}",
+            f"reason_ru: {reason_ru}",
+            f"ai_value_score: {ai_value_score}",
+            f"ai_value_reason_ru: {ai_value_reason_ru}",
+            f"audience_fit_ru: {audience_fit_ru}",
+        ]
+    )
     return result
 
 

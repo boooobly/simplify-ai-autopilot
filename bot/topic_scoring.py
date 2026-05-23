@@ -290,6 +290,25 @@ def score_topic(
     return score, category, ", ".join(dict.fromkeys(reason_parts))
 
 
+
+def hybrid_topic_score(deterministic_score: int, ai_score: int | None) -> int:
+    """Blend deterministic and AI topic value scores conservatively.
+
+    The deterministic score remains the baseline. AI may move it only through
+    the weighted blend and never by more than 15 points in either direction.
+    """
+    baseline = max(0, min(100, int(deterministic_score or 0)))
+    if ai_score is None:
+        return baseline
+    try:
+        ai_value = int(ai_score)
+    except (TypeError, ValueError):
+        return baseline
+    ai_value = max(0, min(100, ai_value))
+    weighted = round(baseline * 0.65 + ai_value * 0.35)
+    clamped_delta = max(-15, min(15, weighted - baseline))
+    return max(0, min(100, baseline + clamped_delta))
+
 def humanize_topic_reason_ru(category: str, score: int, source_group: str, reason: str) -> str:
     """Convert technical scoring fragments into an admin-friendly Russian reason."""
     category = (category or "other").strip().lower()

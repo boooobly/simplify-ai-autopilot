@@ -86,6 +86,7 @@ class DraftDatabase:
             )
             self._ensure_column(conn, "topic_candidates", "category", "TEXT")
             self._ensure_column(conn, "topic_candidates", "score", "INTEGER DEFAULT 0")
+            self._ensure_column(conn, "topic_candidates", "deterministic_score", "INTEGER DEFAULT 0")
             self._ensure_column(conn, "topic_candidates", "reason", "TEXT")
             self._ensure_column(conn, "topic_candidates", "title_ru", "TEXT")
             self._ensure_column(conn, "topic_candidates", "summary_ru", "TEXT")
@@ -561,6 +562,7 @@ class DraftDatabase:
                 category = ?,
                 score = ?,
                 reason = ?,
+                deterministic_score = ?,
                 title_ru = COALESCE(NULLIF(?, ''), title_ru),
                 summary_ru = COALESCE(NULLIF(?, ''), summary_ru),
                 angle_ru = COALESCE(NULLIF(?, ''), angle_ru),
@@ -578,6 +580,7 @@ class DraftDatabase:
                 category_to_store,
                 score_to_store,
                 reason_to_store,
+                int(score_to_store or 0),
                 title_ru_to_store,
                 summary_ru_to_store,
                 angle_ru_to_store,
@@ -707,12 +710,12 @@ class DraftDatabase:
             cursor = conn.execute(
                 """
                 INSERT INTO topic_candidates (
-                    title, url, source, published_at, status, category, score, reason,
+                    title, url, source, published_at, status, category, score, deterministic_score, reason,
                     title_ru, summary_ru, angle_ru, reason_ru, original_description,
                     normalized_title, source_group, canonical_key, related_sources,
                     related_urls, related_count, created_at, last_seen_at
                 )
-                VALUES (?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """,
                 (
                     title,
@@ -720,6 +723,7 @@ class DraftDatabase:
                     source,
                     published_at,
                     category,
+                    score,
                     score,
                     reason,
                     title_ru,
@@ -744,6 +748,7 @@ class DraftDatabase:
         summary_ru: str | None = None,
         angle_ru: str | None = None,
         reason_ru: str | None = None,
+        score: int | None = None,
     ) -> bool:
         with self._connect() as conn:
             cursor = conn.execute(
@@ -752,10 +757,11 @@ class DraftDatabase:
                 SET title_ru = COALESCE(NULLIF(?, ''), title_ru),
                     summary_ru = COALESCE(NULLIF(?, ''), summary_ru),
                     angle_ru = COALESCE(NULLIF(?, ''), angle_ru),
-                    reason_ru = COALESCE(NULLIF(?, ''), reason_ru)
+                    reason_ru = COALESCE(NULLIF(?, ''), reason_ru),
+                    score = COALESCE(?, score)
                 WHERE id = ?
                 """,
-                (title_ru, summary_ru, angle_ru, reason_ru, topic_id),
+                (title_ru, summary_ru, angle_ru, reason_ru, score, topic_id),
             )
             conn.commit()
             return cursor.rowcount > 0
@@ -767,6 +773,7 @@ class DraftDatabase:
         summary_ru: str,
         angle_ru: str,
         reason_ru: str,
+        score: int | None = None,
     ) -> bool:
         with self._connect() as conn:
             cursor = conn.execute(
@@ -775,10 +782,11 @@ class DraftDatabase:
                 SET title_ru = ?,
                     summary_ru = ?,
                     angle_ru = ?,
-                    reason_ru = ?
+                    reason_ru = ?,
+                    score = COALESCE(?, score)
                 WHERE id = ?
                 """,
-                (title_ru, summary_ru, angle_ru, reason_ru, topic_id),
+                (title_ru, summary_ru, angle_ru, reason_ru, score, topic_id),
             )
             conn.commit()
             return cursor.rowcount > 0

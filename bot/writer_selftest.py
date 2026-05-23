@@ -220,6 +220,33 @@ def _assert_topic_metadata_parser_variants() -> None:
         "reason_ru": "Fenced причина",
     }
 
+    ai_json = _parse_topic_metadata_fields(
+        '{"title_ru":"JSON заголовок","summary_ru":"JSON сводка","angle_ru":"JSON ракурс","reason_ru":"JSON причина","ai_value_score":82,"ai_value_reason_ru":"AI причина","audience_fit_ru":"Подходит новичкам"}'
+    )
+    assert ai_json["ai_value_score"] == "82"
+    assert ai_json["ai_value_reason_ru"] == "AI причина"
+
+    ai_russian = _parse_topic_metadata_fields(
+        "Заголовок: Русский заголовок\n"
+        "О чем: Русская сводка\n"
+        "Идея: Русский ракурс\n"
+        "Почему: Русская причина\n"
+        "Оценка ценности: 82\n"
+        "AI причина: Практично для новичков\n"
+        "Аудитория: Подходит каналу"
+    )
+    assert ai_russian["ai_value_score"] == "82"
+    assert ai_russian["audience_fit_ru"] == "Подходит каналу"
+
+    invalid_ai = _parse_topic_metadata_fields(
+        "title_ru: Русский заголовок\n"
+        "summary_ru: Русская сводка\n"
+        "angle_ru: Русский ракурс\n"
+        "reason_ru: Русская причина\n"
+        "ai_value_score: не число"
+    )
+    assert invalid_ai["ai_value_score"] == "не число"
+
 
 def _assert_topic_metadata_hy3_agentmemory() -> None:
     def fake_generate(api_key, model, user_prompt, system_prompt, base_url=None, extra_headers=None, max_tokens=900):
@@ -249,11 +276,11 @@ def _assert_topic_metadata_hy3_agentmemory() -> None:
         writer._generate_with_chat_completion = original
 
     assert result is not None
-    assert result.content.splitlines() == [
-        "agentmemory - память для AI-агентов в кодинге",
-        "Репозиторий добавляет persistent memory для AI coding agents и проверяет её на real-world benchmarks.",
-        "Можно показать как пример инфраструктуры для более полезных AI-агентов в разработке.",
-        "Тема сильная из-за интереса к памяти и устойчивости coding agents.",
+    assert result.content.splitlines()[:4] == [
+        "title_ru: agentmemory - память для AI-агентов в кодинге",
+        "summary_ru: Репозиторий добавляет persistent memory для AI coding agents и проверяет её на real-world benchmarks.",
+        "angle_ru: Можно показать как пример инфраструктуры для более полезных AI-агентов в разработке.",
+        "reason_ru: Тема сильная из-за интереса к памяти и устойчивости coding agents.",
     ]
 
 
@@ -305,11 +332,12 @@ def _assert_topic_metadata_enrichment() -> None:
 
     assert result is not None
     lines = result.content.splitlines()
-    assert lines[0] == "LLMs-from-scratch - пошаговая сборка ChatGPT-подобной модели на PyTorch"
+    assert lines[0] == "title_ru: LLMs-from-scratch - пошаговая сборка ChatGPT-подобной модели на PyTorch"
     assert "PyTorch" in result.content and "ChatGPT" in result.content and "LLM" in result.content
     assert "Implement a ChatGPT-like LLM" not in lines[0]
+    assert "ai_value_score:" in result.content
     assert "Jupyter Notebook" in calls[0][1]
-    assert "ровно четыре поля" in calls[0][1]
+    assert "ровно семь полей" in calls[0][1]
     assert "Не пиши пост" in calls[0][1]
     assert "Пример плохого TITLE" in calls[0][0]
 
