@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+from urllib.parse import urljoin, urlparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -201,6 +202,67 @@ def fetch_x_topics(token: str, accounts: list[str], max_posts_per_account: int) 
             reports.append(SourceReport(name=source_name, url=f"https://x.com/{safe_username}", source_group="x", status="error", error=str(exc)[:160]))
     return topics, reports
 
+
+
+
+def discover_rss_feed_url(input_url: str, timeout: int = 12) -> tuple[str | None, str]:
+    url = (input_url or "").strip()
+    if not url.startswith("http"):
+        return None, "URL должен начинаться с http/https"
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; simplify-ai-autopilot/1.0; +https://t.me/simplify_ai)"}
+
+    def _try_feed(candidate_url: str) -> tuple[str | None, str]:
+        try:
+            resp = requests.get(candidate_url, timeout=timeout, headers=headers)
+            resp.raise_for_status()
+            parsed = _parse_rss(resp.text, "Проверка", "custom", max_items=3)
+            if parsed:
+                return candidate_url, ""
+            return None, "Лента найдена, но в ней нет записей"
+        except Exception as exc:
+            return None, str(exc)[:160]
+
+    feed_url, err = _try_feed(url)
+    if feed_url:
+        return feed_url, ""
+
+    try:
+        resp = requests.get(url, timeout=timeout, headers=headers)
+        resp.raise_for_status()
+    except Exception as exc:
+        return None, f"Не удалось открыть страницу: {str(exc)[:160]}"
+
+    content_type = (resp.headers.get("content-type") or "").lower()
+    body = resp.text
+    if "xml" in content_type or body.lstrip().startswith("<?xml") or "<rss" in body[:300].lower() or "<feed" in body[:300].lower():
+        feed_url, err = _try_feed(url)
+        if feed_url:
+            return feed_url, ""
+
+    soup = BeautifulSoup(body, "html.parser")
+    link_candidates: list[str] = []
+    for link in soup.find_all("link"):
+        rel = " ".join(link.get("rel") or []).lower()
+        ltype = (link.get("type") or "").lower()
+        href = (link.get("href") or "").strip()
+        if "alternate" in rel and ltype in {"application/rss+xml", "application/atom+xml"} and href:
+            link_candidates.append(urljoin(url, href))
+
+    parsed_url = urlparse(url)
+    base = f"{parsed_url.scheme}://{parsed_url.netloc}"
+    for path in ("/feed", "/rss", "/rss.xml", "/feed.xml"):
+        link_candidates.append(urljoin(base, path))
+
+    seen = set()
+    for candidate in link_candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        feed_url, _ = _try_feed(candidate)
+        if feed_url:
+            return feed_url, ""
+
+    return None, "Не нашёл RSS/Atom-ленту"
 
 def parse_custom_topic_feeds(env_value: str | None) -> list[tuple[str, str, str]]:
     if not env_value:
@@ -548,12 +610,12 @@ def _run_async(coro):
         finally:
             loop.close()
 
-def collect_topics() -> list[TopicItem]:
-    items, _reports = collect_topics_with_diagnostics()
+def collect_topics(settings=None, db=None) -> list[TopicItem]:
+    items, _reports = collect_topics_with_diagnostics(settings=settings, db=db)
     return items
 
 
-def collect_topics_with_diagnostics() -> tuple[list[TopicItem], list[SourceReport]]:
+def collect_topics_with_diagnostics(settings=None, db=None) -> tuple[list[TopicItem], list[SourceReport]]:
     collected: list[TopicItem] = []
     reports: list[SourceReport] = []
     headers = {"User-Agent": "Mozilla/5.0 (compatible; simplify-ai-autopilot/1.0; +https://t.me/simplify_ai)"}
@@ -574,6 +636,26 @@ def collect_topics_with_diagnostics() -> tuple[list[TopicItem], list[SourceRepor
                 reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="ok" if parsed else "empty", item_count=len(parsed)))
             except Exception as exc:
                 reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="error", error=str(exc)[:160]))
+
+    managed_rows = db.list_managed_sources(include_disabled=False) if db is not None else []
+    for row in managed_rows:
+        if str(row["source_type"]) != "rss":
+            continue
+        source_name = str(row["name"])
+        group = str(row["source_group"] or "custom")
+        rss_url = str(row["value"])
+        try:
+            response = requests.get(rss_url, timeout=12, headers=headers)
+            response.raise_for_status()
+            parsed = _parse_rss(response.text, source_name, group, max_items=8)
+            collected.extend(parsed)
+            reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="ok" if parsed else "empty", item_count=len(parsed)))
+            if db is not None:
+                db.update_managed_source_status(int(row["id"]), "ok" if parsed else "empty", "")
+        except Exception as exc:
+            reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="error", error=str(exc)[:160]))
+            if db is not None:
+                db.update_managed_source_status(int(row["id"]), "error", str(exc)[:160])
 
     for source_name, group, rss_url in custom:
         try:
@@ -600,7 +682,13 @@ def collect_topics_with_diagnostics() -> tuple[list[TopicItem], list[SourceRepor
     try:
         from bot.config import load_settings
 
-        telegram_items, telegram_reports = _run_async(fetch_telegram_channel_topics(load_settings()))
+        active_settings = settings or load_settings()
+        telegram_channels = []
+        if db is not None:
+            for row in db.list_managed_sources(include_disabled=False):
+                if row["source_type"] == "telegram":
+                    telegram_channels.append(str(row["value"]))
+        telegram_items, telegram_reports = _run_async(fetch_telegram_channel_topics(active_settings, extra_channels=telegram_channels))
         collected.extend(telegram_items)
         reports.extend(telegram_reports)
     except Exception as exc:

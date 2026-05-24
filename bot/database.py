@@ -102,6 +102,23 @@ class DraftDatabase:
             self._ensure_column(conn, "topic_candidates", "related_count", "INTEGER DEFAULT 1")
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS managed_sources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_type TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    source_group TEXT NOT NULL DEFAULT 'custom',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    last_status TEXT,
+                    last_error TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_managed_sources_unique ON managed_sources(source_type, value)")
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS ai_usage (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     provider TEXT NOT NULL,
@@ -163,6 +180,70 @@ class DraftDatabase:
             conn.execute(
                 f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql_type}"
             )
+
+
+    def _normalize_managed_source_value(self, source_type: str, value: str) -> str:
+        clean = (value or "").strip()
+        if source_type == "telegram":
+            clean = clean.lstrip("@").strip()
+            if clean.startswith("https://t.me/"):
+                clean = clean.split("https://t.me/", 1)[1].strip("/")
+        return clean
+
+    def create_managed_source(self, source_type: str, name: str, value: str, source_group: str) -> int:
+        normalized_value = self._normalize_managed_source_value(source_type, value)
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT id FROM managed_sources WHERE source_type = ? AND value = ?",
+                (source_type, normalized_value),
+            ).fetchone()
+            if existing:
+                return int(existing["id"])
+            cur = conn.execute(
+                """
+                INSERT INTO managed_sources (source_type, name, value, source_group, enabled)
+                VALUES (?, ?, ?, ?, 1)
+                """,
+                (source_type, name.strip(), normalized_value, source_group.strip() or "custom"),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def list_managed_sources(self, include_disabled: bool = True) -> list[sqlite3.Row]:
+        with self._connect() as conn:
+            if include_disabled:
+                return conn.execute("SELECT * FROM managed_sources ORDER BY id DESC").fetchall()
+            return conn.execute("SELECT * FROM managed_sources WHERE enabled = 1 ORDER BY id DESC").fetchall()
+
+    def get_managed_source(self, source_id: int) -> sqlite3.Row | None:
+        with self._connect() as conn:
+            return conn.execute("SELECT * FROM managed_sources WHERE id = ?", (source_id,)).fetchone()
+
+    def update_managed_source_enabled(self, source_id: int, enabled: bool) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE managed_sources SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (1 if enabled else 0, source_id))
+            conn.commit()
+
+    def delete_managed_source(self, source_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM managed_sources WHERE id = ?", (source_id,))
+            conn.commit()
+
+    def update_managed_source_status(self, source_id: int, status: str, error: str = "") -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE managed_sources SET last_status = ?, last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (status.strip()[:32], (error or "").strip()[:200], source_id),
+            )
+            conn.commit()
+
+    def find_managed_source(self, source_type: str, value: str) -> sqlite3.Row | None:
+        normalized_value = self._normalize_managed_source_value(source_type, value)
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT * FROM managed_sources WHERE source_type = ? AND value = ?",
+                (source_type, normalized_value),
+            ).fetchone()
 
 
     @staticmethod
