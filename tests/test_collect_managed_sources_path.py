@@ -16,9 +16,9 @@ def test_collect_uses_managed_sources_path(tmp_path, monkeypatch):
         called["db"] = db
         called["settings"] = settings
         item = _with_scoring(TopicItem(title="Managed topic from rss feed", url="https://example.com/a", source="Managed", source_group="custom"))
-        return [item], []
+        return [item]
 
-    monkeypatch.setattr(handlers, "collect_topics_with_diagnostics", fake_collect)
+    monkeypatch.setattr(handlers, "collect_topics", fake_collect)
     settings = SimpleNamespace(max_topic_age_days=14, has_ai_provider=False)
 
     stats, items, inserted = asyncio.run(handlers._collect_topics_with_stats(db, settings=settings))

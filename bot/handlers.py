@@ -766,8 +766,7 @@ def _resolve_ai_provider(settings) -> tuple[str, str, str | None, dict[str, str]
 
 
 async def _run_collect_topics(settings=None, db=None):
-    items, _reports = await asyncio.to_thread(collect_topics_with_diagnostics, settings, db)
-    return items
+    return await asyncio.to_thread(collect_topics, settings, db)
 
 
 async def _run_collect_topics_with_diagnostics(settings=None, db=None):
@@ -3873,6 +3872,52 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             _render_usage_text(summary, "сегодня", costs_enabled) + "\n\nДля других периодов: /usage_7d и /usage_month",
             reply_markup=_back_to_menu_keyboard(),
         )
+    elif data == "menu_help":
+        await _edit_callback_message(
+            query,
+            "Команды:\n"
+            "/menu - открыть меню\n"
+            "/generate - черновик через draft-модель\n"
+            "/generate <ссылка> - пост из ссылки\n"
+            "/drafts - последние черновики\n"
+            "/topics - найденные темы\n"
+            "/topics_tools - инструменты и гайды\n"
+            "/topics_news - новости и модели\n"
+            "/topics_fun - живые/мемные темы\n"
+            "/topics_hot - самые сильные темы\n"
+            "/topics_all - последние темы (все статусы)\n"
+            "/plan_day - подобрать темы под пустые слоты сегодня\n"
+            "/plan_tomorrow - подобрать темы на завтра\n"
+            "/generate_plan_day - создать черновики из плана на сегодня\n"
+            "/generate_plan_tomorrow - создать черновики из плана на завтра\n"
+            "/schedule_generated_plan_day - поставить созданные черновики в очередь на сегодня\n"
+            "/schedule_generated_plan_tomorrow - поставить созданные черновики в очередь на завтра\n"
+            "/queue_today - план публикаций на сегодня\n"
+            "/queue_tomorrow - план публикаций на завтра\n"
+            "/failed_drafts - последние неудачные публикации\n"
+            "/unschedule <id> - снять черновик с очереди\n"
+            "/restore_draft <id> - вернуть failed в черновики\n"
+            "/usage_today - расходы ИИ за сегодня\n"
+            "/usage_7d - расходы ИИ за 7 дней\n"
+            "/usage_month - расходы ИИ за 30 дней\n"
+            "/cleanup_preview - показать безопасную очистку базы\n"
+            "/cleanup_confirm - применить свежий предпросмотр очистки\n"
+            "/style_guide - краткая сводка текущего стиля генерации\n"
+            "/emoji_ids - показать custom_emoji_id из сообщения/реплая\n"
+            "/collect - собрать темы\n"
+            "/sources_status - проверить источники тем\n"
+            "/collect_debug - собрать темы с диагностикой\n"
+            "/draft_info <id> - открыть черновик\n"
+            "/delete_draft <id> - удалить черновик\n"
+            "/attach_media <id> <photo|video|animation> <url> - прикрепить медиа\n\n"
+            "Кнопка «📎 Прикрепить медиа» поддерживает до 10 фото/видео/GIF.\n"
+            "Кнопка «🗑 Убрать медиа» появляется, когда у черновика есть медиа.\n"
+            "Можно отправить фото, видео или GIF/анимацию прямо боту.\n"
+            "Команда /attach_media остаётся для URL/ручного режима.\n\n"
+            "В меню «✍️ Создать черновик» сначала выбери способ создания.\n"
+            "Для реального поста самый быстрый путь — прислать ссылку одним сообщением.",
+            reply_markup=_back_to_menu_keyboard(),
+        )
 
 
 async def _handle_sources_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
@@ -3953,52 +3998,7 @@ async def _handle_sources_callback(update: Update, context: ContextTypes.DEFAULT
         matched = [r for r in reports if str(r.url).endswith(str(row["value"])) or r.name == f"Telegram @{row['value']}"]
         report = matched[0] if matched else None
         await context.bot.send_message(chat_id=settings.admin_id, text=f"Telegram test: {report.status if report else 'нет данных'}")
-    elif data == "menu_help":
-        await _edit_callback_message(
-            query,
-            "Команды:\n"
-            "/menu - открыть меню\n"
-            "/generate - черновик через draft-модель\n"
-            "/generate <ссылка> - пост из ссылки\n"
-            "/drafts - последние черновики\n"
-            "/topics - найденные темы\n"
-            "/topics_tools - инструменты и гайды\n"
-            "/topics_news - новости и модели\n"
-            "/topics_fun - живые/мемные темы\n"
-            "/topics_hot - самые сильные темы\n"
-            "/topics_all - последние темы (все статусы)\n"
-            "/plan_day - подобрать темы под пустые слоты сегодня\n"
-            "/plan_tomorrow - подобрать темы на завтра\n"
-            "/generate_plan_day - создать черновики из плана на сегодня\n"
-            "/generate_plan_tomorrow - создать черновики из плана на завтра\n"
-            "/schedule_generated_plan_day - поставить созданные черновики в очередь на сегодня\n"
-            "/schedule_generated_plan_tomorrow - поставить созданные черновики в очередь на завтра\n"
-            "/queue_today - план публикаций на сегодня\n"
-            "/queue_tomorrow - план публикаций на завтра\n"
-            "/failed_drafts - последние неудачные публикации\n"
-            "/unschedule <id> - снять черновик с очереди\n"
-            "/restore_draft <id> - вернуть failed в черновики\n"
-            "/usage_today - расходы ИИ за сегодня\n"
-            "/usage_7d - расходы ИИ за 7 дней\n"
-            "/usage_month - расходы ИИ за 30 дней\n"
-            "/cleanup_preview - показать безопасную очистку базы\n"
-            "/cleanup_confirm - применить свежий предпросмотр очистки\n"
-            "/style_guide - краткая сводка текущего стиля генерации\n"
-            "/emoji_ids - показать custom_emoji_id из сообщения/реплая\n"
-            "/collect - собрать темы\n"
-            "/sources_status - проверить источники тем\n"
-            "/collect_debug - собрать темы с диагностикой\n"
-            "/draft_info <id> - открыть черновик\n"
-            "/delete_draft <id> - удалить черновик\n"
-            "/attach_media <id> <photo|video|animation> <url> - прикрепить медиа\n\n"
-            "Кнопка «📎 Прикрепить медиа» поддерживает до 10 фото/видео/GIF.\n"
-            "Кнопка «🗑 Убрать медиа» появляется, когда у черновика есть медиа.\n"
-            "Можно отправить фото, видео или GIF/анимацию прямо боту.\n"
-            "Команда /attach_media остаётся для URL/ручного режима.\n\n"
-            "В меню «✍️ Создать черновик» сначала выбери способ создания.\n"
-            "Для реального поста самый быстрый путь — прислать ссылку одним сообщением.",
-            reply_markup=_back_to_menu_keyboard(),
-        )
+    await _edit_callback_message(query, "Неизвестное действие источников.", reply_markup=_sources_hub_keyboard())
 
 
 async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

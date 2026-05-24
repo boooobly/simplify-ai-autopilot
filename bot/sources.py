@@ -610,8 +610,8 @@ def _run_async(coro):
         finally:
             loop.close()
 
-def collect_topics() -> list[TopicItem]:
-    items, _reports = collect_topics_with_diagnostics()
+def collect_topics(settings=None, db=None) -> list[TopicItem]:
+    items, _reports = collect_topics_with_diagnostics(settings=settings, db=db)
     return items
 
 
