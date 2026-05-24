@@ -188,6 +188,7 @@ class TopicCollectStats:
     total_seconds: float = 0.0
     ai_enriched: int = 0
     ai_enrich_limit: int = 0
+    skipped_examples: dict[str, list[str]] | None = None
 
 
 
@@ -2395,26 +2396,45 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
     source_seconds = time.monotonic() - source_started if items is not None else 0.0
 
     stats = TopicCollectStats(total=len(items), source_seconds=source_seconds)
+    stats.skipped_examples = {"low_score": [], "stale": [], "spam": [], "invalid": []}
     inserted = []
     enrichment_candidates = []
     spam_words = ["casino", "porn", "xxx", "bet", "viagra", "airdrop", "token presale"]
     max_topic_age_days = int(getattr(settings, "max_topic_age_days", 14) or 14)
+
+    def _remember_skip(kind: str, item, reason: str) -> None:
+        if not stats.skipped_examples:
+            return
+        bucket = stats.skipped_examples.get(kind)
+        if bucket is None or len(bucket) >= 3:
+            return
+        title = (getattr(item, "title", "") or "").strip()
+        source = (getattr(item, "source", "") or "unknown").strip()
+        score = getattr(item, "score", None)
+        score_part = f"{int(score)}" if isinstance(score, int) else "—"
+        short_title = title[:85] + ("…" if len(title) > 85 else "")
+        bucket.append(f"- {source} | {score_part} | {short_title} | {reason}")
+
     store_started = time.monotonic()
     for item in items:
         if len(item.title.strip()) < 8 or not item.url.strip() or not item.normalized_title.strip():
             stats.invalid += 1
+            _remember_skip("invalid", item, "пустой title/url")
             continue
         if _is_stale_topic(item, max_topic_age_days):
             stats.stale += 1
+            _remember_skip("stale", item, "старее лимита")
             continue
         if not getattr(item, "published_at", None):
             stats.missing_date += 1
         if any(w in item.title.lower() for w in spam_words):
             stats.spam += 1
+            _remember_skip("spam", item, "спам-слова в title")
             continue
         if item.score < 50 and item.source_group != "custom":
             stats.low_score += 1
             stats.low_quality += 1
+            _remember_skip("low_score", item, item.reason or "score < 50")
             continue
         result = db.upsert_topic_candidate_with_reason(
             item.title, item.url, item.source, item.published_at, item.category, item.score, item.reason, item.normalized_title, item.source_group, item.title_ru, item.summary_ru, item.angle_ru, item.reason_ru, item.original_description
@@ -2550,6 +2570,16 @@ def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list, 
                 "",
             ]
         )
+        if stats.skipped_examples:
+            lines.append("Примеры пропусков:")
+            labels = {"low_score": "low_score", "stale": "stale", "spam": "spam", "invalid": "invalid"}
+            for key in ("low_score", "stale", "spam", "invalid"):
+                examples = stats.skipped_examples.get(key) or []
+                if not examples:
+                    continue
+                lines.append(f"{labels[key]}:")
+                lines.extend(examples[:2])
+            lines.append("")
     if inserted:
         top = sorted(inserted, key=lambda i: i.score, reverse=True)[:5]
         lines.append("Лучшие новые:")
