@@ -705,6 +705,7 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🔗 Пост из ссылки", callback_data="menu_url_help")],
             [InlineKeyboardButton("📝 Черновики", callback_data="menu_drafts")],
             [InlineKeyboardButton("🧠 Темы", callback_data="menu_topics")],
+            [InlineKeyboardButton("📡 Источники", callback_data="menu_sources")],
             [InlineKeyboardButton("🗓️ План на день", callback_data="menu_plan_day")],
             [InlineKeyboardButton("📅 Очередь", callback_data="menu_queue")],
             [InlineKeyboardButton("📊 Расходы ИИ", callback_data="menu_usage")],
@@ -716,6 +717,29 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
 
 def _back_to_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")]])
+
+
+def _sources_hub_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📋 Список источников", callback_data="sources_list")],
+            [InlineKeyboardButton("➕ Добавить RSS", callback_data="source_add_rss")],
+            [InlineKeyboardButton("➕ Добавить Telegram-канал", callback_data="source_add_telegram")],
+            [InlineKeyboardButton("🧪 Проверить источники", callback_data="menu_sources_status")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")],
+        ]
+    )
+
+
+def _source_card_keyboard(source_id: int, enabled: bool) -> InlineKeyboardMarkup:
+    toggle = "⛔ Disable" if enabled else "✅ Enable"
+    return InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton(toggle, callback_data=f"source_toggle:{source_id}"),
+            InlineKeyboardButton("🧪 Test", callback_data=f"source_test:{source_id}"),
+            InlineKeyboardButton("🗑 Delete", callback_data=f"source_delete:{source_id}"),
+        ]]
+    )
 
 
 def _settings_text(settings) -> str:
@@ -741,8 +765,9 @@ def _resolve_ai_provider(settings) -> tuple[str, str, str | None, dict[str, str]
     return settings.openai_api_key, "openai", None, None
 
 
-async def _run_collect_topics():
-    return await asyncio.to_thread(collect_topics)
+async def _run_collect_topics(settings=None, db=None):
+    items, _reports = await asyncio.to_thread(collect_topics_with_diagnostics, settings, db)
+    return items
 
 
 async def _run_collect_topics_with_diagnostics(settings=None, db=None):
@@ -1611,8 +1636,7 @@ async def _handle_pending_media_attach(update: Update, context: ContextTypes.DEF
 def _admin_reply_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(
-NAV_PLAN_DAY), KeyboardButton(NAV_GENERATE_PLAN)],
+            [KeyboardButton(NAV_PLAN_DAY), KeyboardButton(NAV_GENERATE_PLAN)],
             [KeyboardButton(NAV_QUEUE), KeyboardButton(NAV_DRAFTS)],
             [KeyboardButton(NAV_TOPICS), KeyboardButton(NAV_SOURCES)],
             [KeyboardButton(NAV_USAGE), KeyboardButton(NAV_STYLE)],
@@ -1657,7 +1681,7 @@ async def _handle_navigation_text(update: Update, context: ContextTypes.DEFAULT_
         await topics_menu_command(update, context)
         return True
     if text == NAV_SOURCES:
-        await sources_status_command(update, context)
+        await _reply_admin_text(update, "📡 Источники\nВыбери действие:", reply_markup=_sources_hub_keyboard())
         return True
     if text == NAV_USAGE:
         await usage_today_command(update, context)
@@ -2410,7 +2434,7 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
     total_started = time.monotonic()
     source_started = time.monotonic()
     if items is None:
-        items = await _run_collect_topics()
+        items = await _run_collect_topics(settings=settings, db=db)
     source_seconds = time.monotonic() - source_started if items is not None else 0.0
 
     stats = TopicCollectStats(total=len(items), source_seconds=source_seconds)
@@ -3045,6 +3069,9 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     if data.startswith("topics_"):
         await _handle_topics_callback(update, context, data)
+        return
+    if data in {"sources_list", "source_add_rss", "source_add_telegram", "source_confirm_rss", "source_cancel_add"} or data.startswith("source_toggle:") or data.startswith("source_delete:") or data.startswith("source_test:"):
+        await _handle_sources_callback(update, context, data)
         return
 
     try:
@@ -3796,6 +3823,8 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             text = _topic_card_text(topic)
             keyboard = _topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or ""))
             await context.bot.send_message(chat_id=settings.admin_id, text=text, reply_markup=keyboard, link_preview_options=_disabled_link_preview_options())
+    elif data == "menu_sources":
+        await _edit_callback_message(query, "📡 Источники\nВыбери действие:", reply_markup=_sources_hub_keyboard())
     elif data == "menu_sources_status":
         _items, reports = await _run_collect_topics_with_diagnostics(settings=settings, db=db)
         await _edit_callback_message(query, _render_sources_status(reports), reply_markup=_back_to_menu_keyboard())
@@ -3844,6 +3873,86 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             _render_usage_text(summary, "сегодня", costs_enabled) + "\n\nДля других периодов: /usage_7d и /usage_month",
             reply_markup=_back_to_menu_keyboard(),
         )
+
+
+async def _handle_sources_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    query = update.callback_query
+    if not query:
+        return
+    if data == "sources_list":
+        rows = db.list_managed_sources(include_disabled=True)
+        if not rows:
+            await _edit_callback_message(query, "Пока нет пользовательских источников.", reply_markup=_sources_hub_keyboard())
+            return
+        await _edit_callback_message(query, f"Источников: {len(rows)}", reply_markup=_sources_hub_keyboard())
+        for row in rows:
+            enabled = bool(row["enabled"])
+            status = "✅" if enabled else "⛔"
+            text = (
+                f"#{row['id']} {status} [{row['source_type']}]\n"
+                f"{row['name']}\n{row['value']}\n"
+                f"status: {row['last_status'] or '-'}"
+            )
+            if row["last_error"]:
+                text += f"\nerr: {str(row['last_error'])[:120]}"
+            await context.bot.send_message(chat_id=settings.admin_id, text=text, reply_markup=_source_card_keyboard(int(row["id"]), enabled))
+        return
+    if data == "source_add_rss":
+        context.user_data["source_add_flow"] = {"type": "rss", "step": "name"}
+        await _edit_callback_message(query, "Введите название RSS-источника.", reply_markup=_sources_hub_keyboard())
+        return
+    if data == "source_add_telegram":
+        context.user_data["source_add_flow"] = {"type": "telegram", "step": "value"}
+        await _edit_callback_message(query, "Пришлите username канала или ссылку t.me/...", reply_markup=_sources_hub_keyboard())
+        return
+    if data == "source_confirm_rss":
+        flow = context.user_data.get("source_add_flow") or {}
+        if flow.get("type") == "rss" and flow.get("step") == "confirm" and flow.get("feed_url"):
+            db.create_managed_source("rss", str(flow.get("name") or "RSS"), str(flow["feed_url"]), "custom")
+            context.user_data.pop("source_add_flow", None)
+            await _edit_callback_message(query, "RSS-источник добавлен.", reply_markup=_sources_hub_keyboard())
+            return
+        await _edit_callback_message(query, "Нет данных для сохранения.", reply_markup=_sources_hub_keyboard())
+        return
+    if data == "source_cancel_add":
+        context.user_data.pop("source_add_flow", None)
+        await _edit_callback_message(query, "Добавление отменено.", reply_markup=_sources_hub_keyboard())
+        return
+    if data.startswith("source_toggle:"):
+        sid = int(data.split(":", 1)[1])
+        row = db.get_managed_source(sid)
+        if row:
+            db.update_managed_source_enabled(sid, not bool(row["enabled"]))
+        await _edit_callback_message(query, "Обновил статус источника.", reply_markup=_sources_hub_keyboard())
+        return
+    if data.startswith("source_delete:"):
+        sid = int(data.split(":", 1)[1])
+        db.delete_managed_source(sid)
+        await _edit_callback_message(query, "Источник удалён.", reply_markup=_sources_hub_keyboard())
+        return
+    if data.startswith("source_test:"):
+        sid = int(data.split(":", 1)[1])
+        row = db.get_managed_source(sid)
+        if not row:
+            await _edit_callback_message(query, "Источник не найден.", reply_markup=_sources_hub_keyboard())
+            return
+        if row["source_type"] == "rss":
+            await _edit_callback_message(query, "Проверяю RSS...", reply_markup=_sources_hub_keyboard())
+            try:
+                feed_url, error = await asyncio.to_thread(discover_rss_feed_url, str(row["value"]))
+                if feed_url:
+                    await context.bot.send_message(chat_id=settings.admin_id, text=f"OK: {feed_url}")
+                else:
+                    await context.bot.send_message(chat_id=settings.admin_id, text=f"Ошибка: {error}")
+            except Exception:
+                await context.bot.send_message(chat_id=settings.admin_id, text="Не удалось проверить RSS.")
+            return
+        _items, reports = await _run_collect_topics_with_diagnostics(settings=settings, db=db)
+        matched = [r for r in reports if str(r.url).endswith(str(row["value"])) or r.name == f"Telegram @{row['value']}"]
+        report = matched[0] if matched else None
+        await context.bot.send_message(chat_id=settings.admin_id, text=f"Telegram test: {report.status if report else 'нет данных'}")
     elif data == "menu_help":
         await _edit_callback_message(
             query,
@@ -3909,6 +4018,42 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     handled_pending_media = await _handle_pending_media_attach(update, context)
     if handled_pending_media:
         return
+    flow = context.user_data.get("source_add_flow") or {}
+    if update.message and message_text and flow:
+        db: DraftDatabase = context.bot_data["db"]
+        flow_type = flow.get("type")
+        step = flow.get("step")
+        if flow_type == "rss" and step == "name":
+            context.user_data["source_add_flow"] = {"type": "rss", "step": "url", "name": message_text[:80]}
+            await update.message.reply_text("Пришлите RSS-ссылку или URL страницы. Проверяю автоматически.")
+            return
+        if flow_type == "rss" and step == "url":
+            if not is_valid_rss_input_url(message_text):
+                await update.message.reply_text("Нужен URL, который начинается с http/https.")
+                return
+            await update.message.reply_text("Проверяю источник...")
+            feed_url, error = await asyncio.to_thread(discover_rss_feed_url, message_text.strip())
+            if not feed_url:
+                await update.message.reply_text("Не нашёл RSS/Atom-ленту. Пришли прямую RSS-ссылку или другой источник.")
+                return
+            context.user_data["source_add_flow"] = {
+                "type": "rss",
+                "step": "confirm",
+                "name": flow.get("name", "RSS"),
+                "feed_url": feed_url,
+            }
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Добавить", callback_data="source_confirm_rss"), InlineKeyboardButton("❌ Отмена", callback_data="source_cancel_add")]])
+            await update.message.reply_text(f"Нашёл RSS: {feed_url}. Добавить источник?", reply_markup=kb)
+            return
+        if flow_type == "telegram" and step == "value":
+            username = normalize_telegram_channel_input(message_text)
+            if not username:
+                await update.message.reply_text("Не удалось распознать канал. Пришли @username или t.me/username.")
+                return
+            db.create_managed_source("telegram", f"Telegram @{username}", username, "telegram")
+            context.user_data.pop("source_add_flow", None)
+            await update.message.reply_text("Telegram-источник добавлен.", reply_markup=_sources_hub_keyboard())
+            return
 
     if update.message and update.message.reply_to_message:
         reply_text = update.message.reply_to_message.text or update.message.reply_to_message.caption or ""
