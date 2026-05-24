@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import warnings
 from urllib.parse import urljoin, urlparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ from xml.etree import ElementTree as ET
 
 import requests
 from bs4 import BeautifulSoup
+from bs4 import MarkupResemblesLocatorWarning
 from bot.config import _parse_bool_env, _parse_csv_env, _parse_int_range_env
 from bot.topic_scoring import humanize_topic_reason_ru, normalize_topic_title, score_topic
 from bot.topic_display import is_weak_topic_metadata
@@ -309,7 +311,12 @@ def _with_scoring(topic: TopicItem) -> TopicItem:
 def _normalize_description(raw: str | None, limit: int = _DESCRIPTION_MAX_LEN) -> str | None:
     if not raw:
         return None
-    clean = BeautifulSoup(raw, "html.parser").get_text(" ", strip=True)
+    if "<" not in raw and "&" not in raw:
+        clean = raw.strip()
+    else:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", MarkupResemblesLocatorWarning)
+            clean = BeautifulSoup(raw, "html.parser").get_text(" ", strip=True)
     clean = re.sub(r"\s+", " ", clean).strip()
     for pattern in _BOILERPLATE_PATTERNS:
         clean = pattern.sub("", clean).strip()

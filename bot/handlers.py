@@ -773,6 +773,17 @@ async def _run_collect_topics_with_diagnostics(settings=None, db=None):
     return await asyncio.to_thread(collect_topics_with_diagnostics, settings, db)
 
 
+async def _safe_answer_callback(query, text: str | None = None, show_alert: bool = False) -> None:
+    try:
+        await query.answer(text=text, show_alert=show_alert)
+    except BadRequest as exc:
+        message = str(exc).lower()
+        if "query is too old" in message or "query id is invalid" in message:
+            logger.debug("Ignoring stale callback answer error: %s", exc)
+            return
+        raise
+
+
 async def _run_fetch_page_content(source_url: str):
     return await asyncio.to_thread(fetch_page_content, source_url)
 
@@ -1222,13 +1233,51 @@ async def _edit_callback_message(
         )
     except BadRequest as exc:
         if "message is not modified" in str(exc).lower():
-            try:
-                await query.answer("Уже показано.")
-            except Exception as answer_exc:
-                logger.warning("Failed to answer not-modified callback: %s", answer_exc)
+            await _safe_answer_callback(query, "Уже показано.")
             return
         logger.warning("Failed to edit callback message: %s", exc)
         raise
+
+
+async def _run_sources_status_background(context: ContextTypes.DEFAULT_TYPE, settings, db: DraftDatabase) -> None:
+    started = time.perf_counter()
+    context.application.bot_data["sources_check_running"] = True
+    try:
+        _items, reports = await _run_collect_topics_with_diagnostics(settings=settings, db=db)
+        await context.bot.send_message(chat_id=settings.admin_id, text=_render_sources_status(reports), reply_markup=_back_to_menu_keyboard())
+    except Exception:
+        logger.exception("Background source diagnostics failed")
+        await context.bot.send_message(chat_id=settings.admin_id, text="Не удалось проверить источники. Попробуй ещё раз.")
+    finally:
+        duration = time.perf_counter() - started
+        logger.info("Source diagnostics completed in %.2fs", duration)
+        context.application.bot_data["sources_check_running"] = False
+
+
+async def _run_source_test_background(context: ContextTypes.DEFAULT_TYPE, settings, db: DraftDatabase, row: dict[str, object]) -> None:
+    started = time.perf_counter()
+    sid = int(row["id"])
+    try:
+        if row["source_type"] == "rss":
+            feed_url, error = await asyncio.to_thread(discover_rss_feed_url, str(row["value"]))
+            if feed_url:
+                await context.bot.send_message(chat_id=settings.admin_id, text=f"RSS test #{sid}: OK: {feed_url}")
+            else:
+                await context.bot.send_message(chat_id=settings.admin_id, text=f"RSS test #{sid}: Ошибка: {error}")
+            return
+        _items, reports = await _run_collect_topics_with_diagnostics(settings=settings, db=db)
+        matched = [r for r in reports if str(r.url).endswith(str(row["value"])) or r.name == f"Telegram @{row['value']}"]
+        report = matched[0] if matched else None
+        await context.bot.send_message(
+            chat_id=settings.admin_id,
+            text=f"Telegram test #{sid}: {report.status if report else 'нет данных'}",
+        )
+    except Exception:
+        logger.exception("Background source test failed for source_id=%s", sid)
+        await context.bot.send_message(chat_id=settings.admin_id, text=f"Не удалось проверить источник #{sid}.")
+    finally:
+        duration = time.perf_counter() - started
+        logger.info("Source test completed for source_id=%s in %.2fs", sid, duration)
 
 
 def _build_media_preview_caption(
@@ -3058,10 +3107,10 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     user_id = query.from_user.id if query.from_user else None
     if not _is_admin(user_id, settings.admin_id):
-        await query.answer("Только администратор может модерировать.", show_alert=True)
+        await _safe_answer_callback(query, "Только администратор может модерировать.", show_alert=True)
         return
 
-    await query.answer()
+    await _safe_answer_callback(query)
     data = query.data or ""
     if data.startswith("menu_"):
         await _handle_menu_callback(update, context, data)
@@ -3825,8 +3874,12 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
     elif data == "menu_sources":
         await _edit_callback_message(query, "📡 Источники\nВыбери действие:", reply_markup=_sources_hub_keyboard())
     elif data == "menu_sources_status":
-        _items, reports = await _run_collect_topics_with_diagnostics(settings=settings, db=db)
-        await _edit_callback_message(query, _render_sources_status(reports), reply_markup=_back_to_menu_keyboard())
+        if context.application.bot_data.get("sources_check_running"):
+            await _edit_callback_message(query, "Проверка источников уже идёт. Дождись результата.", reply_markup=_back_to_menu_keyboard())
+            return
+        await _edit_callback_message(query, "Проверяю источники... Это может занять до минуты.", reply_markup=_back_to_menu_keyboard())
+        context.application.create_task(_run_sources_status_background(context=context, settings=settings, db=db))
+        return
     elif data == "menu_queue":
         await _edit_callback_message(
             query,
@@ -3983,21 +4036,16 @@ async def _handle_sources_callback(update: Update, context: ContextTypes.DEFAULT
         if not row:
             await _edit_callback_message(query, "Источник не найден.", reply_markup=_sources_hub_keyboard())
             return
-        if row["source_type"] == "rss":
-            await _edit_callback_message(query, "Проверяю RSS...", reply_markup=_sources_hub_keyboard())
-            try:
-                feed_url, error = await asyncio.to_thread(discover_rss_feed_url, str(row["value"]))
-                if feed_url:
-                    await context.bot.send_message(chat_id=settings.admin_id, text=f"OK: {feed_url}")
-                else:
-                    await context.bot.send_message(chat_id=settings.admin_id, text=f"Ошибка: {error}")
-            except Exception:
-                await context.bot.send_message(chat_id=settings.admin_id, text="Не удалось проверить RSS.")
+        if context.application.bot_data.get("sources_check_running"):
+            await _edit_callback_message(query, "Проверка источников уже идёт. Дождись результата.", reply_markup=_sources_hub_keyboard())
             return
-        _items, reports = await _run_collect_topics_with_diagnostics(settings=settings, db=db)
-        matched = [r for r in reports if str(r.url).endswith(str(row["value"])) or r.name == f"Telegram @{row['value']}"]
-        report = matched[0] if matched else None
-        await context.bot.send_message(chat_id=settings.admin_id, text=f"Telegram test: {report.status if report else 'нет данных'}")
+        await _edit_callback_message(
+            query,
+            "Проверяю RSS..." if row["source_type"] == "rss" else "Проверяю источник...",
+            reply_markup=_sources_hub_keyboard(),
+        )
+        context.application.create_task(_run_source_test_background(context=context, settings=settings, db=db, row=row))
+        return
     await _edit_callback_message(query, "Неизвестное действие источников.", reply_markup=_sources_hub_keyboard())
 
 
