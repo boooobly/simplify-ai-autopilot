@@ -165,6 +165,7 @@ SOURCE_GROUP_LABELS = {
     "github": "GitHub",
     "x": "X API",
     "custom": "Кастомные источники",
+    "telegram": "Telegram-каналы",
     "other": "Другое",
 }
 

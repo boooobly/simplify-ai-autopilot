@@ -41,6 +41,7 @@
 - Автосбор тем по AI через `/collect` из RSS, публичных страниц и опциональных API-источников (OpenAI, Anthropic, Google AI, Perplexity, Hugging Face, GitHub Trending AI)
 - Reddit community RSS отключены по умолчанию: Reddit часто блокирует серверное чтение страниц, из-за чего админский сценарий «тема → черновик» становится нестабильным. Старые сохранённые Reddit-темы не удаляются автоматически и могут оставаться видимыми до отклонения или отдельной очистки.
 - X можно подключить только через официальный X API: включи `ENABLE_X_SOURCES`, задай `X_API_BEARER_TOKEN`, вручную перечисли аккаунты в `X_ACCOUNTS` без `@` и при необходимости измени `X_MAX_POSTS_PER_ACCOUNT`. Бот не скрейпит HTML `x.com`, не ходит в X без явного включения и нормально работает без X-настроек. X API может тарифицироваться по usage-based модели на стороне X.
+- Telegram-каналы можно подключить как дополнительный источник тем через Telethon (это Telegram Client API, не Bot API): включи `ENABLE_TELEGRAM_CHANNEL_SOURCES`, задай `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION_STRING`, список каналов `TELEGRAM_SOURCE_CHANNELS` (например `ai_news,openai`) и лимиты lookback/posts. Если источник Telegram недоступен, `/collect` не падает и продолжает работу по остальным источникам.
 - `MAX_TOPIC_AGE_DAYS` управляет свежестью тем: старые RSS-материалы пропускаются, отсутствующие даты обрабатываются безопасно, а скоринг редакционно оптимизирован под `@simplify_ai` (полезные AI-инструменты, практичные новости, мемы и простые объяснения для новичков).
 - Topic candidates хранят русские поля для карточек (`title_ru`, `summary_ru`, `angle_ru`, `reason_ru`), чтобы админ сразу видел, о чем тема, почему она интересна и какой пост можно сделать
 - Для GitHub Trending карточки сохраняют имя репозитория как есть, но детерминированно очеловечивают распространённые английские описания в короткий русский заголовок и понятное поле `О чем` с языком и stars.
@@ -126,9 +127,15 @@ cp .env.example .env
 - `X_API_BEARER_TOKEN` — bearer token для X API. Если пустой, X-источник пропускается без падения бота.
 - `X_ACCOUNTS` — вручную заданный comma-separated список usernames без `@`; аккаунты в коде не захардкожены.
 - `X_MAX_POSTS_PER_ACCOUNT` — сколько последних постов брать на аккаунт (по умолчанию `5`, допустимо `1..20`); бот не пагинирует, не читает треды рекурсивно и не забирает медиа отдельно.
+- `ENABLE_TELEGRAM_CHANNEL_SOURCES` — включает опциональный сбор тем из публичных Telegram-каналов через Telethon Client API (по умолчанию `false`).
+- `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_SESSION_STRING` — обязательные креды клиентской сессии Telegram пользователя для чтения каналов.
+- `TELEGRAM_SOURCE_CHANNELS` — comma-separated usernames публичных каналов (можно с `@` или без), например `ai_news,openai`.
+- `TELEGRAM_SOURCE_LOOKBACK_HOURS` — окно свежести (по умолчанию `24`, диапазон `1..168`).
+- `TELEGRAM_SOURCE_MAX_POSTS_PER_CHANNEL` — лимит сообщений на канал (по умолчанию `20`, диапазон `1..100`).
 - `OPENAI_API_KEY` можно не задавать: бот запускается и работает без него (`/start`, `/draft`, модерация, отклонение, переписывание, публикация).
 - Команда `/generate` требует `OPENROUTER_API_KEY` или `OPENAI_API_KEY`; OpenRouter используется в приоритете.
 - `OPENROUTER_API_KEY` храни только в переменных Railway, не в репозитории.
+- `TELEGRAM_SESSION_STRING` храни только в переменных Railway, никогда не коммить в git.
 
 ## Команды
 

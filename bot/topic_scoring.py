@@ -31,6 +31,7 @@ _SOURCE_GROUP_BOOST = {
     "github": 8,
     "x": 10,
     "custom": 8,
+    "telegram": 12,
 }
 
 _UNRELIABLE_DATE_GROUPS = {"github", "tools", "community", "x"}
@@ -264,6 +265,12 @@ def score_topic(
         if _has_any(text, ["job", "hiring", "webinar", "conference", "event", "ваканси", "вебинар", "конференц"]):
             score -= 18
             reason_parts.append("штраф: вакансия/ивент")
+        if source_group == "telegram":
+            if _has_any(text, ["demo", "workflow", "use case", "кейс", "инструмент", "сервис", "гайд", "ссылка", "thread"]):
+                score += 6
+            if _has_any(text, ["подписывай", "join", "реклама", "promo", "розыгрыш", "airdrop", "casino", "ваканси", "webinar", "вебинар"]):
+                score -= 18
+                reason_parts.append("штраф: telegram promo/bait")
 
     parsed_dt = _parse_score_datetime(published_at)
     if parsed_dt:
