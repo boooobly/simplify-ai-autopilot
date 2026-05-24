@@ -51,7 +51,7 @@ from bot.queue_helpers import (
 )
 from bot.telegram_formatting import strip_quote_markers
 from bot.topic_scoring import hybrid_topic_score
-from bot.sources import SourceReport, collect_topics, collect_topics_with_diagnostics
+from bot.sources import SourceReport, collect_topics, collect_topics_with_diagnostics, discover_rss_feed_url
 from bot.topic_display import is_weak_topic_metadata, related_sources_summary, topic_angle_ru, topic_compact_preview_ru, topic_display_reason, topic_display_title, topic_original_title_line, topic_summary_ru
 from bot.writer import (
     EmptyAIResponseError,
@@ -128,6 +128,7 @@ def _rewrite_action_config(action: str) -> dict[str, str]:
 
 
 
+
 NAV_PLAN_DAY = "🗓 План"
 NAV_GENERATE_PLAN = "🧩 Черновики из плана"
 NAV_QUEUE = "📅 Очередь"
@@ -168,6 +169,19 @@ SOURCE_GROUP_LABELS = {
     "telegram": "Telegram-каналы",
     "other": "Другое",
 }
+
+def normalize_telegram_channel_input(raw: str) -> str:
+    value = (raw or "").strip()
+    value = value.replace("https://t.me/", "").replace("http://t.me/", "")
+    value = value.strip().strip("/").lstrip("@")
+    if "/" in value:
+        value = value.split("/", 1)[0]
+    return value
+
+
+def is_valid_rss_input_url(raw: str) -> bool:
+    return (raw or "").strip().startswith("http")
+
 
 
 @dataclass
@@ -731,8 +745,8 @@ async def _run_collect_topics():
     return await asyncio.to_thread(collect_topics)
 
 
-async def _run_collect_topics_with_diagnostics():
-    return await asyncio.to_thread(collect_topics_with_diagnostics)
+async def _run_collect_topics_with_diagnostics(settings=None, db=None):
+    return await asyncio.to_thread(collect_topics_with_diagnostics, settings, db)
 
 
 async def _run_fetch_page_content(source_url: str):
@@ -1597,7 +1611,8 @@ async def _handle_pending_media_attach(update: Update, context: ContextTypes.DEF
 def _admin_reply_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(NAV_PLAN_DAY), KeyboardButton(NAV_GENERATE_PLAN)],
+            [KeyboardButton(
+NAV_PLAN_DAY), KeyboardButton(NAV_GENERATE_PLAN)],
             [KeyboardButton(NAV_QUEUE), KeyboardButton(NAV_DRAFTS)],
             [KeyboardButton(NAV_TOPICS), KeyboardButton(NAV_SOURCES)],
             [KeyboardButton(NAV_USAGE), KeyboardButton(NAV_STYLE)],
@@ -1662,6 +1677,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """Allow /start only for admin user."""
 
     settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
     user_id = update.effective_user.id if update.effective_user else None
 
     if not _is_admin(user_id, settings.admin_id):
@@ -1678,6 +1694,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
     user_id = update.effective_user.id if update.effective_user else None
     if not _is_admin(user_id, settings.admin_id):
         if update.message:
@@ -2626,6 +2643,7 @@ async def collect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def sources_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
     user_id = update.effective_user.id if update.effective_user else None
     if not _is_admin(user_id, settings.admin_id):
         if update.message:
@@ -2633,7 +2651,7 @@ async def sources_status_command(update: Update, context: ContextTypes.DEFAULT_T
         return
     if update.message:
         await update.message.reply_text("Проверяю источники...")
-    _items, reports = await _run_collect_topics_with_diagnostics()
+    _items, reports = await _run_collect_topics_with_diagnostics(settings=settings, db=db)
     if update.message:
         await update.message.reply_text(_render_sources_status(reports), reply_markup=_admin_reply_keyboard())
 
@@ -2650,7 +2668,7 @@ async def collect_debug_command(update: Update, context: ContextTypes.DEFAULT_TY
     if update.message:
         progress_message = await update.message.reply_text("🔄 Собираю темы... Это может занять до пары минут.")
     debug_started = time.monotonic()
-    items, reports = await _run_collect_topics_with_diagnostics()
+    items, reports = await _run_collect_topics_with_diagnostics(settings=settings, db=db)
     source_seconds = time.monotonic() - debug_started
     stats, _all_items, inserted = await _collect_topics_with_stats(db, items=items, settings=settings)
     stats.source_seconds = source_seconds
@@ -2907,6 +2925,7 @@ async def usage_month_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def style_guide_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
     user_id = update.effective_user.id if update.effective_user else None
     if not _is_admin(user_id, settings.admin_id):
         return
@@ -2951,6 +2970,7 @@ def _extract_custom_emoji_lines(message) -> list[str]:
 
 async def emoji_ids_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
     user_id = update.effective_user.id if update.effective_user else None
     if not _is_admin(user_id, settings.admin_id):
         if update.message:
@@ -3777,7 +3797,7 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             keyboard = _topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or ""))
             await context.bot.send_message(chat_id=settings.admin_id, text=text, reply_markup=keyboard, link_preview_options=_disabled_link_preview_options())
     elif data == "menu_sources_status":
-        _items, reports = await _run_collect_topics_with_diagnostics()
+        _items, reports = await _run_collect_topics_with_diagnostics(settings=settings, db=db)
         await _edit_callback_message(query, _render_sources_status(reports), reply_markup=_back_to_menu_keyboard())
     elif data == "menu_queue":
         await _edit_callback_message(

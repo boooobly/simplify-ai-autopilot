@@ -81,7 +81,7 @@ def _source_report(name: str, url: str, status: str, item_count: int = 0, error:
     return SourceReport(name=name, url=url, source_group="telegram", status=status, item_count=item_count, error=error)
 
 
-async def fetch_telegram_channel_topics(settings: "Settings"):
+async def fetch_telegram_channel_topics(settings: "Settings", extra_channels: list[str] | None = None):
     if not getattr(settings, "enable_telegram_channel_sources", False):
         return [], [
             _source_report(
@@ -92,19 +92,24 @@ async def fetch_telegram_channel_topics(settings: "Settings"):
             )
         ]
 
-    channels = getattr(settings, "telegram_source_channels", []) or []
+    channels = list(getattr(settings, "telegram_source_channels", []) or [])
+    for ch in extra_channels or []:
+        if ch and ch not in channels:
+            channels.append(ch)
     api_id = getattr(settings, "telegram_api_id", None)
     api_hash = (getattr(settings, "telegram_api_hash", "") or "").strip()
     session_string = (getattr(settings, "telegram_session_string", "") or "").strip()
-    if not api_id or not api_hash or not session_string or not channels:
+    if not api_id or not api_hash or not session_string:
         return [], [
             _source_report(
                 name="Telegram channels",
                 url="https://t.me",
                 status="skipped",
-                error="Telegram channels skipped: missing TELEGRAM_API_ID/TELEGRAM_API_HASH/TELEGRAM_SESSION_STRING/TELEGRAM_SOURCE_CHANNELS. Пропуск: не хватает настроек.",
+                error="Telegram channels skipped: missing TELEGRAM_API_ID/TELEGRAM_API_HASH/TELEGRAM_SESSION_STRING. Пропуск: не хватает настроек.",
             )
         ]
+    if not channels:
+        return [], [_source_report(name="Telegram channels", url="https://t.me", status="skipped", error="Нет настроенных Telegram-каналов.")]
 
     lookback_hours = int(getattr(settings, "telegram_source_lookback_hours", 24) or 24)
     max_posts = int(getattr(settings, "telegram_source_max_posts_per_channel", 20) or 20)
