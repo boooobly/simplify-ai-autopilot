@@ -75,13 +75,18 @@ def _message_to_topic(message, channel_username: str, lookback_since: datetime):
     )
 
 
+def _source_report(name: str, url: str, status: str, item_count: int = 0, error: str = ""):
+    from bot.sources import SourceReport
+
+    return SourceReport(name=name, url=url, source_group="telegram", status=status, item_count=item_count, error=error)
+
+
 async def fetch_telegram_channel_topics(settings: "Settings"):
     if not getattr(settings, "enable_telegram_channel_sources", False):
         return [], [
-            __import__("bot.sources", fromlist=["SourceReport"]).__import__("bot.sources", fromlist=["SourceReport"]).SourceReport(
+            _source_report(
                 name="Telegram channels",
                 url="https://t.me",
-                source_group="telegram",
                 status="skipped",
                 error="Telegram channel sources disabled (ENABLE_TELEGRAM_CHANNEL_SOURCES=false).",
             )
@@ -93,10 +98,9 @@ async def fetch_telegram_channel_topics(settings: "Settings"):
     session_string = (getattr(settings, "telegram_session_string", "") or "").strip()
     if not api_id or not api_hash or not session_string or not channels:
         return [], [
-            __import__("bot.sources", fromlist=["SourceReport"]).SourceReport(
+            _source_report(
                 name="Telegram channels",
                 url="https://t.me",
-                source_group="telegram",
                 status="skipped",
                 error="Telegram channels skipped: missing TELEGRAM_API_ID/TELEGRAM_API_HASH/TELEGRAM_SESSION_STRING/TELEGRAM_SOURCE_CHANNELS. Пропуск: не хватает настроек.",
             )
@@ -127,9 +131,9 @@ async def fetch_telegram_channel_topics(settings: "Settings"):
                     if item is not None:
                         channel_topics.append(item)
                 topics.extend(channel_topics)
-                reports.append(__import__("bot.sources", fromlist=["SourceReport"]).SourceReport(name=source_name, url=f"https://t.me/{username}", source_group="telegram", status="ok" if channel_topics else "empty", item_count=len(channel_topics)))
+                reports.append(_source_report(name=source_name, url=f"https://t.me/{username}", status="ok" if channel_topics else "empty", item_count=len(channel_topics)))
             except Exception as exc:
-                reports.append(__import__("bot.sources", fromlist=["SourceReport"]).SourceReport(name=source_name, url=f"https://t.me/{clean_channel}", source_group="telegram", status="error", error=str(exc)[:160]))
+                reports.append(_source_report(name=source_name, url=f"https://t.me/{clean_channel}", status="error", error=str(exc)[:160]))
     finally:
         await client.disconnect()
 

@@ -49,3 +49,11 @@ def test_missing_config_returns_skipped():
     assert items == []
     assert reports[0].status == "skipped"
     assert "missing" in reports[0].error.lower()
+
+
+def test_disabled_config_returns_skipped_without_raise():
+    import asyncio
+    items, reports = asyncio.run(fetch_telegram_channel_topics(_settings(enable_telegram_channel_sources=False)))
+    assert items == []
+    assert len(reports) == 1
+    assert reports[0].status == "skipped"
