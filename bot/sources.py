@@ -72,6 +72,11 @@ X_AI_KEYWORDS = (
     "нейросет",
     "ии",
 )
+_DESCRIPTION_MAX_LEN = 1000
+_BOILERPLATE_PATTERNS = [
+    re.compile(r"^\s*(read more|continue reading)\b[:\s.-]*", re.IGNORECASE),
+    re.compile(r"^\s*(source|via)\s*:\s*", re.IGNORECASE),
+]
 
 
 def reddit_sources_enabled() -> bool:
@@ -237,6 +242,59 @@ def _with_scoring(topic: TopicItem) -> TopicItem:
     return topic
 
 
+def _normalize_description(raw: str | None, limit: int = _DESCRIPTION_MAX_LEN) -> str | None:
+    if not raw:
+        return None
+    clean = BeautifulSoup(raw, "html.parser").get_text(" ", strip=True)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    for pattern in _BOILERPLATE_PATTERNS:
+        clean = pattern.sub("", clean).strip()
+    if clean.endswith("..."):
+        clean = clean[:-3].rstrip()
+    if len(clean) < 20:
+        return None
+    return _shorten(clean, limit)
+
+
+def _find_text_any_ns(item: ET.Element, local_name: str) -> str:
+    direct = (item.findtext(local_name) or "").strip()
+    if direct:
+        return direct
+    suffix = f"}}{local_name}"
+    for child in list(item):
+        if child.tag == local_name or str(child.tag).endswith(suffix):
+            text = "".join(child.itertext()).strip()
+            if text:
+                return text
+    return ""
+
+
+def _extract_rss_description(item: ET.Element) -> str | None:
+    candidates = [
+        _find_text_any_ns(item, "description"),
+        _find_text_any_ns(item, "encoded"),
+        _find_text_any_ns(item, "summary"),
+        _find_text_any_ns(item, "content"),
+    ]
+    for candidate in candidates:
+        normalized = _normalize_description(candidate)
+        if normalized:
+            return normalized
+    return None
+
+
+def _extract_atom_description(entry: ET.Element) -> str | None:
+    candidates = [
+        entry.findtext("{http://www.w3.org/2005/Atom}summary") or entry.findtext("summary") or "",
+        entry.findtext("{http://www.w3.org/2005/Atom}content") or entry.findtext("content") or "",
+    ]
+    for candidate in candidates:
+        normalized = _normalize_description(candidate)
+        if normalized:
+            return normalized
+    return None
+
+
 def _parse_rss(xml_text: str, source_name: str, source_group: str, max_items: int = 8) -> list[TopicItem]:
     root = ET.fromstring(xml_text)
     topics: list[TopicItem] = []
@@ -247,8 +305,9 @@ def _parse_rss(xml_text: str, source_name: str, source_group: str, max_items: in
         title = (item.findtext("title") or "").strip()
         link = (item.findtext("link") or "").strip()
         pub_date_raw = (item.findtext("pubDate") or item.findtext("published") or "").strip()
+        description = _extract_rss_description(item)
         if title and link:
-            topics.append(_with_scoring(TopicItem(title=title, url=link, source=source_name, published_at=_parse_dt(pub_date_raw), source_group=source_group)))
+            topics.append(_with_scoring(TopicItem(title=title, url=link, source=source_name, published_at=_parse_dt(pub_date_raw), source_group=source_group, original_description=description)))
 
     if not items:
         for entry in entries[:max_items]:
@@ -258,8 +317,9 @@ def _parse_rss(xml_text: str, source_name: str, source_group: str, max_items: in
                 link_el = entry.find("link")
             link = (link_el.get("href") if link_el is not None and link_el.get("href") else (link_el.text if link_el is not None and link_el.text else "")).strip()
             published = (entry.findtext("{http://www.w3.org/2005/Atom}published") or entry.findtext("published") or entry.findtext("{http://www.w3.org/2005/Atom}updated") or entry.findtext("updated") or "")
+            description = _extract_atom_description(entry)
             if title and link:
-                topics.append(_with_scoring(TopicItem(title=title, url=link, source=source_name, published_at=_parse_dt(published), source_group=source_group)))
+                topics.append(_with_scoring(TopicItem(title=title, url=link, source=source_name, published_at=_parse_dt(published), source_group=source_group, original_description=description)))
     return topics
 
 
