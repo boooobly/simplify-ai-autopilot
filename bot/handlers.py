@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlparse, urlunparse
 from zoneinfo import ZoneInfo
 
 from telegram import KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, ReplyKeyboardMarkup, Update
@@ -51,7 +52,20 @@ from bot.queue_helpers import (
 )
 from bot.telegram_formatting import strip_quote_markers
 from bot.topic_scoring import hybrid_topic_score
-from bot.sources import SourceReport, collect_topics, collect_topics_with_diagnostics, discover_rss_feed_url
+from bot.sources import (
+    COMMUNITY_RSS,
+    OFFICIAL_AI_RSS,
+    RU_TECH_RSS,
+    TECH_MEDIA_RSS,
+    TOOLS_RSS,
+    SourceReport,
+    collect_topics,
+    collect_topics_with_diagnostics,
+    discover_rss_feed_url,
+    parse_custom_topic_feeds,
+    reddit_sources_enabled,
+    x_sources_enabled,
+)
 from bot.topic_display import is_weak_topic_metadata, related_sources_summary, topic_angle_ru, topic_compact_preview_ru, topic_display_reason, topic_display_title, topic_original_title_line, topic_summary_ru
 from bot.writer import (
     EmptyAIResponseError,
@@ -181,6 +195,72 @@ def normalize_telegram_channel_input(raw: str) -> str:
 
 def is_valid_rss_input_url(raw: str) -> bool:
     return (raw or "").strip().startswith("http")
+
+
+def normalize_source_url(url: str) -> str:
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    path = (parsed.path or "").rstrip("/") or ("/" if parsed.path == "/" else "")
+    return urlunparse((parsed.scheme.lower(), parsed.netloc.lower(), path, parsed.params, parsed.query, parsed.fragment))
+
+
+def built_in_rss_sources() -> list[dict]:
+    groups = [
+        ("official_ai", OFFICIAL_AI_RSS, True),
+        ("tech_media", TECH_MEDIA_RSS, True),
+        ("ru_tech", RU_TECH_RSS, True),
+        ("tools", TOOLS_RSS, True),
+        ("community", COMMUNITY_RSS, reddit_sources_enabled()),
+    ]
+    rows: list[dict] = []
+    for group, items, enabled in groups:
+        for name, url in items:
+            rows.append({"status": "enabled" if enabled else "skipped", "source_type": "rss", "group": group, "name": name, "value": url, "normalized_value": normalize_source_url(url), "location": "built-in"})
+    return rows
+
+
+def env_configured_sources(settings) -> list[dict]:
+    rows: list[dict] = []
+    for name, group, url in parse_custom_topic_feeds(os.getenv("CUSTOM_TOPIC_FEEDS")):
+        rows.append({"status": "enabled", "source_type": "rss", "group": group, "name": name, "value": url, "normalized_value": normalize_source_url(url), "location": "env"})
+    for channel in list(getattr(settings, "telegram_source_channels", []) or []):
+        username = normalize_telegram_channel_input(channel)
+        if username:
+            rows.append({"status": "enabled", "source_type": "telegram", "group": "telegram", "name": f"Telegram @{username}", "value": username, "normalized_value": username.lower(), "location": "env"})
+    if x_sources_enabled():
+        for account in os.getenv("X_ACCOUNTS", "").split(","):
+            username = account.strip().lstrip("@")
+            if username:
+                rows.append({"status": "enabled", "source_type": "x", "group": "x", "name": f"X @{username}", "value": username, "normalized_value": username.lower(), "location": "env"})
+    return rows
+
+
+def db_managed_sources(db: DraftDatabase) -> list[dict]:
+    rows: list[dict] = []
+    for row in db.list_managed_sources(include_disabled=True):
+        source_type = str(row["source_type"] or "").strip().lower()
+        value = str(row["value"] or "").strip()
+        rows.append({"status": "enabled" if bool(row["enabled"]) else "disabled", "source_type": source_type, "group": str(row["source_group"] or "custom"), "name": str(row["name"] or "-"), "value": value, "normalized_value": normalize_source_url(value) if source_type == "rss" else value.lower(), "location": "my sources"})
+    return rows
+
+
+def find_duplicate_source(source_type: str, value: str, settings, db: DraftDatabase) -> dict | None:
+    if source_type == "rss":
+        normalized = normalize_source_url(value)
+    elif source_type == "telegram":
+        normalized = normalize_telegram_channel_input(value).lower()
+    else:
+        normalized = (value or "").strip().lower()
+    if not normalized:
+        return None
+    for item in [*built_in_rss_sources(), *env_configured_sources(settings), *db_managed_sources(db)]:
+        if item["source_type"] != source_type:
+            continue
+        if item.get("normalized_value") == normalized:
+            return item
+    return None
 
 
 
@@ -500,7 +580,7 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"Emoji map: {len(settings.custom_emoji_map)}",
     ]
     if _detect_railway_with_local_db_path(settings.db_path):
-        lines.append("⚠️ Railway: локальный DB_PATH может потеряться без persistent volume.")
+        lines.append("⚠️ DB_PATH сейчас local data/drafts.db. Источники, добавленные через бота, могут пропасть после redeploy. Лучше подключить Railway Volume и поставить DB_PATH=/data/drafts.db.")
     if update.message:
         await update.message.reply_text("\n".join(lines), reply_markup=_admin_reply_keyboard())
 
@@ -723,6 +803,7 @@ def _sources_hub_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("📋 Список источников", callback_data="sources_list")],
+            [InlineKeyboardButton("📚 Все источники", callback_data="sources_inventory")],
             [InlineKeyboardButton("➕ Добавить RSS", callback_data="source_add_rss")],
             [InlineKeyboardButton("➕ Добавить Telegram-канал", callback_data="source_add_telegram")],
             [InlineKeyboardButton("🧪 Проверить источники", callback_data="menu_sources_status")],
@@ -2590,7 +2671,7 @@ def _render_sources_status(reports: list[SourceReport]) -> str:
     empty = sum(1 for r in reports if r.status == "empty")
     skipped = sum(1 for r in reports if r.status == "skipped")
     errors = sum(1 for r in reports if r.status == "error")
-    lines = ["📡 Статус источников", "", f"Всего источников: {total}", f"Работают: {ok}", f"Пустые: {empty}", f"Отключены/пропущены: {skipped}", f"Ошибки: {errors}", "", "По группам:"]
+    lines = ["📡 Статус источников", "Чтобы посмотреть полный список источников: 📡 Источники → 📚 Все источники", "", f"Всего источников: {total}", f"Работают: {ok}", f"Пустые: {empty}", f"Отключены/пропущены: {skipped}", f"Ошибки: {errors}", "", "По группам:"]
     for group, label in SOURCE_GROUP_LABELS.items():
         group_reports = [r for r in reports if (r.source_group or "other") == group]
         if not group_reports:
@@ -2685,6 +2766,36 @@ def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list, 
     else:
         lines.append("- пока нет")
     return "\n".join(lines)
+
+
+def _render_sources_inventory(settings, db: DraftDatabase) -> list[str]:
+    builtin = built_in_rss_sources()
+    env_rows = env_configured_sources(settings)
+    managed = db_managed_sources(db)
+    all_rows = [("Встроенные RSS", builtin), ("Env источники", env_rows), ("Мои источники (DB)", managed)]
+    summary = f"Всего источников: {len(builtin) + len(env_rows) + len(managed)}. Встроенные: {len(builtin)}. Env: {len(env_rows)}. Мои: {len(managed)}."
+    messages = [summary]
+    if _detect_railway_with_local_db_path(settings.db_path):
+        messages.append("⚠️ DB_PATH сейчас local data/drafts.db. Источники, добавленные через бота, могут пропасть после redeploy. Лучше подключить Railway Volume и поставить DB_PATH=/data/drafts.db.")
+    icon_map = {"enabled": "✅", "skipped": "⏭️", "disabled": "⛔"}
+    current = ""
+    for title, rows in all_rows:
+        block_lines = [f"\n{title}:"]
+        if not rows:
+            block_lines.append("— пусто")
+        else:
+            for item in rows:
+                icon = icon_map.get(item.get("status", "enabled"), "•")
+                block_lines.append(f"{icon} [{item.get('source_type')}/{item.get('group')}] {item.get('name')} — {item.get('value')}")
+        block = "\n".join(block_lines)
+        if len(current) + len(block) + 1 > 3500:
+            messages.append(current.strip())
+            current = block
+        else:
+            current += ("\n" + block) if current else block
+    if current.strip():
+        messages.append(current.strip())
+    return messages
 
 
 async def collect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3997,6 +4108,12 @@ async def _handle_sources_callback(update: Update, context: ContextTypes.DEFAULT
                 text += f"\nerr: {str(row['last_error'])[:120]}"
             await context.bot.send_message(chat_id=settings.admin_id, text=text, reply_markup=_source_card_keyboard(int(row["id"]), enabled))
         return
+    if data == "sources_inventory":
+        parts = _render_sources_inventory(settings, db)
+        await _edit_callback_message(query, parts[0], reply_markup=_sources_hub_keyboard())
+        for part in parts[1:]:
+            await context.bot.send_message(chat_id=settings.admin_id, text=part, reply_markup=_sources_hub_keyboard())
+        return
     if data == "source_add_rss":
         context.user_data["source_add_flow"] = {"type": "rss", "step": "name"}
         await _edit_callback_message(query, "Введите название RSS-источника.", reply_markup=_sources_hub_keyboard())
@@ -4084,6 +4201,12 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             if not feed_url:
                 await update.message.reply_text("Не нашёл RSS/Atom-ленту. Пришли прямую RSS-ссылку или другой источник.")
                 return
+            duplicate = find_duplicate_source("rss", feed_url, settings, db)
+            if duplicate:
+                await update.message.reply_text(
+                    f"Такой источник уже есть: {duplicate.get('name')} ({duplicate.get('location')})."
+                )
+                return
             context.user_data["source_add_flow"] = {
                 "type": "rss",
                 "step": "confirm",
@@ -4097,6 +4220,10 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             username = normalize_telegram_channel_input(message_text)
             if not username:
                 await update.message.reply_text("Не удалось распознать канал. Пришли @username или t.me/username.")
+                return
+            duplicate = find_duplicate_source("telegram", username, settings, db)
+            if duplicate:
+                await update.message.reply_text(f"Такой Telegram-источник уже есть: {duplicate.get('name')} ({duplicate.get('location')}).")
                 return
             db.create_managed_source("telegram", f"Telegram @{username}", username, "telegram")
             context.user_data.pop("source_add_flow", None)
