@@ -35,9 +35,16 @@ class Settings:
     topic_ai_translate_limit: int = 8
     enable_reddit_sources: bool = False
     enable_x_sources: bool = False
+    enable_telegram_channel_sources: bool = False
     x_api_bearer_token: str = ""
     x_accounts: list[str] = field(default_factory=list)
     x_max_posts_per_account: int = 5
+    telegram_api_id: int | None = None
+    telegram_api_hash: str = ""
+    telegram_session_string: str = ""
+    telegram_source_channels: list[str] = field(default_factory=list)
+    telegram_source_lookback_hours: int = 24
+    telegram_source_max_posts_per_channel: int = 20
     openrouter_input_cost_per_1m: float = 0.0
     openrouter_output_cost_per_1m: float = 0.0
     openai_input_cost_per_1m: float = 0.0
@@ -200,6 +207,10 @@ def startup_diagnostics(settings: Settings) -> list[str]:
         f"enable_x_sources: {settings.enable_x_sources}",
         f"x_accounts count: {len(settings.x_accounts)}",
         f"x_max_posts_per_account: {settings.x_max_posts_per_account}",
+        f"enable_telegram_channel_sources: {settings.enable_telegram_channel_sources}",
+        f"telegram_source_channels count: {len(settings.telegram_source_channels)}",
+        f"telegram_source_lookback_hours: {settings.telegram_source_lookback_hours}",
+        f"telegram_source_max_posts_per_channel: {settings.telegram_source_max_posts_per_channel}",
         f"DB_PATH: {settings.db_path}",
         f"CHANNEL_ID type: {channel_type}",
         f"custom emoji aliases count: {len(settings.custom_emoji_aliases)}",
@@ -245,6 +256,14 @@ def load_settings() -> Settings:
     x_api_bearer_token = os.getenv("X_API_BEARER_TOKEN", "").strip()
     x_accounts = _parse_csv_env("X_ACCOUNTS")
     x_max_posts_per_account = _parse_int_range_env("X_MAX_POSTS_PER_ACCOUNT", 5, 1, 20)
+    enable_telegram_channel_sources = _parse_bool_env("ENABLE_TELEGRAM_CHANNEL_SOURCES", False)
+    telegram_api_id_raw = os.getenv("TELEGRAM_API_ID", "").strip()
+    telegram_api_id = int(telegram_api_id_raw) if telegram_api_id_raw.isdigit() else None
+    telegram_api_hash = os.getenv("TELEGRAM_API_HASH", "").strip()
+    telegram_session_string = os.getenv("TELEGRAM_SESSION_STRING", "").strip()
+    telegram_source_channels = _parse_csv_env("TELEGRAM_SOURCE_CHANNELS")
+    telegram_source_lookback_hours = _parse_int_range_env("TELEGRAM_SOURCE_LOOKBACK_HOURS", 24, 1, 168)
+    telegram_source_max_posts_per_channel = _parse_int_range_env("TELEGRAM_SOURCE_MAX_POSTS_PER_CHANNEL", 20, 1, 100)
 
     post_max_chars = _parse_int_env("POST_MAX_CHARS", 1400)
     post_soft_chars = _parse_int_env("POST_SOFT_CHARS", 1100)
@@ -296,6 +315,13 @@ def load_settings() -> Settings:
         x_api_bearer_token=x_api_bearer_token,
         x_accounts=x_accounts,
         x_max_posts_per_account=x_max_posts_per_account,
+        enable_telegram_channel_sources=enable_telegram_channel_sources,
+        telegram_api_id=telegram_api_id,
+        telegram_api_hash=telegram_api_hash,
+        telegram_session_string=telegram_session_string,
+        telegram_source_channels=telegram_source_channels,
+        telegram_source_lookback_hours=telegram_source_lookback_hours,
+        telegram_source_max_posts_per_channel=telegram_source_max_posts_per_channel,
         openrouter_input_cost_per_1m=openrouter_input_cost_per_1m,
         openrouter_output_cost_per_1m=openrouter_output_cost_per_1m,
         openai_input_cost_per_1m=openai_input_cost_per_1m,

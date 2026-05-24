@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from bs4 import BeautifulSoup
 from bot.config import _parse_bool_env, _parse_csv_env, _parse_int_range_env
 from bot.topic_scoring import humanize_topic_reason_ru, normalize_topic_title, score_topic
 from bot.topic_display import is_weak_topic_metadata
+from bot.telegram_sources import fetch_telegram_channel_topics
 
 
 @dataclass
@@ -534,6 +536,18 @@ def _fetch_github_trending_ai() -> list[TopicItem]:
     return topics[:8]
 
 
+
+
+def _run_async(coro):
+    try:
+        return asyncio.run(coro)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
 def collect_topics() -> list[TopicItem]:
     items, _reports = collect_topics_with_diagnostics()
     return items
@@ -583,6 +597,14 @@ def collect_topics_with_diagnostics() -> tuple[list[TopicItem], list[SourceRepor
             x_items, x_reports = fetch_x_topics(x_token, x_accounts, x_max_posts)
             collected.extend(x_items)
             reports.extend(x_reports)
+    try:
+        from bot.config import load_settings
+
+        telegram_items, telegram_reports = _run_async(fetch_telegram_channel_topics(load_settings()))
+        collected.extend(telegram_items)
+        reports.extend(telegram_reports)
+    except Exception as exc:
+        reports.append(SourceReport(name="Telegram channels", url="https://t.me", source_group="telegram", status="error", error=str(exc)[:160]))
     try:
         github_items = _fetch_github_trending_ai()
         collected.extend(github_items)
