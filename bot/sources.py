@@ -19,6 +19,7 @@ from bot.config import _parse_bool_env, _parse_csv_env, _parse_int_range_env
 from bot.topic_scoring import humanize_topic_reason_ru, normalize_topic_title, score_topic
 from bot.topic_display import is_weak_topic_metadata
 from bot.telegram_sources import fetch_telegram_channel_topics
+from bot.source_normalization import normalize_source_url, normalize_telegram_channel_input
 
 
 @dataclass
@@ -55,6 +56,7 @@ TECH_MEDIA_RSS = [("VentureBeat AI", "https://venturebeat.com/ai/feed/"), ("The 
 RU_TECH_RSS = [("Habr AI", "https://habr.com/ru/rss/hubs/ai/all/"), ("Habr ML", "https://habr.com/ru/rss/hub/machine_learning/"), ("Habr Dev", "https://habr.com/ru/rss/all/all/?fl=ru"), ("vc.ru technology", "https://vc.ru/rss/all"), ("Tproger", "https://tproger.ru/feed"), ("3DNews", "https://3dnews.ru/news/rss"), ("iXBT", "https://www.ixbt.com/export/news.rss")]
 TOOLS_RSS = [("Product Hunt", "https://www.producthunt.com/feed")]
 COMMUNITY_RSS = [("Reddit r/artificial", "https://www.reddit.com/r/artificial/.rss"), ("Reddit r/LocalLLaMA", "https://www.reddit.com/r/LocalLLaMA/.rss"), ("Reddit r/OpenAI", "https://www.reddit.com/r/OpenAI/.rss"), ("Reddit r/ChatGPT", "https://www.reddit.com/r/ChatGPT/.rss"), ("Reddit r/ClaudeAI", "https://www.reddit.com/r/ClaudeAI/.rss"), ("Reddit r/SideProject", "https://www.reddit.com/r/SideProject/.rss"), ("Reddit r/InternetIsBeautiful", "https://www.reddit.com/r/InternetIsBeautiful/.rss")]
+VC_RU_AI_SOURCE = ("vc.ru AI", "https://vc.ru/ai", "ru_tech")
 
 
 X_API_BASE_URL = "https://api.x.com"
@@ -633,16 +635,35 @@ def collect_topics_with_diagnostics(settings=None, db=None) -> tuple[list[TopicI
         reports.append(SourceReport(name="Reddit community RSS", url="https://www.reddit.com/*.rss", source_group="community", status="skipped", error="Reddit sources disabled by config (ENABLE_REDDIT_SOURCES=false)"))
     custom = parse_custom_topic_feeds(os.getenv("CUSTOM_TOPIC_FEEDS"))
 
+    def _skip_if_needed(source_type: str, source_name: str, source_group: str, source_url: str):
+        if db is None:
+            return False, ""
+        key = normalize_source_url(source_url) if source_type in {"rss", "html"} else source_url.strip().lower()
+        return db.should_skip_source(source_type, key)
+
+    def _record(source_type: str, source_name: str, source_group: str, source_url: str, status: str, error: str = ""):
+        if db is None:
+            return
+        key = normalize_source_url(source_url) if source_type in {"rss", "html"} else source_url.strip().lower()
+        db.record_source_health(source_type, key, source_name, source_group, status, error)
+
     for feeds, group, limit in grouped:
         for source_name, rss_url in feeds:
+            should_skip, reason = _skip_if_needed("rss", source_name, group, rss_url)
+            if should_skip:
+                reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="skipped", error=f"Источник временно на паузе: {reason}"))
+                _record("rss", source_name, group, rss_url, "skipped", reason)
+                continue
             try:
                 response = requests.get(rss_url, timeout=12, headers=headers)
                 response.raise_for_status()
                 parsed = _parse_rss(response.text, source_name, group, max_items=limit)
                 collected.extend(parsed)
                 reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="ok" if parsed else "empty", item_count=len(parsed)))
+                _record("rss", source_name, group, rss_url, "ok" if parsed else "empty")
             except Exception as exc:
                 reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="error", error=str(exc)[:160]))
+                _record("rss", source_name, group, rss_url, "error", str(exc))
 
     managed_rows = db.list_managed_sources(include_disabled=False) if db is not None else []
     for row in managed_rows:
@@ -651,6 +672,11 @@ def collect_topics_with_diagnostics(settings=None, db=None) -> tuple[list[TopicI
         source_name = str(row["name"])
         group = str(row["source_group"] or "custom")
         rss_url = str(row["value"])
+        should_skip, reason = _skip_if_needed("rss", source_name, group, rss_url)
+        if should_skip:
+            reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="skipped", error=f"Источник временно на паузе: {reason}"))
+            _record("rss", source_name, group, rss_url, "skipped", reason)
+            continue
         try:
             response = requests.get(rss_url, timeout=12, headers=headers)
             response.raise_for_status()
@@ -665,6 +691,11 @@ def collect_topics_with_diagnostics(settings=None, db=None) -> tuple[list[TopicI
                 db.update_managed_source_status(int(row["id"]), "error", str(exc)[:160])
 
     for source_name, group, rss_url in custom:
+        should_skip, reason = _skip_if_needed("rss", source_name, group, rss_url)
+        if should_skip:
+            reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="skipped", error=f"Источник временно на паузе: {reason}"))
+            _record("rss", source_name, group, rss_url, "skipped", reason)
+            continue
         try:
             response = requests.get(rss_url, timeout=12, headers=headers)
             response.raise_for_status()
@@ -673,6 +704,17 @@ def collect_topics_with_diagnostics(settings=None, db=None) -> tuple[list[TopicI
             reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="ok" if parsed else "empty", item_count=len(parsed)))
         except Exception as exc:
             reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="error", error=str(exc)[:160]))
+            _record("rss", source_name, group, rss_url, "error", str(exc))
+    vc_name, vc_url, vc_group = VC_RU_AI_SOURCE
+    should_skip, reason = _skip_if_needed("html", vc_name, vc_group, vc_url)
+    if should_skip:
+        reports.append(SourceReport(name=vc_name, url=vc_url, source_group=vc_group, status="skipped", error=f"Источник временно на паузе: {reason}"))
+        _record("html", vc_name, vc_group, vc_url, "skipped", reason)
+    else:
+        vc_items, vc_report = fetch_vc_ru_ai_topics()
+        collected.extend(vc_items)
+        reports.append(vc_report)
+        _record("html", vc_name, vc_group, vc_url, vc_report.status, vc_report.error)
     if x_sources_enabled():
         x_token, x_accounts, x_max_posts = x_source_config()
         if not x_token or not x_accounts:
@@ -707,3 +749,39 @@ def collect_topics_with_diagnostics(settings=None, db=None) -> tuple[list[TopicI
     except Exception as exc:
         reports.append(SourceReport(name="GitHub Trending AI", url="https://github.com/trending", source_group="github", status="error", error=str(exc)[:160]))
     return collected, reports
+
+
+def fetch_vc_ru_ai_topics(max_items: int = 20) -> tuple[list[TopicItem], SourceReport]:
+    name, url, group = VC_RU_AI_SOURCE
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; simplify-ai-autopilot/1.0; +https://t.me/simplify_ai)"}
+    try:
+        resp = requests.get(url, timeout=12, headers=headers)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        topics: list[TopicItem] = []
+        seen: set[str] = set()
+        for link in soup.select("a[href]"):
+            href = (link.get("href") or "").strip()
+            full = urljoin(url, href)
+            p = urlparse(full)
+            if p.netloc != "vc.ru":
+                continue
+            if not re.match(r"^/[\w-]+/\d+", p.path):
+                continue
+            if any(x in full for x in ["/u/", "/tag/", "#comments", "/subscribe", "/services"]):
+                continue
+            title = " ".join(link.get_text(" ", strip=True).split())
+            if len(title) < 12:
+                continue
+            if full in seen:
+                continue
+            seen.add(full)
+            snippet_tag = link.find_parent().find_next("p") if link.find_parent() else None
+            snippet = " ".join(snippet_tag.get_text(" ", strip=True).split()) if snippet_tag else title
+            topics.append(_with_scoring(TopicItem(title=title, url=full, source=name, source_group=group, original_description=snippet)))
+            if len(topics) >= max_items:
+                break
+        status = "ok" if topics else "empty"
+        return topics, SourceReport(name=name, url=url, source_group=group, status=status, item_count=len(topics))
+    except Exception as exc:
+        return [], SourceReport(name=name, url=url, source_group=group, status="error", error=str(exc)[:160])

@@ -790,6 +790,7 @@ def _sources_hub_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("➕ Добавить RSS", callback_data="source_add_rss")],
             [InlineKeyboardButton("➕ Добавить Telegram-канал", callback_data="source_add_telegram")],
             [InlineKeyboardButton("🧪 Проверить источники", callback_data="menu_sources_status")],
+            [InlineKeyboardButton("🩺 Здоровье источников", callback_data="sources_health")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")],
         ]
     )
@@ -1307,7 +1308,7 @@ async def _run_sources_status_background(context: ContextTypes.DEFAULT_TYPE, set
     started = time.perf_counter()
     try:
         _items, reports = await _run_collect_topics_with_diagnostics(settings=settings, db=db)
-        await context.bot.send_message(chat_id=settings.admin_id, text=_render_sources_status(reports), reply_markup=_back_to_menu_keyboard())
+        await context.bot.send_message(chat_id=settings.admin_id, text=_render_sources_status(reports, db), reply_markup=_back_to_menu_keyboard())
     except Exception:
         logger.exception("Background source diagnostics failed")
         await context.bot.send_message(chat_id=settings.admin_id, text="Не удалось проверить источники. Попробуй ещё раз.")
@@ -2650,7 +2651,7 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
     return stats, items, inserted
 
 
-def _render_sources_status(reports: list[SourceReport]) -> str:
+def _render_sources_status(reports: list[SourceReport], db: DraftDatabase | None = None) -> str:
     total = len(reports)
     ok = sum(1 for r in reports if r.status == "ok")
     empty = sum(1 for r in reports if r.status == "empty")
@@ -2687,7 +2688,42 @@ def _render_sources_status(reports: list[SourceReport]) -> str:
                 lines.append(f"- {rep.name}: 0 тем")
         if len(problems) > 12:
             lines.append("Показаны первые 12 проблем.")
+    if db is not None:
+        health_rows = db.list_source_health(limit=500)
+        if not health_rows:
+            lines.append("\nИстория здоровья пока пустая. Запусти /collect или проверку источников.")
+        else:
+            h_ok = sum(1 for r in health_rows if r["last_status"] == "ok")
+            h_empty = sum(1 for r in health_rows if r["last_status"] == "empty")
+            h_err = sum(1 for r in health_rows if r["last_status"] == "error")
+            h_pause = sum(1 for r in health_rows if r["disabled_until"])
+            lines.append(f"\nЗдоровье источников: ✅ {h_ok}, ⚠️ {h_empty}, ❌ {h_err}, ⏸ {h_pause}")
+            lines.append("Подробно: 📡 Источники → 🩺 Здоровье источников")
     return "\n".join(lines)[:3900]
+
+
+def _render_sources_health(db: DraftDatabase) -> str:
+    rows = db.list_source_health(limit=200)
+    if not rows:
+        return "История здоровья пока пустая. Запусти /collect или проверку источников."
+    parts = ["🩺 Здоровье источников"]
+    groups = [("✅ Работают", lambda r: r["last_status"] == "ok"), ("⚠️ Пустые", lambda r: r["last_status"] == "empty"), ("❌ Ошибки", lambda r: r["last_status"] == "error"), ("⏸ На паузе", lambda r: bool(r["disabled_until"]))]
+    for label, fn in groups:
+        selected = [r for r in rows if fn(r)]
+        if not selected:
+            continue
+        parts.append(f"\n{label}:")
+        for r in selected[:20]:
+            line = f"[{r['source_type']}/{r['source_group']}] {r['source_name']}"
+            if r["last_status"] == "error":
+                line += f" - {str(r['last_error'] or 'ошибка')[:80]}, ошибок подряд: {int(r['consecutive_errors'] or 0)}"
+            if r["disabled_until"]:
+                line += f" - пауза до {str(r['disabled_until'])[11:16]}"
+            parts.append(line)
+    text = "\n".join(parts)
+    for secret in ["BOT_TOKEN", "TELEGRAM_SESSION_STRING", "TELEGRAM_API_HASH", "OPENROUTER_API_KEY", "OPENAI_API_KEY"]:
+        text = text.replace(secret, "***")
+    return text[:3900]
 
 
 def _render_collect_topic_line(topic) -> list[str]:
@@ -2821,7 +2857,7 @@ async def sources_status_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("Проверяю источники...")
     _items, reports = await _run_collect_topics_with_diagnostics(settings=settings, db=db)
     if update.message:
-        await update.message.reply_text(_render_sources_status(reports), reply_markup=_admin_reply_keyboard())
+        await update.message.reply_text(_render_sources_status(reports, db), reply_markup=_admin_reply_keyboard())
 
 
 async def collect_debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3969,6 +4005,8 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await context.bot.send_message(chat_id=settings.admin_id, text=text, reply_markup=keyboard, link_preview_options=_disabled_link_preview_options())
     elif data == "menu_sources":
         await _edit_callback_message(query, "📡 Источники\nВыбери действие:", reply_markup=_sources_hub_keyboard())
+    elif data == "sources_health":
+        await _edit_callback_message(query, _render_sources_health(db), reply_markup=_back_to_menu_keyboard())
     elif data == "menu_sources_status":
         if context.application.bot_data.get("sources_check_running"):
             await _edit_callback_message(query, "Проверка источников уже идёт. Дождись результата.", reply_markup=_back_to_menu_keyboard())
