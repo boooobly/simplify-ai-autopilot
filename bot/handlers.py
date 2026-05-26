@@ -29,6 +29,7 @@ from bot.cleanup_handlers import (
 from bot.drafts import create_test_draft, rewrite_test_draft
 from bot.media_utils import decode_media_items, encode_media_group, media_count
 from bot.publisher import publish_to_channel
+from bot.source_normalization import normalize_source_url, normalize_telegram_channel_input
 from bot.queue_helpers import (
     ACTIONABLE_DRAFT_STATUSES,
     _empty_slots_for_day,
@@ -184,26 +185,8 @@ SOURCE_GROUP_LABELS = {
     "other": "Другое",
 }
 
-def normalize_telegram_channel_input(raw: str) -> str:
-    value = (raw or "").strip()
-    value = value.replace("https://t.me/", "").replace("http://t.me/", "")
-    value = value.strip().strip("/").lstrip("@")
-    if "/" in value:
-        value = value.split("/", 1)[0]
-    return value
-
-
 def is_valid_rss_input_url(raw: str) -> bool:
     return (raw or "").strip().startswith("http")
-
-
-def normalize_source_url(url: str) -> str:
-    raw = (url or "").strip()
-    if not raw:
-        return ""
-    parsed = urlparse(raw)
-    path = (parsed.path or "").rstrip("/") or ("/" if parsed.path == "/" else "")
-    return urlunparse((parsed.scheme.lower(), parsed.netloc.lower(), path, parsed.params, parsed.query, parsed.fragment))
 
 
 def built_in_rss_sources() -> list[dict]:
@@ -1322,7 +1305,6 @@ async def _edit_callback_message(
 
 async def _run_sources_status_background(context: ContextTypes.DEFAULT_TYPE, settings, db: DraftDatabase) -> None:
     started = time.perf_counter()
-    context.application.bot_data["sources_check_running"] = True
     try:
         _items, reports = await _run_collect_topics_with_diagnostics(settings=settings, db=db)
         await context.bot.send_message(chat_id=settings.admin_id, text=_render_sources_status(reports), reply_markup=_back_to_menu_keyboard())
@@ -1359,6 +1341,9 @@ async def _run_source_test_background(context: ContextTypes.DEFAULT_TYPE, settin
     finally:
         duration = time.perf_counter() - started
         logger.info("Source test completed for source_id=%s in %.2fs", sid, duration)
+        running = context.application.bot_data.get("source_test_running")
+        if isinstance(running, set):
+            running.discard(sid)
 
 
 def _build_media_preview_caption(
@@ -3988,6 +3973,7 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if context.application.bot_data.get("sources_check_running"):
             await _edit_callback_message(query, "Проверка источников уже идёт. Дождись результата.", reply_markup=_back_to_menu_keyboard())
             return
+        context.application.bot_data["sources_check_running"] = True
         await _edit_callback_message(query, "Проверяю источники... Это может занять до минуты.", reply_markup=_back_to_menu_keyboard())
         context.application.create_task(_run_sources_status_background(context=context, settings=settings, db=db))
         return
@@ -4125,7 +4111,11 @@ async def _handle_sources_callback(update: Update, context: ContextTypes.DEFAULT
     if data == "source_confirm_rss":
         flow = context.user_data.get("source_add_flow") or {}
         if flow.get("type") == "rss" and flow.get("step") == "confirm" and flow.get("feed_url"):
-            db.create_managed_source("rss", str(flow.get("name") or "RSS"), str(flow["feed_url"]), "custom")
+            try:
+                db.create_managed_source("rss", str(flow.get("name") or "RSS"), str(flow["feed_url"]), "custom")
+            except ValueError as exc:
+                await _edit_callback_message(query, f"Не удалось добавить источник: {exc}", reply_markup=_sources_hub_keyboard())
+                return
             context.user_data.pop("source_add_flow", None)
             await _edit_callback_message(query, "RSS-источник добавлен.", reply_markup=_sources_hub_keyboard())
             return
@@ -4156,6 +4146,11 @@ async def _handle_sources_callback(update: Update, context: ContextTypes.DEFAULT
         if context.application.bot_data.get("sources_check_running"):
             await _edit_callback_message(query, "Проверка источников уже идёт. Дождись результата.", reply_markup=_sources_hub_keyboard())
             return
+        running = context.application.bot_data.setdefault("source_test_running", set())
+        if sid in running:
+            await _edit_callback_message(query, "Проверка этого источника уже идёт. Дождись результата.", reply_markup=_sources_hub_keyboard())
+            return
+        running.add(sid)
         await _edit_callback_message(
             query,
             "Проверяю RSS..." if row["source_type"] == "rss" else "Проверяю источник...",
@@ -4225,7 +4220,11 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             if duplicate:
                 await update.message.reply_text(f"Такой Telegram-источник уже есть: {duplicate.get('name')} ({duplicate.get('location')}).")
                 return
-            db.create_managed_source("telegram", f"Telegram @{username}", username, "telegram")
+            try:
+                db.create_managed_source("telegram", f"Telegram @{username}", username, "telegram")
+            except ValueError as exc:
+                await update.message.reply_text(f"Не удалось добавить источник: {exc}")
+                return
             context.user_data.pop("source_add_flow", None)
             await update.message.reply_text("Telegram-источник добавлен.", reply_markup=_sources_hub_keyboard())
             return
