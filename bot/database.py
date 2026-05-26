@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from bot.source_normalization import normalize_source_url, normalize_telegram_channel_input
@@ -135,6 +136,25 @@ class DraftDatabase:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS source_health (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_type TEXT NOT NULL,
+                    source_key TEXT NOT NULL,
+                    source_name TEXT NOT NULL,
+                    source_group TEXT NOT NULL DEFAULT 'other',
+                    last_status TEXT,
+                    last_error TEXT,
+                    consecutive_errors INTEGER NOT NULL DEFAULT 0,
+                    last_success_at TIMESTAMP,
+                    last_checked_at TIMESTAMP,
+                    disabled_until TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_source_health_type_key ON source_health(source_type, source_key)")
             self._ensure_indexes(conn)
             conn.commit()
 
@@ -252,6 +272,106 @@ class DraftDatabase:
                 "SELECT * FROM managed_sources WHERE source_type = ? AND value = ?",
                 (source_type, normalized_value),
             ).fetchone()
+
+    @staticmethod
+    def _utc_now_str() -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    def get_source_health(self, source_type: str, source_key: str) -> sqlite3.Row | None:
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT * FROM source_health WHERE source_type = ? AND source_key = ?",
+                ((source_type or "").strip().lower(), (source_key or "").strip().lower()),
+            ).fetchone()
+
+    def should_skip_source(self, source_type: str, source_key: str, now: str | None = None) -> tuple[bool, str]:
+        row = self.get_source_health(source_type, source_key)
+        if not row or not row["disabled_until"]:
+            return False, ""
+        now_dt = datetime.strptime(now or self._utc_now_str(), "%Y-%m-%d %H:%M:%S")
+        until_dt = datetime.strptime(str(row["disabled_until"]), "%Y-%m-%d %H:%M:%S")
+        if until_dt > now_dt:
+            return True, f"Источник на паузе до {until_dt.strftime('%H:%M')}"
+        return False, ""
+
+    def record_source_health(
+        self,
+        source_type: str,
+        source_key: str,
+        source_name: str,
+        source_group: str,
+        status: str,
+        error: str = "",
+    ) -> None:
+        source_type_n = (source_type or "").strip().lower()
+        source_key_n = (source_key or "").strip().lower()
+        now = self._utc_now_str()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT consecutive_errors FROM source_health WHERE source_type = ? AND source_key = ?",
+                (source_type_n, source_key_n),
+            ).fetchone()
+            current_errors = int(row["consecutive_errors"]) if row else 0
+            consecutive_errors = current_errors
+            disabled_until = None
+            last_success_at = None
+            if status == "ok":
+                consecutive_errors = 0
+                last_success_at = now
+            elif status == "empty":
+                consecutive_errors = 0
+            elif status == "error":
+                consecutive_errors = current_errors + 1
+                cool_hours = 24 if consecutive_errors >= 6 else 6 if consecutive_errors >= 3 else 0
+                if cool_hours:
+                    disabled_until = (datetime.now(timezone.utc) + timedelta(hours=cool_hours)).strftime("%Y-%m-%d %H:%M:%S")
+            elif status == "skipped":
+                if row:
+                    current = conn.execute(
+                        "SELECT disabled_until FROM source_health WHERE source_type = ? AND source_key = ?",
+                        (source_type_n, source_key_n),
+                    ).fetchone()
+                    disabled_until = current["disabled_until"] if current else None
+
+            conn.execute(
+                """
+                INSERT INTO source_health (
+                    source_type, source_key, source_name, source_group, last_status, last_error,
+                    consecutive_errors, last_success_at, last_checked_at, disabled_until, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_type, source_key) DO UPDATE SET
+                    source_name=excluded.source_name,
+                    source_group=excluded.source_group,
+                    last_status=excluded.last_status,
+                    last_error=excluded.last_error,
+                    consecutive_errors=excluded.consecutive_errors,
+                    last_success_at=COALESCE(excluded.last_success_at, source_health.last_success_at),
+                    last_checked_at=excluded.last_checked_at,
+                    disabled_until=excluded.disabled_until,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    source_type_n,
+                    source_key_n,
+                    (source_name or "").strip()[:120],
+                    (source_group or "other").strip()[:40],
+                    status,
+                    (error or "").strip()[:300],
+                    consecutive_errors,
+                    last_success_at,
+                    now,
+                    disabled_until,
+                    now,
+                ),
+            )
+            conn.commit()
+
+    def list_source_health(self, limit: int = 100) -> list[sqlite3.Row]:
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT * FROM source_health ORDER BY updated_at DESC LIMIT ?",
+                (max(1, min(500, int(limit))),),
+            ).fetchall()
 
 
     @staticmethod
