@@ -1,5 +1,7 @@
+from pathlib import Path
+
 from bot.database import DraftDatabase
-from bot.sources import collect_topics_with_diagnostics, fetch_vc_ru_ai_topics
+from bot.sources import fetch_vc_ru_ai_topics
 from bot.source_candidates import CANDIDATE_SOURCES
 from bot.handlers import _render_sources_health
 
@@ -50,3 +52,52 @@ def test_vc_parser_empty_html(monkeypatch):
     items, rep = fetch_vc_ru_ai_topics()
     assert items == []
     assert rep.status in {'empty', 'ok'}
+
+
+def test_vc_parser_extracts_topics_from_fixture(monkeypatch):
+    html = Path("tests/fixtures/vc_ru_ai_sample.html").read_text(encoding="utf-8")
+
+    class Resp:
+        text = html
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr("bot.sources.requests.get", lambda *a, **k: Resp())
+    items, rep = fetch_vc_ru_ai_topics(max_items=20)
+    assert rep.status == "ok"
+    assert len(items) >= 2
+    urls = {item.url for item in items}
+    assert "https://vc.ru/ai/201001" in urls
+    assert "https://vc.ru/ai/201002" in urls
+    for item in items:
+        assert item.title
+        assert item.url.startswith("https://vc.ru/")
+        assert item.original_description
+        assert item.source == "vc.ru AI"
+        assert item.source_group == "ru_tech"
+        assert item.category
+        assert isinstance(item.score, int)
+
+
+def test_vc_parser_skips_noise_and_deduplicates(monkeypatch):
+    html = Path("tests/fixtures/vc_ru_ai_sample.html").read_text(encoding="utf-8")
+
+    class Resp:
+        text = html
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr("bot.sources.requests.get", lambda *a, **k: Resp())
+    items, _rep = fetch_vc_ru_ai_topics(max_items=20)
+    urls = [item.url for item in items]
+    assert urls.count("https://vc.ru/ai/201002") == 1
+    assert "https://vc.ru/ai" not in urls
+    assert "https://vc.ru/tag/startups" not in urls
+    assert "https://vc.ru/tag/ai" not in urls
+    assert "https://vc.ru/u/777" not in urls
+    assert "https://vc.ru/u/999" not in urls
+    assert "https://vc.ru/ai/201001#comments" not in urls
+    assert "https://vc.ru/auth/login" not in urls
+    assert "https://vc.ru/images/logo.png" not in urls
