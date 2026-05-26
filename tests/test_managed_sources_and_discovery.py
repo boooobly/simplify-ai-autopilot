@@ -29,6 +29,23 @@ def test_managed_sources_crud(tmp_path):
 def test_telegram_normalize():
     assert normalize_telegram_channel_input("@channel") == "channel"
     assert normalize_telegram_channel_input("https://t.me/channel") == "channel"
+    assert normalize_telegram_channel_input("t.me/channel") == "channel"
+    assert normalize_telegram_channel_input("https://telegram.me/channel") == "channel"
+    assert normalize_telegram_channel_input("https://t.me/s/channel") == "channel"
+    assert normalize_telegram_channel_input("https://t.me/channel/123") == "channel"
+    assert normalize_telegram_channel_input("https://t.me/+secret") == ""
+    assert normalize_telegram_channel_input("https://t.me/joinchat/secret") == ""
+    assert normalize_telegram_channel_input("https://t.me/c/123/4") == ""
+
+
+def test_managed_sources_db_normalization_duplicate_telegram_and_rss(tmp_path):
+    db = DraftDatabase(str(tmp_path / "db.sqlite"))
+    sid1 = db.create_managed_source("telegram", "OpenAI", "@OpenAI", "telegram")
+    sid2 = db.create_managed_source("telegram", "OpenAI2", "openai", "telegram")
+    assert sid1 == sid2
+    rid1 = db.create_managed_source("rss", "Feed", "https://example.com/feed/", "custom")
+    rid2 = db.create_managed_source("rss", "Feed2", "https://example.com/feed", "custom")
+    assert rid1 == rid2
 
 
 def test_rss_validation():

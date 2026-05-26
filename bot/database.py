@@ -6,6 +6,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from bot.source_normalization import normalize_source_url, normalize_telegram_channel_input
 from bot.topic_scoring import canonical_topic_key, is_similar_topic_key
 
 
@@ -183,15 +184,21 @@ class DraftDatabase:
 
 
     def _normalize_managed_source_value(self, source_type: str, value: str) -> str:
+        source_type = (source_type or "").strip().lower()
         clean = (value or "").strip()
         if source_type == "telegram":
-            clean = clean.lstrip("@").strip()
-            if clean.startswith("https://t.me/"):
-                clean = clean.split("https://t.me/", 1)[1].strip("/")
+            return normalize_telegram_channel_input(clean).lower()
+        if source_type == "rss":
+            return normalize_source_url(clean)
         return clean
 
     def create_managed_source(self, source_type: str, name: str, value: str, source_group: str) -> int:
+        source_type = (source_type or "").strip().lower()
+        if source_type not in {"rss", "telegram"}:
+            raise ValueError("Поддерживаются только rss и telegram источники.")
         normalized_value = self._normalize_managed_source_value(source_type, value)
+        if not normalized_value:
+            raise ValueError("Пустое значение источника.")
         with self._connect() as conn:
             existing = conn.execute(
                 "SELECT id FROM managed_sources WHERE source_type = ? AND value = ?",
@@ -238,6 +245,7 @@ class DraftDatabase:
             conn.commit()
 
     def find_managed_source(self, source_type: str, value: str) -> sqlite3.Row | None:
+        source_type = (source_type or "").strip().lower()
         normalized_value = self._normalize_managed_source_value(source_type, value)
         with self._connect() as conn:
             return conn.execute(

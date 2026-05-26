@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 
 from telegram import BotCommand
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
@@ -53,9 +54,32 @@ from bot.publisher import run_scheduled_publishing
 
 
 def setup_logging() -> None:
+    token = (os.getenv("BOT_TOKEN") or "").strip()
+    secrets = [
+        token,
+        (os.getenv("TELEGRAM_SESSION_STRING") or "").strip(),
+        (os.getenv("TELEGRAM_API_HASH") or "").strip(),
+        (os.getenv("OPENROUTER_API_KEY") or "").strip(),
+        (os.getenv("OPENAI_API_KEY") or "").strip(),
+    ]
+
+    class _RedactSecretsFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            message = record.getMessage()
+            for secret in secrets:
+                if secret:
+                    message = message.replace(secret, "[REDACTED]")
+            message = re.sub(r"/bot[\w:-]{10,}", "/bot[REDACTED]", message)
+            record.msg = message
+            record.args = ()
+            return True
+
     logging.basicConfig(
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
     )
+    for name in ("httpx", "httpcore", "telegram", "telegram.ext"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+    logging.getLogger().addFilter(_RedactSecretsFilter())
 
 
 
