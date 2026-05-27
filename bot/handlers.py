@@ -66,6 +66,7 @@ from bot.sources import (
     parse_custom_topic_feeds,
     reddit_sources_enabled,
     x_sources_enabled,
+    get_builtin_source_override,
 )
 from bot.topic_display import is_weak_topic_metadata, related_sources_summary, topic_angle_ru, topic_compact_preview_ru, topic_display_reason, topic_display_title, topic_original_title_line, topic_summary_ru
 from bot.writer import (
@@ -200,7 +201,13 @@ def built_in_rss_sources() -> list[dict]:
     rows: list[dict] = []
     for group, items, enabled in groups:
         for name, url in items:
-            rows.append({"status": "enabled" if enabled else "skipped", "source_type": "rss", "group": group, "name": name, "value": url, "normalized_value": normalize_source_url(url), "location": "built-in"})
+            override = get_builtin_source_override("rss", url)
+            status = "enabled" if enabled else "skipped"
+            reason = ""
+            if override and override.get("action") == "disable":
+                status = "disabled"
+                reason = override.get("reason", "")
+            rows.append({"status": status, "reason": reason, "source_type": "rss", "group": group, "name": name, "value": url, "normalized_value": normalize_source_url(url), "location": "built-in"})
     return rows
 
 
@@ -2835,7 +2842,9 @@ def _render_sources_inventory(settings, db: DraftDatabase) -> list[str]:
         else:
             for item in rows:
                 icon = icon_map.get(item.get("status", "enabled"), "•")
-                block_lines.append(f"{icon} [{item.get('source_type')}/{item.get('group')}] {item.get('name')} — {item.get('value')}")
+                reason = str(item.get("reason") or "").strip()
+                suffix = f" ({reason})" if reason else ""
+                block_lines.append(f"{icon} [{item.get('source_type')}/{item.get('group')}] {item.get('name')} — {item.get('value')}{suffix}")
         block = "\n".join(block_lines)
         if len(current) + len(block) + 1 > 3500:
             messages.append(current.strip())

@@ -57,6 +57,10 @@ RU_TECH_RSS = [("Habr AI", "https://habr.com/ru/rss/hubs/ai/all/"), ("Habr ML", 
 TOOLS_RSS = [("Product Hunt", "https://www.producthunt.com/feed")]
 COMMUNITY_RSS = [("Reddit r/artificial", "https://www.reddit.com/r/artificial/.rss"), ("Reddit r/LocalLLaMA", "https://www.reddit.com/r/LocalLLaMA/.rss"), ("Reddit r/OpenAI", "https://www.reddit.com/r/OpenAI/.rss"), ("Reddit r/ChatGPT", "https://www.reddit.com/r/ChatGPT/.rss"), ("Reddit r/ClaudeAI", "https://www.reddit.com/r/ClaudeAI/.rss"), ("Reddit r/SideProject", "https://www.reddit.com/r/SideProject/.rss"), ("Reddit r/InternetIsBeautiful", "https://www.reddit.com/r/InternetIsBeautiful/.rss")]
 VC_RU_AI_SOURCE = ("vc.ru AI", "https://vc.ru/ai", "ru_tech")
+BUILTIN_SOURCE_OVERRIDES: dict[str, dict[str, str]] = {
+    # key format: f"{source_type}:{normalize_source_url(url)}"
+    # action=disable -> never fetch in /collect, but keep visible in inventory.
+}
 
 
 X_API_BASE_URL = "https://api.x.com"
@@ -100,6 +104,12 @@ def x_source_config() -> tuple[str, list[str], int]:
         _parse_csv_env("X_ACCOUNTS"),
         _parse_int_range_env("X_MAX_POSTS_PER_ACCOUNT", 5, 1, 20),
     )
+
+
+def get_builtin_source_override(source_type: str, source_url: str) -> dict[str, str] | None:
+    key = f"{source_type}:{normalize_source_url(source_url)}"
+    override = BUILTIN_SOURCE_OVERRIDES.get(key)
+    return dict(override) if override else None
 
 
 def _has_ai_signal(text: str) -> bool:
@@ -649,6 +659,12 @@ def collect_topics_with_diagnostics(settings=None, db=None) -> tuple[list[TopicI
 
     for feeds, group, limit in grouped:
         for source_name, rss_url in feeds:
+            override = get_builtin_source_override("rss", rss_url)
+            if override and override.get("action") == "disable":
+                reason = override.get("reason", "Отключён как проблемный встроенный источник.")
+                reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="skipped", error=f"Источник отключён: {reason}"))
+                _record("rss", source_name, group, rss_url, "skipped", reason)
+                continue
             should_skip, reason = _skip_if_needed("rss", source_name, group, rss_url)
             if should_skip:
                 reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="skipped", error=f"Источник временно на паузе: {reason}"))
@@ -706,15 +722,21 @@ def collect_topics_with_diagnostics(settings=None, db=None) -> tuple[list[TopicI
             reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="error", error=str(exc)[:160]))
             _record("rss", source_name, group, rss_url, "error", str(exc))
     vc_name, vc_url, vc_group = VC_RU_AI_SOURCE
-    should_skip, reason = _skip_if_needed("html", vc_name, vc_group, vc_url)
-    if should_skip:
-        reports.append(SourceReport(name=vc_name, url=vc_url, source_group=vc_group, status="skipped", error=f"Источник временно на паузе: {reason}"))
+    vc_override = get_builtin_source_override("html", vc_url)
+    if vc_override and vc_override.get("action") == "disable":
+        reason = vc_override.get("reason", "Отключён как проблемный встроенный источник.")
+        reports.append(SourceReport(name=vc_name, url=vc_url, source_group=vc_group, status="skipped", error=f"Источник отключён: {reason}"))
         _record("html", vc_name, vc_group, vc_url, "skipped", reason)
     else:
-        vc_items, vc_report = fetch_vc_ru_ai_topics()
-        collected.extend(vc_items)
-        reports.append(vc_report)
-        _record("html", vc_name, vc_group, vc_url, vc_report.status, vc_report.error)
+        should_skip, reason = _skip_if_needed("html", vc_name, vc_group, vc_url)
+        if should_skip:
+            reports.append(SourceReport(name=vc_name, url=vc_url, source_group=vc_group, status="skipped", error=f"Источник временно на паузе: {reason}"))
+            _record("html", vc_name, vc_group, vc_url, "skipped", reason)
+        else:
+            vc_items, vc_report = fetch_vc_ru_ai_topics()
+            collected.extend(vc_items)
+            reports.append(vc_report)
+            _record("html", vc_name, vc_group, vc_url, vc_report.status, vc_report.error)
     if x_sources_enabled():
         x_token, x_accounts, x_max_posts = x_source_config()
         if not x_token or not x_accounts:
