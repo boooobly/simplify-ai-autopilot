@@ -419,6 +419,16 @@ def _failed_drafts_keyboard(drafts: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def _lane_label_ru(lane: str | None) -> str:
+    mapping = {"breaking_news":"Важная новость","tool":"AI-сервис","creator":"Креаторский инструмент","short_video":"Идея для видео","meme":"AI-юмор","guide":"Гайд/промпт","business":"Бизнес/корпоративное","dev":"Для разработчиков","research":"Исследование","low_value":"Слабая тема"}
+    return mapping.get((lane or "").strip().lower(), "Тема")
+
+
+def _format_label_ru(fmt: str | None) -> str:
+    mapping = {"post":"пост","short_video":"короткое видео","meme":"мем","tool_review":"обзор сервиса","guide":"гайд","news":"новость"}
+    return mapping.get((fmt or "").strip().lower(), "пост")
+
+
 def _topic_card_text(topic: dict) -> str:
     score = int(topic.get("score") or 0)
     lines = [
@@ -439,10 +449,18 @@ def _topic_card_text(topic: dict) -> str:
     related_line = related_sources_summary(topic)
     if related_line:
         lines.extend(["", related_line])
+    lane = str(topic.get("editorial_lane") or "")
+    content_format = str(topic.get("content_format") or "post")
+    score = int(topic.get("score") or 0)
+    lane_reason = str(topic.get("editorial_reason") or topic_display_reason(topic))
     lines.extend(
         [
             f"Источник: {topic['source']} / {_source_group_label(topic.get('source_group'))}",
+            f"Score: {score}",
+            f"Lane: 📌 {_lane_label_ru(lane)}",
+            f"Format: {'🎬' if content_format == 'short_video' else '🔥' if content_format in {'tool_review','meme'} else '🧠'} {_format_label_ru(content_format)}",
             f"Почему: {topic_display_reason(topic)}",
+            f"💡 Почему взять: {lane_reason}",
             f"URL: {topic['url']}",
         ]
     )
@@ -463,7 +481,8 @@ def _topics_hub_keyboard() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("🔥 Горячие", callback_data="topics_hot:0"), InlineKeyboardButton("🆕 Новые", callback_data="topics_new:0")],
             [InlineKeyboardButton("🛠 Инструменты", callback_data="topics_tools:0"), InlineKeyboardButton("📰 Новости", callback_data="topics_news:0")],
-            [InlineKeyboardButton("😄 Живые", callback_data="topics_fun:0")],
+            [InlineKeyboardButton("😄 Живые", callback_data="topics_fun:0"), InlineKeyboardButton("🎬 Идеи для видео", callback_data="topics_video:0")],
+            [InlineKeyboardButton("🧩 Гайды", callback_data="topics_guides:0"), InlineKeyboardButton("⭐ Лучшее", callback_data="topics_best:0")],
             [InlineKeyboardButton("🔄 Собрать темы", callback_data="menu_collect")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")],
         ]
@@ -487,6 +506,12 @@ def _topics_for_kind(db: DraftDatabase, kind: str, limit: int = 10) -> list[dict
         return db.list_topic_candidates_filtered(limit=limit, status="new", categories=["tool", "creator", "guide", "dev", "mobile"])
     if kind == "news":
         return db.list_topic_candidates_filtered(limit=limit, status="new", categories=["news", "model", "agent", "research", "business", "privacy"])
+    if kind == "video":
+        return db.list_topic_candidates_by_editorial(limit=limit, lanes=["short_video", "creator", "tool", "meme"], formats=["short_video", "tool_review", "meme"], min_score=62)
+    if kind == "guides":
+        return db.list_topic_candidates_by_editorial(limit=limit, lanes=["guide"], categories=["guide"])
+    if kind == "best":
+        return db.get_balanced_topic_shortlist(limit=limit, hours=48, min_score=60)
     if kind == "fun":
         topics_by_category = db.list_topic_candidates_filtered(limit=20, status="new", categories=["drama", "meme"])
         topics_by_group = db.list_topic_candidates_filtered(limit=20, status="new", source_groups=["community", "github", "x", "custom"])
@@ -510,6 +535,9 @@ def _render_topics_hub_text(db: DraftDatabase) -> str:
             f"Инструменты: {_topic_count(db, 'tools')}",
             f"Новости: {_topic_count(db, 'news')}",
             f"Мемное/живое: {_topic_count(db, 'fun')}",
+            f"Видео: {_topic_count(db, 'video')}",
+            f"Гайды: {_topic_count(db, 'guides')}",
+            f"Лучшее: {_topic_count(db, 'best')}",
         ]
     )
 
@@ -3011,6 +3039,28 @@ async def topics_fun_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await _topics_fun_command(update, context)
 
 
+async def topics_video_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _topics_filtered_editorial_command(update, context, lanes=["short_video", "creator", "tool", "meme"], formats=["short_video", "tool_review", "meme"], min_score=62, command_name="topics_video")
+
+
+async def topics_guides_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _topics_filtered_editorial_command(update, context, lanes=["guide"], categories=["guide"], command_name="topics_guides")
+
+
+async def topics_best_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    if not _is_admin(update.effective_user.id if update.effective_user else None, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+    topics = db.get_balanced_topic_shortlist(limit=_parse_topic_limit(context, default=12), hours=48, min_score=60)
+    if update.message:
+        await update.message.reply_text("⭐ Лучшие темы на сегодня")
+    for topic in topics:
+        await context.bot.send_message(chat_id=settings.admin_id, text=_topic_card_text(topic), reply_markup=_topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")), link_preview_options=_disabled_link_preview_options())
+
+
 async def _topics_fun_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = context.bot_data["settings"]
     db: DraftDatabase = context.bot_data["db"]
@@ -3045,6 +3095,22 @@ async def _topics_fun_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if update.message:
         next_limit = min(30, max(limit + 10, 20))
         await update.message.reply_text(f"Показал {len(topics)} тем. Можно открыть больше: /topics_fun {next_limit}")
+
+
+async def _topics_filtered_editorial_command(update: Update, context: ContextTypes.DEFAULT_TYPE, lanes=None, formats=None, categories=None, min_score: int = 0, command_name: str = "topics") -> None:
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    if not _is_admin(update.effective_user.id if update.effective_user else None, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+    topics = db.list_topic_candidates_by_editorial(limit=_parse_topic_limit(context, default=10), lanes=lanes, formats=formats, categories=categories, min_score=min_score)
+    if not topics:
+        if update.message:
+            await update.message.reply_text("По фильтру пока нет тем. Запусти /collect")
+        return
+    for topic in topics:
+        await context.bot.send_message(chat_id=settings.admin_id, text=_topic_card_text(topic), reply_markup=_topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")), link_preview_options=_disabled_link_preview_options())
 
 
 async def _topics_filtered_command(update: Update, context: ContextTypes.DEFAULT_TYPE, categories=None, source_groups=None, command_name: str = "topics") -> None:

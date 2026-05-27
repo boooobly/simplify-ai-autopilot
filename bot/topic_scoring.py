@@ -298,6 +298,65 @@ def score_topic(
 
 
 
+
+def editorial_lane_for_topic(
+    title: str,
+    source: str,
+    url: str,
+    source_group: str,
+    description: str | None,
+    category: str | None,
+    score: int,
+) -> tuple[str, str]:
+    text = f"{title} {source} {url} {description or ''}".lower()
+    category = (category or "other").strip().lower()
+    source_group = (source_group or "other").strip().lower()
+
+    if _has_any(text, ["meme", "юмор", "мем", "shitpost", "weird", "strange", "viral"]):
+        return "meme", "вирусный или необычный формат, хорошо зайдет как развлекательный пост"
+    if _has_any(text, ["shorts", "reels", "tiktok", "demo", "before/after", "до/после", "кейс"]) and score >= 58:
+        return "short_video", "можно быстро показать в коротком ролике"
+    if category == "guide" or _has_any(text, ["guide", "tutorial", "prompt", "workflow", "гайд", "инструкция"]):
+        return "guide", "практический формат: можно дать понятные шаги"
+    if _has_any(text, ["image", "video", "audio", "voice", "avatar", "design", "music", "creator"]):
+        return "creator", "инструмент для креаторов, легко показать результат"
+    if category in {"tool", "mobile"} or _has_any(text, ["tool", "service", "app", "extension", "plugin", "сервис", "инструмент"]):
+        return "tool", "полезный сервис для новичков"
+    if source_group == "github":
+        if _has_any(text, ["api", "sdk", "library", "framework", "benchmark", "cli"]) and not _has_any(text, _GITHUB_PRACTICAL_KEYWORDS):
+            return "dev", "в основном для разработчиков, узкая прикладная ценность"
+        return "tool", "можно разобрать как полезный open-source инструмент"
+    if category in {"business"} or _has_any(text, _CORPORATE_KEYWORDS):
+        if _has_any(text, _USER_IMPACT_KEYWORDS + ["price", "pricing", "free", "chatgpt", "gemini", "claude"]):
+            return "breaking_news", "новость влияет на повседневное использование AI-сервисов"
+        return "business", "похоже на корпоративную новость, низкий приоритет"
+    if category in {"research", "model"} or _has_any(text, _RESEARCH_KEYWORDS + ["paper", "benchmark"]):
+        return "research", "исследовательская тема, нужна адаптация под массовую аудиторию"
+    if _has_any(text, ["launch", "release", "model", "chatgpt", "openai", "claude", "gemini", "llama"]) and score >= 70:
+        return "breaking_news", "важное обновление AI-продукта с пользовательским эффектом"
+    if category in {"agent", "dev"}:
+        return "dev", "скорее техническая тема для разработчиков"
+    if score < 55:
+        return "low_value", "слабый сигнал: не видно явной пользы для @simplify_ai"
+    return "short_video", "можно подать как короткий практический разбор"
+
+
+def content_format_for_lane(lane: str, score: int) -> str:
+    lane = (lane or "").strip().lower()
+    if lane in {"tool", "creator"}:
+        return "tool_review"
+    if lane == "short_video":
+        return "short_video"
+    if lane == "meme":
+        return "meme"
+    if lane == "guide":
+        return "guide"
+    if lane == "breaking_news":
+        return "news"
+    if lane in {"business", "dev", "research", "low_value"}:
+        return "post"
+    return "post"
+
 def hybrid_topic_score(deterministic_score: int, ai_score: int | None) -> int:
     """Blend deterministic and AI topic value scores conservatively.
 
