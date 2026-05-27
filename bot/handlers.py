@@ -17,6 +17,7 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from bot.config import _detect_railway_with_local_db_path
+from bot import source_handlers
 from bot.database import DraftDatabase
 from bot.cleanup_handlers import (
     CLEANUP_PREVIEW_COUNTS_KEY,
@@ -187,71 +188,23 @@ SOURCE_GROUP_LABELS = {
 }
 
 def is_valid_rss_input_url(raw: str) -> bool:
-    return (raw or "").strip().startswith("http")
+    return source_handlers.is_valid_rss_input_url(raw)
 
 
 def built_in_rss_sources() -> list[dict]:
-    groups = [
-        ("official_ai", OFFICIAL_AI_RSS, True),
-        ("tech_media", TECH_MEDIA_RSS, True),
-        ("ru_tech", RU_TECH_RSS, True),
-        ("tools", TOOLS_RSS, True),
-        ("community", COMMUNITY_RSS, reddit_sources_enabled()),
-    ]
-    rows: list[dict] = []
-    for group, items, enabled in groups:
-        for name, url in items:
-            override = get_builtin_source_override("rss", url)
-            status = "enabled" if enabled else "skipped"
-            reason = ""
-            if override and override.get("action") == "disable":
-                status = "disabled"
-                reason = override.get("reason", "")
-            rows.append({"status": status, "reason": reason, "source_type": "rss", "group": group, "name": name, "value": url, "normalized_value": normalize_source_url(url), "location": "built-in"})
-    return rows
+    return source_handlers.built_in_rss_sources()
 
 
 def env_configured_sources(settings) -> list[dict]:
-    rows: list[dict] = []
-    for name, group, url in parse_custom_topic_feeds(os.getenv("CUSTOM_TOPIC_FEEDS")):
-        rows.append({"status": "enabled", "source_type": "rss", "group": group, "name": name, "value": url, "normalized_value": normalize_source_url(url), "location": "env"})
-    for channel in list(getattr(settings, "telegram_source_channels", []) or []):
-        username = normalize_telegram_channel_input(channel)
-        if username:
-            rows.append({"status": "enabled", "source_type": "telegram", "group": "telegram", "name": f"Telegram @{username}", "value": username, "normalized_value": username.lower(), "location": "env"})
-    if x_sources_enabled():
-        for account in os.getenv("X_ACCOUNTS", "").split(","):
-            username = account.strip().lstrip("@")
-            if username:
-                rows.append({"status": "enabled", "source_type": "x", "group": "x", "name": f"X @{username}", "value": username, "normalized_value": username.lower(), "location": "env"})
-    return rows
+    return source_handlers.env_configured_sources(settings)
 
 
 def db_managed_sources(db: DraftDatabase) -> list[dict]:
-    rows: list[dict] = []
-    for row in db.list_managed_sources(include_disabled=True):
-        source_type = str(row["source_type"] or "").strip().lower()
-        value = str(row["value"] or "").strip()
-        rows.append({"status": "enabled" if bool(row["enabled"]) else "disabled", "source_type": source_type, "group": str(row["source_group"] or "custom"), "name": str(row["name"] or "-"), "value": value, "normalized_value": normalize_source_url(value) if source_type == "rss" else value.lower(), "location": "my sources"})
-    return rows
+    return source_handlers.db_managed_sources(db)
 
 
 def find_duplicate_source(source_type: str, value: str, settings, db: DraftDatabase) -> dict | None:
-    if source_type == "rss":
-        normalized = normalize_source_url(value)
-    elif source_type == "telegram":
-        normalized = normalize_telegram_channel_input(value).lower()
-    else:
-        normalized = (value or "").strip().lower()
-    if not normalized:
-        return None
-    for item in [*built_in_rss_sources(), *env_configured_sources(settings), *db_managed_sources(db)]:
-        if item["source_type"] != source_type:
-            continue
-        if item.get("normalized_value") == normalized:
-            return item
-    return None
-
+    return source_handlers.find_duplicate_source(source_type, value, settings, db)
 
 
 @dataclass
@@ -818,28 +771,11 @@ def _back_to_menu_keyboard() -> InlineKeyboardMarkup:
 
 
 def _sources_hub_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("📋 Список источников", callback_data="sources_list")],
-            [InlineKeyboardButton("📚 Все источники", callback_data="sources_inventory")],
-            [InlineKeyboardButton("➕ Добавить RSS", callback_data="source_add_rss")],
-            [InlineKeyboardButton("➕ Добавить Telegram-канал", callback_data="source_add_telegram")],
-            [InlineKeyboardButton("🧪 Проверить источники", callback_data="menu_sources_status")],
-            [InlineKeyboardButton("🩺 Здоровье источников", callback_data="sources_health")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="menu_back")],
-        ]
-    )
+    return source_handlers.sources_hub_keyboard()
 
 
 def _source_card_keyboard(source_id: int, enabled: bool) -> InlineKeyboardMarkup:
-    toggle = "⛔ Disable" if enabled else "✅ Enable"
-    return InlineKeyboardMarkup(
-        [[
-            InlineKeyboardButton(toggle, callback_data=f"source_toggle:{source_id}"),
-            InlineKeyboardButton("🧪 Test", callback_data=f"source_test:{source_id}"),
-            InlineKeyboardButton("🗑 Delete", callback_data=f"source_delete:{source_id}"),
-        ]]
-    )
+    return source_handlers.source_card_keyboard(source_id, enabled)
 
 
 def _settings_text(settings) -> str:
@@ -1340,46 +1276,11 @@ async def _edit_callback_message(
 
 
 async def _run_sources_status_background(context: ContextTypes.DEFAULT_TYPE, settings, db: DraftDatabase) -> None:
-    started = time.perf_counter()
-    try:
-        _items, reports = await _run_collect_topics_with_diagnostics(settings=settings, db=db)
-        await context.bot.send_message(chat_id=settings.admin_id, text=_render_sources_status(reports, db), reply_markup=_back_to_menu_keyboard())
-    except Exception:
-        logger.exception("Background source diagnostics failed")
-        await context.bot.send_message(chat_id=settings.admin_id, text="Не удалось проверить источники. Попробуй ещё раз.")
-    finally:
-        duration = time.perf_counter() - started
-        logger.info("Source diagnostics completed in %.2fs", duration)
-        context.application.bot_data["sources_check_running"] = False
+    await source_handlers.run_sources_status_background(context, settings, db, _run_collect_topics_with_diagnostics, _render_sources_status, _back_to_menu_keyboard, logger)
 
 
 async def _run_source_test_background(context: ContextTypes.DEFAULT_TYPE, settings, db: DraftDatabase, row: dict[str, object]) -> None:
-    started = time.perf_counter()
-    sid = int(row["id"])
-    try:
-        if row["source_type"] == "rss":
-            feed_url, error = await asyncio.to_thread(discover_rss_feed_url, str(row["value"]))
-            if feed_url:
-                await context.bot.send_message(chat_id=settings.admin_id, text=f"RSS test #{sid}: OK: {feed_url}")
-            else:
-                await context.bot.send_message(chat_id=settings.admin_id, text=f"RSS test #{sid}: Ошибка: {error}")
-            return
-        _items, reports = await _run_collect_topics_with_diagnostics(settings=settings, db=db)
-        matched = [r for r in reports if str(r.url).endswith(str(row["value"])) or r.name == f"Telegram @{row['value']}"]
-        report = matched[0] if matched else None
-        await context.bot.send_message(
-            chat_id=settings.admin_id,
-            text=f"Telegram test #{sid}: {report.status if report else 'нет данных'}",
-        )
-    except Exception:
-        logger.exception("Background source test failed for source_id=%s", sid)
-        await context.bot.send_message(chat_id=settings.admin_id, text=f"Не удалось проверить источник #{sid}.")
-    finally:
-        duration = time.perf_counter() - started
-        logger.info("Source test completed for source_id=%s in %.2fs", sid, duration)
-        running = context.application.bot_data.get("source_test_running")
-        if isinstance(running, set):
-            running.discard(sid)
+    await source_handlers.run_source_test_background(context, settings, db, row, _run_collect_topics_with_diagnostics, logger)
 
 
 def _build_media_preview_caption(
@@ -2687,78 +2588,11 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
 
 
 def _render_sources_status(reports: list[SourceReport], db: DraftDatabase | None = None) -> str:
-    total = len(reports)
-    ok = sum(1 for r in reports if r.status == "ok")
-    empty = sum(1 for r in reports if r.status == "empty")
-    skipped = sum(1 for r in reports if r.status == "skipped")
-    errors = sum(1 for r in reports if r.status == "error")
-    lines = ["📡 Статус источников", "Чтобы посмотреть полный список источников: 📡 Источники → 📚 Все источники", "", f"Всего источников: {total}", f"Работают: {ok}", f"Пустые: {empty}", f"Отключены/пропущены: {skipped}", f"Ошибки: {errors}", "", "По группам:"]
-    for group, label in SOURCE_GROUP_LABELS.items():
-        group_reports = [r for r in reports if (r.source_group or "other") == group]
-        if not group_reports:
-            if group == "custom":
-                lines.append(f"{label}: 0/0")
-            continue
-        group_ok = sum(1 for r in group_reports if r.status == "ok")
-        group_skipped = sum(1 for r in group_reports if r.status == "skipped")
-        suffix = f", пропущено {group_skipped}" if group_skipped else ""
-        lines.append(f"{label}: {group_ok}/{len(group_reports)}{suffix}")
-
-    skipped_reports = [r for r in reports if r.status == "skipped"]
-    if skipped_reports:
-        lines.append("")
-        lines.append("Отключено/пропущено:")
-        for rep in skipped_reports[:8]:
-            lines.append(f"- {rep.name}: {rep.error or 'пропущено'}")
-
-    problems = [r for r in reports if r.status in {"error", "empty"}]
-    if problems:
-        lines.append("")
-        lines.append("Проблемы:")
-        limited = problems[:12]
-        for rep in limited:
-            if rep.status == "error":
-                lines.append(f"- {rep.name}: {rep.error or 'ошибка'}")
-            else:
-                lines.append(f"- {rep.name}: 0 тем")
-        if len(problems) > 12:
-            lines.append("Показаны первые 12 проблем.")
-    if db is not None:
-        health_rows = db.list_source_health(limit=500)
-        if not health_rows:
-            lines.append("\nИстория здоровья пока пустая. Запусти /collect или проверку источников.")
-        else:
-            h_ok = sum(1 for r in health_rows if r["last_status"] == "ok")
-            h_empty = sum(1 for r in health_rows if r["last_status"] == "empty")
-            h_err = sum(1 for r in health_rows if r["last_status"] == "error")
-            h_pause = sum(1 for r in health_rows if r["disabled_until"])
-            lines.append(f"\nЗдоровье источников: ✅ {h_ok}, ⚠️ {h_empty}, ❌ {h_err}, ⏸ {h_pause}")
-            lines.append("Подробно: 📡 Источники → 🩺 Здоровье источников")
-    return "\n".join(lines)[:3900]
+    return source_handlers.render_sources_status(reports, db, SOURCE_GROUP_LABELS)
 
 
 def _render_sources_health(db: DraftDatabase) -> str:
-    rows = db.list_source_health(limit=200)
-    if not rows:
-        return "История здоровья пока пустая. Запусти /collect или проверку источников."
-    parts = ["🩺 Здоровье источников"]
-    groups = [("✅ Работают", lambda r: r["last_status"] == "ok"), ("⚠️ Пустые", lambda r: r["last_status"] == "empty"), ("❌ Ошибки", lambda r: r["last_status"] == "error"), ("⏸ На паузе", lambda r: bool(r["disabled_until"]))]
-    for label, fn in groups:
-        selected = [r for r in rows if fn(r)]
-        if not selected:
-            continue
-        parts.append(f"\n{label}:")
-        for r in selected[:20]:
-            line = f"[{r['source_type']}/{r['source_group']}] {r['source_name']}"
-            if r["last_status"] == "error":
-                line += f" - {str(r['last_error'] or 'ошибка')[:80]}, ошибок подряд: {int(r['consecutive_errors'] or 0)}"
-            if r["disabled_until"]:
-                line += f" - пауза до {str(r['disabled_until'])[11:16]}"
-            parts.append(line)
-    text = "\n".join(parts)
-    for secret in ["BOT_TOKEN", "TELEGRAM_SESSION_STRING", "TELEGRAM_API_HASH", "OPENROUTER_API_KEY", "OPENAI_API_KEY"]:
-        text = text.replace(secret, "***")
-    return text[:3900]
+    return source_handlers.render_sources_health(db)
 
 
 def _render_collect_topic_line(topic) -> list[str]:
@@ -2825,35 +2659,7 @@ def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list, 
 
 
 def _render_sources_inventory(settings, db: DraftDatabase) -> list[str]:
-    builtin = built_in_rss_sources()
-    env_rows = env_configured_sources(settings)
-    managed = db_managed_sources(db)
-    all_rows = [("Встроенные RSS", builtin), ("Env источники", env_rows), ("Мои источники (DB)", managed)]
-    summary = f"Всего источников: {len(builtin) + len(env_rows) + len(managed)}. Встроенные: {len(builtin)}. Env: {len(env_rows)}. Мои: {len(managed)}."
-    messages = [summary]
-    if _detect_railway_with_local_db_path(settings.db_path):
-        messages.append("⚠️ DB_PATH сейчас local data/drafts.db. Источники, добавленные через бота, могут пропасть после redeploy. Лучше подключить Railway Volume и поставить DB_PATH=/data/drafts.db.")
-    icon_map = {"enabled": "✅", "skipped": "⏭️", "disabled": "⛔"}
-    current = ""
-    for title, rows in all_rows:
-        block_lines = [f"\n{title}:"]
-        if not rows:
-            block_lines.append("— пусто")
-        else:
-            for item in rows:
-                icon = icon_map.get(item.get("status", "enabled"), "•")
-                reason = str(item.get("reason") or "").strip()
-                suffix = f" ({reason})" if reason else ""
-                block_lines.append(f"{icon} [{item.get('source_type')}/{item.get('group')}] {item.get('name')} — {item.get('value')}{suffix}")
-        block = "\n".join(block_lines)
-        if len(current) + len(block) + 1 > 3500:
-            messages.append(current.strip())
-            current = block
-        else:
-            current += ("\n" + block) if current else block
-    if current.strip():
-        messages.append(current.strip())
-    return messages
+    return source_handlers.render_sources_inventory(settings, db, _detect_railway_with_local_db_path)
 
 
 async def collect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4184,94 +3990,16 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def _handle_sources_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
-    settings = context.bot_data["settings"]
-    db: DraftDatabase = context.bot_data["db"]
-    query = update.callback_query
-    if not query:
-        return
-    if data == "sources_list":
-        rows = db.list_managed_sources(include_disabled=True)
-        if not rows:
-            await _edit_callback_message(query, "Пока нет пользовательских источников.", reply_markup=_sources_hub_keyboard())
-            return
-        await _edit_callback_message(query, f"Источников: {len(rows)}", reply_markup=_sources_hub_keyboard())
-        for row in rows:
-            enabled = bool(row["enabled"])
-            status = "✅" if enabled else "⛔"
-            text = (
-                f"#{row['id']} {status} [{row['source_type']}]\n"
-                f"{row['name']}\n{row['value']}\n"
-                f"status: {row['last_status'] or '-'}"
-            )
-            if row["last_error"]:
-                text += f"\nerr: {str(row['last_error'])[:120]}"
-            await context.bot.send_message(chat_id=settings.admin_id, text=text, reply_markup=_source_card_keyboard(int(row["id"]), enabled))
-        return
-    if data == "sources_inventory":
-        parts = _render_sources_inventory(settings, db)
-        await _edit_callback_message(query, parts[0], reply_markup=_sources_hub_keyboard())
-        for part in parts[1:]:
-            await context.bot.send_message(chat_id=settings.admin_id, text=part, reply_markup=_sources_hub_keyboard())
-        return
-    if data == "source_add_rss":
-        context.user_data["source_add_flow"] = {"type": "rss", "step": "name"}
-        await _edit_callback_message(query, "Введите название RSS-источника.", reply_markup=_sources_hub_keyboard())
-        return
-    if data == "source_add_telegram":
-        context.user_data["source_add_flow"] = {"type": "telegram", "step": "value"}
-        await _edit_callback_message(query, "Пришлите username канала или ссылку t.me/...", reply_markup=_sources_hub_keyboard())
-        return
-    if data == "source_confirm_rss":
-        flow = context.user_data.get("source_add_flow") or {}
-        if flow.get("type") == "rss" and flow.get("step") == "confirm" and flow.get("feed_url"):
-            try:
-                db.create_managed_source("rss", str(flow.get("name") or "RSS"), str(flow["feed_url"]), "custom")
-            except ValueError as exc:
-                await _edit_callback_message(query, f"Не удалось добавить источник: {exc}", reply_markup=_sources_hub_keyboard())
-                return
-            context.user_data.pop("source_add_flow", None)
-            await _edit_callback_message(query, "RSS-источник добавлен.", reply_markup=_sources_hub_keyboard())
-            return
-        await _edit_callback_message(query, "Нет данных для сохранения.", reply_markup=_sources_hub_keyboard())
-        return
-    if data == "source_cancel_add":
-        context.user_data.pop("source_add_flow", None)
-        await _edit_callback_message(query, "Добавление отменено.", reply_markup=_sources_hub_keyboard())
-        return
-    if data.startswith("source_toggle:"):
-        sid = int(data.split(":", 1)[1])
-        row = db.get_managed_source(sid)
-        if row:
-            db.update_managed_source_enabled(sid, not bool(row["enabled"]))
-        await _edit_callback_message(query, "Обновил статус источника.", reply_markup=_sources_hub_keyboard())
-        return
-    if data.startswith("source_delete:"):
-        sid = int(data.split(":", 1)[1])
-        db.delete_managed_source(sid)
-        await _edit_callback_message(query, "Источник удалён.", reply_markup=_sources_hub_keyboard())
-        return
-    if data.startswith("source_test:"):
-        sid = int(data.split(":", 1)[1])
-        row = db.get_managed_source(sid)
-        if not row:
-            await _edit_callback_message(query, "Источник не найден.", reply_markup=_sources_hub_keyboard())
-            return
-        if context.application.bot_data.get("sources_check_running"):
-            await _edit_callback_message(query, "Проверка источников уже идёт. Дождись результата.", reply_markup=_sources_hub_keyboard())
-            return
-        running = context.application.bot_data.setdefault("source_test_running", set())
-        if sid in running:
-            await _edit_callback_message(query, "Проверка этого источника уже идёт. Дождись результата.", reply_markup=_sources_hub_keyboard())
-            return
-        running.add(sid)
-        await _edit_callback_message(
-            query,
-            "Проверяю RSS..." if row["source_type"] == "rss" else "Проверяю источник...",
-            reply_markup=_sources_hub_keyboard(),
-        )
-        context.application.create_task(_run_source_test_background(context=context, settings=settings, db=db, row=row))
-        return
-    await _edit_callback_message(query, "Неизвестное действие источников.", reply_markup=_sources_hub_keyboard())
+    await source_handlers.handle_sources_callback(
+        update=update,
+        context=context,
+        data=data,
+        edit_callback_message=_edit_callback_message,
+        sources_hub_keyboard=_sources_hub_keyboard,
+        source_card_keyboard=_source_card_keyboard,
+        run_source_test_background=_run_source_test_background,
+        render_sources_inventory=_render_sources_inventory,
+    )
 
 
 async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
