@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from bot.source_normalization import normalize_source_url, normalize_telegram_channel_input
-from bot.topic_scoring import canonical_topic_key, is_similar_topic_key
+from bot.topic_scoring import canonical_topic_key, content_format_for_lane, editorial_lane_for_topic, is_similar_topic_key
 
 
 def _split_related_values(value: str | None) -> list[str]:
@@ -102,6 +102,9 @@ class DraftDatabase:
             self._ensure_column(conn, "topic_candidates", "related_sources", "TEXT")
             self._ensure_column(conn, "topic_candidates", "related_urls", "TEXT")
             self._ensure_column(conn, "topic_candidates", "related_count", "INTEGER DEFAULT 1")
+            self._ensure_column(conn, "topic_candidates", "editorial_lane", "TEXT")
+            self._ensure_column(conn, "topic_candidates", "editorial_reason", "TEXT")
+            self._ensure_column(conn, "topic_candidates", "content_format", "TEXT")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS managed_sources (
@@ -741,6 +744,9 @@ class DraftDatabase:
         angle_ru: str | None,
         reason_ru: str | None,
         original_description: str | None,
+        lane: str,
+        lane_reason: str,
+        content_format: str,
     ) -> None:
         existing_sources = _join_related_values(existing["related_sources"], existing["source"], source)
         existing_urls = _join_related_values(existing["related_urls"], existing["url"], url)
@@ -782,7 +788,10 @@ class DraftDatabase:
                 source_group = COALESCE(source_group, ?),
                 related_sources = ?,
                 related_urls = ?,
-                related_count = ?
+                related_count = ?,
+                editorial_lane = COALESCE(NULLIF(editorial_lane, ''), ?),
+                editorial_reason = COALESCE(NULLIF(editorial_reason, ''), ?),
+                content_format = COALESCE(NULLIF(content_format, ''), ?)
             WHERE id = ?
             """,
             (
@@ -801,6 +810,9 @@ class DraftDatabase:
                 existing_sources,
                 existing_urls,
                 related_count,
+                lane,
+                lane_reason,
+                content_format,
                 int(existing["id"]),
             ),
         )
@@ -855,6 +867,8 @@ class DraftDatabase:
         canonical_key: str | None = None,
     ) -> str:
         canonical_key = (canonical_key or canonical_topic_key(title, source_group)).strip()
+        lane, lane_reason = editorial_lane_for_topic(title, source, url, source_group, original_description, category, score)
+        content_format = content_format_for_lane(lane, score)
         with self._connect() as conn:
             existing = conn.execute(
                 "SELECT * FROM topic_candidates WHERE url = ?",
@@ -878,6 +892,9 @@ class DraftDatabase:
                     angle_ru=angle_ru,
                     reason_ru=reason_ru,
                     original_description=original_description,
+                    lane=lane,
+                    lane_reason=lane_reason,
+                    content_format=content_format,
                 )
                 conn.commit()
                 return "existing_url"
@@ -912,6 +929,9 @@ class DraftDatabase:
                     angle_ru=angle_ru,
                     reason_ru=reason_ru,
                     original_description=original_description,
+                    lane=lane,
+                    lane_reason=lane_reason,
+                    content_format=content_format,
                 )
                 conn.commit()
                 return "merged_story"
@@ -922,9 +942,9 @@ class DraftDatabase:
                     title, url, source, published_at, status, category, score, deterministic_score, reason,
                     title_ru, summary_ru, angle_ru, reason_ru, original_description,
                     normalized_title, source_group, canonical_key, related_sources,
-                    related_urls, related_count, created_at, last_seen_at
+                    related_urls, related_count, editorial_lane, editorial_reason, content_format, created_at, last_seen_at
                 )
-                VALUES (?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """,
                 (
                     title,
@@ -945,6 +965,9 @@ class DraftDatabase:
                     canonical_key,
                     source,
                     url,
+                    lane,
+                    lane_reason,
+                    content_format,
                 ),
             )
             conn.commit()
@@ -1090,6 +1113,38 @@ class DraftDatabase:
             return [dict(row) for row in rows]
 
 
+    def list_topic_candidates_by_editorial(
+        self,
+        limit: int = 10,
+        status: str | None = "new",
+        lanes: list[str] | None = None,
+        formats: list[str] | None = None,
+        categories: list[str] | None = None,
+        min_score: int = 0,
+    ) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            clauses = []
+            params: list[Any] = []
+            if status is not None:
+                clauses.append("status = ?")
+                params.append(status)
+            if lanes:
+                clauses.append(f"editorial_lane IN ({','.join(['?'] * len(lanes))})")
+                params.extend(lanes)
+            if formats:
+                clauses.append(f"content_format IN ({','.join(['?'] * len(formats))})")
+                params.extend(formats)
+            if categories:
+                clauses.append(f"category IN ({','.join(['?'] * len(categories))})")
+                params.extend(categories)
+            if min_score > 0:
+                clauses.append("score >= ?")
+                params.append(min_score)
+            where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            params.append(limit)
+            rows = conn.execute("SELECT * FROM topic_candidates " + where_clause + " ORDER BY score DESC, created_at DESC LIMIT ?", tuple(params)).fetchall()
+            return [dict(r) for r in rows]
+
     def list_topic_candidates_min_score(self, limit: int = 15, status: str = "new", min_score: int = 75) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -1103,6 +1158,39 @@ class DraftDatabase:
                 (status, min_score, limit),
             ).fetchall()
             return [dict(row) for row in rows]
+    def get_balanced_topic_shortlist(self, limit: int = 12, hours: int = 48, min_score: int = 60) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM topic_candidates
+                WHERE status = 'new'
+                  AND score >= ?
+                  AND created_at >= datetime('now', ?)
+                ORDER BY score DESC, related_count DESC, created_at DESC
+                LIMIT 300
+                """,
+                (min_score, f'-{max(1, int(hours))} hours'),
+            ).fetchall()
+        topics = [dict(r) for r in rows]
+        lane_limits = {"tool": 3, "creator": 3, "breaking_news": 2, "short_video": 2, "meme": 1, "guide": 1}
+        source_cap = 3
+        lane_counts: dict[str, int] = {}
+        source_counts: dict[str, int] = {}
+        selected: list[dict[str, Any]] = []
+        for topic in topics:
+            if len(selected) >= limit:
+                break
+            lane = str(topic.get("editorial_lane") or "")
+            source = str(topic.get("source") or "")
+            if source_counts.get(source, 0) >= source_cap:
+                continue
+            if lane in lane_limits and lane_counts.get(lane, 0) >= lane_limits[lane]:
+                continue
+            selected.append(topic)
+            source_counts[source] = source_counts.get(source, 0) + 1
+            lane_counts[lane] = lane_counts.get(lane, 0) + 1
+        return selected
+
     def get_topic_candidate(self, topic_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM topic_candidates WHERE id = ?", (topic_id,)).fetchone()

@@ -25,6 +25,9 @@ from bot.handlers import (
     topics_tools_command,
     topics_news_command,
     topics_fun_command,
+    topics_video_command,
+    topics_guides_command,
+    topics_best_command,
     topics_hot_command,
     sources_status_command,
     usage_7d_command,
@@ -135,6 +138,9 @@ def main() -> None:
     application.add_handler(CommandHandler("topics_tools", topics_tools_command))
     application.add_handler(CommandHandler("topics_news", topics_news_command))
     application.add_handler(CommandHandler("topics_fun", topics_fun_command))
+    application.add_handler(CommandHandler("topics_video", topics_video_command))
+    application.add_handler(CommandHandler("topics_guides", topics_guides_command))
+    application.add_handler(CommandHandler("topics_best", topics_best_command))
     application.add_handler(CommandHandler("topics_hot", topics_hot_command))
     application.add_handler(CommandHandler("usage_today", usage_today_command))
     application.add_handler(CommandHandler("usage_7d", usage_7d_command))
