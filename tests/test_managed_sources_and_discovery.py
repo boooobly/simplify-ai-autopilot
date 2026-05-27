@@ -1,5 +1,5 @@
 from bot.database import DraftDatabase
-from bot.handlers import is_valid_rss_input_url, normalize_telegram_channel_input
+from bot.handlers import _render_sources_inventory, is_valid_rss_input_url, normalize_telegram_channel_input
 from bot.sources import collect_topics_with_diagnostics, discover_rss_feed_url, parse_custom_topic_feeds
 
 
@@ -97,3 +97,51 @@ def test_disabled_source_not_collected(monkeypatch, tmp_path):
 def test_custom_topic_feeds_unchanged():
     feeds = parse_custom_topic_feeds("Name|custom|https://example.com/feed.xml")
     assert feeds == [("Name", "custom", "https://example.com/feed.xml")]
+
+
+def test_builtin_disabled_source_is_skipped(monkeypatch):
+    rss_url = "https://example.com/builtin.xml"
+    monkeypatch.setattr("bot.sources.OFFICIAL_AI_RSS", [("Built-in A", rss_url)])
+    monkeypatch.setattr("bot.sources.TECH_MEDIA_RSS", [])
+    monkeypatch.setattr("bot.sources.RU_TECH_RSS", [])
+    monkeypatch.setattr("bot.sources.TOOLS_RSS", [])
+    monkeypatch.setattr("bot.sources.COMMUNITY_RSS", [])
+    monkeypatch.setattr("bot.sources.VC_RU_AI_SOURCE", ("vc.ru AI", "https://vc.ru/ai", "ru_tech"))
+    monkeypatch.setattr("bot.sources.BUILTIN_SOURCE_OVERRIDES", {"rss:https://example.com/builtin.xml": {"action": "disable", "reason": "404/invalid feed"}})
+    monkeypatch.setattr("bot.sources.fetch_vc_ru_ai_topics", lambda *a, **k: ([], type("R", (), {"name": "vc.ru AI", "url": "https://vc.ru/ai", "source_group": "ru_tech", "status": "empty", "item_count": 0, "error": ""})()))
+    monkeypatch.setattr("bot.sources._fetch_github_trending_ai", lambda: [])
+
+    def fake_get(*args, **kwargs):
+        raise AssertionError("Disabled built-in source must not be fetched")
+
+    monkeypatch.setattr("bot.sources.requests.get", fake_get)
+    items, reports = collect_topics_with_diagnostics()
+    assert items == []
+    report = next(r for r in reports if r.name == "Built-in A")
+    assert report.status == "skipped"
+    assert "404/invalid feed" in report.error
+
+
+def test_enabled_builtin_source_still_fetches(monkeypatch):
+    rss_url = "https://example.com/builtin.xml"
+    monkeypatch.setattr("bot.sources.OFFICIAL_AI_RSS", [("Built-in A", rss_url)])
+    monkeypatch.setattr("bot.sources.TECH_MEDIA_RSS", [])
+    monkeypatch.setattr("bot.sources.RU_TECH_RSS", [])
+    monkeypatch.setattr("bot.sources.TOOLS_RSS", [])
+    monkeypatch.setattr("bot.sources.COMMUNITY_RSS", [])
+    monkeypatch.setattr("bot.sources.BUILTIN_SOURCE_OVERRIDES", {})
+    monkeypatch.setattr("bot.sources.fetch_vc_ru_ai_topics", lambda *a, **k: ([], type("R", (), {"name": "vc.ru AI", "url": "https://vc.ru/ai", "source_group": "ru_tech", "status": "empty", "item_count": 0, "error": ""})()))
+    monkeypatch.setattr("bot.sources._fetch_github_trending_ai", lambda: [])
+    monkeypatch.setattr("bot.sources.requests.get", lambda *a, **k: _Resp("<rss><channel><item><title>A</title><link>https://x/a</link></item></channel></rss>", "application/rss+xml"))
+    items, reports = collect_topics_with_diagnostics()
+    assert len(items) == 1
+    assert any(r.name == "Built-in A" and r.status == "ok" for r in reports)
+
+
+def test_inventory_shows_disabled_builtin_reason(monkeypatch, tmp_path):
+    monkeypatch.setattr("bot.sources.BUILTIN_SOURCE_OVERRIDES", {"rss:https://openai.com/news/rss.xml": {"action": "disable", "reason": "broken xml"}})
+    db = DraftDatabase(str(tmp_path / "db.sqlite"))
+    settings = type("S", (), {"db_path": str(tmp_path / "db.sqlite"), "telegram_source_channels": []})()
+    text = "\n".join(_render_sources_inventory(settings, db))
+    assert "⛔ [rss/official_ai] OpenAI blog" in text
+    assert "broken xml" in text
