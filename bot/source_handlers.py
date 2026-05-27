@@ -54,21 +54,64 @@ def source_card_keyboard(source_id:int,enabled:bool):
     return InlineKeyboardMarkup([[InlineKeyboardButton(toggle,callback_data=f"source_toggle:{source_id}"),InlineKeyboardButton("🧪 Test",callback_data=f"source_test:{source_id}"),InlineKeyboardButton("🗑 Delete",callback_data=f"source_delete:{source_id}")]])
 
 def render_sources_status(reports, db, source_group_labels):
-    total=len(reports); ok=sum(1 for r in reports if r.status=="ok"); empty=sum(1 for r in reports if r.status=="empty"); skipped=sum(1 for r in reports if r.status=="skipped"); errors=sum(1 for r in reports if r.status=="error")
-    lines=["📡 Статус источников","Чтобы посмотреть полный список источников: 📡 Источники → 📚 Все источники","",f"Всего источников: {total}",f"Работают: {ok}",f"Пустые: {empty}",f"Отключены/пропущены: {skipped}",f"Ошибки: {errors}","","По группам:"]
-    for group,label in source_group_labels.items():
-        grp=[r for r in reports if (r.source_group or "other")==group]
-        if not grp:
-            if group=="custom": lines.append(f"{label}: 0/0")
+    total = len(reports)
+    ok = sum(1 for r in reports if r.status == "ok")
+    empty = sum(1 for r in reports if r.status == "empty")
+    skipped = sum(1 for r in reports if r.status == "skipped")
+    errors = sum(1 for r in reports if r.status == "error")
+    lines = [
+        "📡 Статус источников",
+        "Чтобы посмотреть полный список источников: 📡 Источники → 📚 Все источники",
+        "",
+        f"Всего источников: {total}",
+        f"Работают: {ok}",
+        f"Пустые: {empty}",
+        f"Отключены/пропущены: {skipped}",
+        f"Ошибки: {errors}",
+        "",
+        "По группам:",
+    ]
+    for group, label in source_group_labels.items():
+        group_reports = [r for r in reports if (r.source_group or "other") == group]
+        if not group_reports:
+            if group == "custom":
+                lines.append(f"{label}: 0/0")
             continue
-        gok=sum(1 for r in grp if r.status=="ok"); gskip=sum(1 for r in grp if r.status=="skipped"); suffix=f", пропущено {gskip}" if gskip else ""; lines.append(f"{label}: {gok}/{len(grp)}{suffix}")
-    probs=[r for r in reports if r.status in {"error","empty"}]
-    if probs:
-        lines += ["","Проблемы:"]
-        for rep in probs[:12]: lines.append(f"- {rep.name}: {rep.error or 'ошибка'}" if rep.status=="error" else f"- {rep.name}: 0 тем")
+        group_ok = sum(1 for r in group_reports if r.status == "ok")
+        group_skipped = sum(1 for r in group_reports if r.status == "skipped")
+        suffix = f", пропущено {group_skipped}" if group_skipped else ""
+        lines.append(f"{label}: {group_ok}/{len(group_reports)}{suffix}")
+
+    skipped_reports = [r for r in reports if r.status == "skipped"]
+    if skipped_reports:
+        lines.append("")
+        lines.append("Отключено/пропущено:")
+        for rep in skipped_reports[:8]:
+            lines.append(f"- {rep.name}: {rep.error or 'пропущено'}")
+
+    problems = [r for r in reports if r.status in {"error", "empty"}]
+    if problems:
+        lines.append("")
+        lines.append("Проблемы:")
+        limited = problems[:12]
+        for rep in limited:
+            if rep.status == "error":
+                lines.append(f"- {rep.name}: {rep.error or 'ошибка'}")
+            else:
+                lines.append(f"- {rep.name}: 0 тем")
+        if len(problems) > 12:
+            lines.append("Показаны первые 12 проблем.")
     if db is not None:
-        health_rows=db.list_source_health(limit=500)
-        if not health_rows: lines.append("\nИстория здоровья пока пустая. Запусти /collect или проверку источников.")
+        health_rows = db.list_source_health(limit=500)
+        if not health_rows:
+            lines.append("\nИстория здоровья пока пустая. Запусти /collect или проверку источников.")
+        else:
+            h_ok = sum(1 for r in health_rows if r["last_status"] == "ok")
+            h_empty = sum(1 for r in health_rows if r["last_status"] == "empty")
+            h_err = sum(1 for r in health_rows if r["last_status"] == "error")
+            h_pause = sum(1 for r in health_rows if r["disabled_until"])
+            lines.append(f"\nЗдоровье источников: ✅ {h_ok}, ⚠️ {h_empty}, ❌ {h_err}, ⏸ {h_pause}")
+            lines.append("Подробно: 📡 Источники → 🩺 Здоровье источников")
     return "\n".join(lines)[:3900]
 
 def render_sources_health(db:DraftDatabase)->str:
