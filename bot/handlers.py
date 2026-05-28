@@ -30,6 +30,11 @@ from bot.cleanup_handlers import (
 from bot.drafts import create_test_draft, rewrite_test_draft
 from bot.media_utils import decode_media_items, encode_media_group, media_count
 from bot.publisher import publish_to_channel
+from bot.moderation_handlers import (
+    ModerationCallbackDeps,
+    _rewrite_action_config,
+    handle_draft_moderation_callback,
+)
 from bot.source_normalization import normalize_source_url, normalize_telegram_channel_input
 from bot.queue_helpers import (
     ACTIONABLE_DRAFT_STATUSES,
@@ -118,30 +123,6 @@ def _apply_topic_enrichment_fallback(item, db: DraftDatabase) -> None:
             reason_ru=item.reason_ru,
         )
 
-REWRITE_DRAFT_ACTIONS = {
-    "rewrite_remove_fluff": {
-        "mode": "remove_fluff",
-        "operation": "rewrite_remove_fluff",
-        "progress": "🧹 Убираю воду из черновика #{draft_id}...",
-    },
-    "rewrite_shorten": {
-        "mode": "shorten",
-        "operation": "rewrite_shorten",
-        "progress": "📉 Сокращаю черновик #{draft_id}...",
-    },
-    "rewrite_neutralize_ads": {
-        "mode": "neutralize_ads",
-        "operation": "rewrite_neutralize_ads",
-        "progress": "😐 Убираю рекламный тон из черновика #{draft_id}...",
-    },
-}
-
-
-def _rewrite_action_config(action: str) -> dict[str, str]:
-    try:
-        return REWRITE_DRAFT_ACTIONS[action]
-    except KeyError as exc:
-        raise ValueError(f"Unsupported rewrite action: {action}") from exc
 
 
 
@@ -3251,538 +3232,48 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await _edit_callback_message(query, f"Тема #{draft_id} отклонена.")
             return
 
-        draft = db.get_draft(draft_id)
-        if not draft and action not in {"edit_cancel", "attach_media_cancel"}:
-            await _edit_callback_message(query, f"Черновик #{draft_id} не найден.")
-            return
-
-        if action == "publish":
-            if not _can_publish(draft.get("status")):
-                await _edit_callback_message(query, _status_guard_message("publish", draft.get("status")))
-                return
-            was_scheduled = draft.get("status") == "scheduled"
-            draft_to_publish = draft
-            if was_scheduled:
-                if not db.mark_draft_publishing(draft_id):
-                    await _edit_callback_message(query, "Черновик уже не в очереди.")
-                    return
-                draft_to_publish = db.get_draft(draft_id)
-                if not draft_to_publish:
-                    await _edit_callback_message(query, f"Черновик #{draft_id} не найден.")
-                    return
-            try:
-                publish_result = await publish_to_channel(
-                    context.bot,
-                    settings.channel_id,
-                    draft_to_publish["content"],
-                    draft_to_publish.get("media_url"),
-                    draft_to_publish.get("media_type"),
-                    settings.custom_emoji_map,
-                    settings.custom_emoji_aliases,
-                )
-            except Exception as exc:
-                if was_scheduled:
-                    db.mark_draft_failed(draft_id, error=type(exc).__name__)
-                raise
-            db.mark_draft_published(draft_id, channel_id=settings.channel_id, message_ids=publish_result.message_ids)
-            await _edit_callback_message(query, f"✅ Черновик #{draft_id} опубликован в канал.")
-
-        elif action == "schedule":
-            if not _can_schedule(draft.get("status")):
-                await _edit_callback_message(query, _status_guard_message("schedule", draft.get("status")))
-                return
-            db.update_status(draft_id, "approved")
-            schedule_text = f"Выбери слот публикации для черновика #{draft_id} (часовой пояс: {settings.schedule_timezone}):"
-            await context.bot.send_message(
-                chat_id=settings.admin_id,
-                text=schedule_text,
-                reply_markup=_schedule_keyboard(draft_id, settings.daily_post_slots),
-            )
-            try:
-                await query.answer("Меню слотов отправлено отдельным сообщением.")
-            except Exception as answer_exc:
-                logger.warning("Failed to answer schedule callback for draft #%s: %s", draft_id, answer_exc)
-
-        elif action == "schedule_slot":
-            if not slot:
-                await _edit_callback_message(query, "Некорректный слот времени.")
-                return
-            draft_for_slot = db.get_draft(draft_id)
-            if not draft_for_slot:
+        handled = await handle_draft_moderation_callback(
+            update,
+            context,
+            action,
+            draft_id,
+            slot,
+            ModerationCallbackDeps(
+                edit_callback_message=_edit_callback_message,
+                publish_to_channel=publish_to_channel,
+                schedule_keyboard=_schedule_keyboard,
+                queue_keyboard=_queue_keyboard,
+                schedule_draft_to_nearest_slot=_schedule_draft_to_nearest_slot,
+                can_publish=_can_publish,
+                can_schedule=_can_schedule,
+                can_edit=_can_edit,
+                status_guard_message=_status_guard_message,
+                regenerate_draft_from_source=_regenerate_draft_from_source,
+                build_moderation_text=_build_moderation_text,
+                moderation_keyboard=_moderation_keyboard,
+                moderation_keyboard_for_draft=_moderation_keyboard_for_draft,
+                preview_keyboard=_preview_keyboard,
+                full_draft_text=_full_draft_text,
+                clear_pending_edit=_clear_pending_edit,
+                set_pending_edit=_set_pending_edit,
+                clear_pending_media=_clear_pending_media,
+                get_pending_media=_get_pending_media,
+                set_pending_media=_set_pending_media,
+                send_moderation_preview=_send_moderation_preview,
+                resolve_ai_provider=_resolve_ai_provider,
+                run_rewrite_post_draft=_run_rewrite_post_draft,
+                run_polish_post_draft=_run_polish_post_draft,
+                rewrite_test_draft=rewrite_test_draft,
+                encode_media_group=encode_media_group,
+                estimate_ai_cost=estimate_ai_cost,
+                empty_ai_reply_text=EMPTY_AI_REPLY_TEXT,
+            ),
+        )
+        if not handled:
+            draft = db.get_draft(draft_id)
+            if not draft and action not in {"edit_cancel", "attach_media_cancel"}:
                 await _edit_callback_message(query, f"Черновик #{draft_id} не найден.")
                 return
-            slot_status = str(draft_for_slot.get("status") or "")
-            if slot_status not in {"draft", "approved", "scheduled"}:
-                await _edit_callback_message(
-                    query,
-                    _status_guard_message("schedule", slot_status),
-                )
-                return
-            tz = ZoneInfo(settings.schedule_timezone)
-            now_local = datetime.now(tz)
-            try:
-                hour, minute = map(int, slot.split(":"))
-            except (TypeError, ValueError):
-                await _edit_callback_message(query, "Некорректный слот времени.")
-                return
-            scheduled_local = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if scheduled_local <= now_local:
-                scheduled_local += timedelta(days=1)
-
-            scheduled_utc = scheduled_local.astimezone(ZoneInfo("UTC"))
-            db.schedule_draft(draft_id, scheduled_utc.strftime("%Y-%m-%d %H:%M:%S"))
-            await _edit_callback_message(
-                query,
-                f"🗓️ Черновик #{draft_id} запланирован на {scheduled_local.strftime('%Y-%m-%d %H:%M')}.\nОчередь: /queue_today"
-            )
-
-        elif action == "schedule_nearest":
-            if not _can_schedule(draft.get("status")):
-                await _edit_callback_message(query, _status_guard_message("schedule", draft.get("status")))
-                return
-            try:
-                scheduled_text = _schedule_draft_to_nearest_slot(db, settings, draft_id)
-            except ValueError as exc:
-                await _edit_callback_message(query, str(exc))
-                return
-            await _edit_callback_message(
-                query,
-                f"Черновик #{draft_id} поставлен в ближайший слот: {scheduled_text}",
-                reply_markup=_queue_keyboard(db, settings, 0),
-            )
-
-        elif action == "regenerate":
-            status = str(draft.get("status") or "")
-            if not _can_edit(status):
-                await _edit_callback_message(query, _status_guard_message("edit", status))
-                return
-            if not str(draft.get("source_url") or "").strip():
-                await _edit_callback_message(query, "У этого черновика нет source_url, перегенерация недоступна.")
-                return
-            await _edit_callback_message(query, f"♻️ Перегенерирую черновик #{draft_id} из того же источника...")
-            regenerated, error = await _regenerate_draft_from_source(db=db, settings=settings, draft=draft)
-            if error or regenerated is None:
-                await _edit_callback_message(query, error or "Не удалось перегенерировать черновик.")
-                return
-            refreshed = db.get_draft(draft_id) or draft
-            await _edit_callback_message(
-                query,
-                _build_moderation_text(
-                    draft_id,
-                    regenerated,
-                    refreshed.get("source_url"),
-                    refreshed.get("media_type"),
-                    refreshed.get("media_url"),
-                    source_image_url=refreshed.get("source_image_url"),
-                    custom_emoji_aliases=settings.custom_emoji_aliases,
-                ),
-                reply_markup=_moderation_keyboard(
-                    draft_id,
-                    "draft",
-                    has_media=media_count(refreshed.get("media_url"), refreshed.get("media_type")) > 0,
-                    source_url=refreshed.get("source_url"),
-                    source_image_url=refreshed.get("source_image_url"),
-                ),
-            )
-
-        elif action == "unschedule":
-            if not draft:
-                await _edit_callback_message(query, f"Черновик #{draft_id} не найден.")
-                return
-            if draft.get("status") != "scheduled":
-                await _edit_callback_message(query, f"Черновик #{draft_id} сейчас не в очереди.")
-                return
-            db.unschedule_draft(draft_id)
-            await _edit_callback_message(
-                query,
-                "Черновик #{0} снят с очереди.".format(draft_id),
-                reply_markup=_queue_keyboard(db, settings, 0),
-            )
-
-        elif action == "preview":
-            preview_text = strip_quote_markers(str(draft.get("content") or ""), custom_emoji_aliases=settings.custom_emoji_aliases).strip() or "[пусто]"
-            await _edit_callback_message(
-                query,
-                preview_text,
-                reply_markup=_preview_keyboard(draft_id),
-            )
-
-        elif action == "preview_back":
-            refreshed = db.get_draft(draft_id) or draft
-            await _edit_callback_message(
-                query,
-                _build_moderation_text(
-                    draft_id,
-                    refreshed["content"],
-                    refreshed.get("source_url"),
-                    refreshed.get("media_type"),
-                    refreshed.get("media_url"),
-                    source_image_url=refreshed.get("source_image_url"),
-                    custom_emoji_aliases=settings.custom_emoji_aliases,
-                ),
-                reply_markup=_moderation_keyboard(
-                    draft_id,
-                    str(refreshed.get("status") or ""),
-                    has_media=media_count(refreshed.get("media_url"), refreshed.get("media_type")) > 0,
-                    source_url=refreshed.get("source_url"),
-                    source_image_url=refreshed.get("source_image_url"),
-                ),
-            )
-
-        elif action == "reject":
-            if draft.get("status") in {"published", "publishing"}:
-                await _edit_callback_message(query, "Опубликованный черновик нельзя отклонить.")
-                return
-            db.update_status(draft_id, "rejected")
-            await _edit_callback_message(query, f"❌ Черновик #{draft_id} отклонён.")
-        elif action == "restore_draft":
-            if draft.get("status") != "failed":
-                await _edit_callback_message(
-                    query,
-                    f"Черновик #{draft_id} нельзя восстановить из статуса {draft.get('status')}. "
-                    "Восстановление доступно только для failed, чтобы не создать дубли публикаций.",
-                )
-                return
-            if not db.restore_draft(draft_id):
-                await _edit_callback_message(
-                    query, f"Черновик #{draft_id} уже не в статусе failed и не был восстановлен."
-                )
-                return
-            refreshed = db.get_draft(draft_id) or draft
-            await _edit_callback_message(
-                query,
-                _build_moderation_text(
-                    draft_id,
-                    str(refreshed.get("content") or ""),
-                    refreshed.get("source_url"),
-                    refreshed.get("media_type"),
-                    refreshed.get("media_url"),
-                    source_image_url=refreshed.get("source_image_url"),
-                    custom_emoji_aliases=settings.custom_emoji_aliases,
-                ),
-                reply_markup=_moderation_keyboard(
-                    draft_id,
-                    str(refreshed.get("status") or ""),
-                    has_media=media_count(refreshed.get("media_url"), refreshed.get("media_type")) > 0,
-                    source_url=refreshed.get("source_url"),
-                    source_image_url=refreshed.get("source_image_url"),
-                ),
-            )
-
-        elif action == "rewrite":
-            if not _can_edit(draft.get("status")):
-                await _edit_callback_message(query, _status_guard_message("edit", draft.get("status")))
-                return
-            rewritten = rewrite_test_draft(draft["content"])
-            db.update_draft_content(draft_id, rewritten)
-            db.update_status(draft_id, "draft")
-            await _edit_callback_message(
-                query,
-                _build_moderation_text(draft_id, rewritten, draft.get("source_url"), custom_emoji_aliases=settings.custom_emoji_aliases),
-                reply_markup=_moderation_keyboard(
-                    draft_id,
-                    "draft",
-                    has_media=media_count(draft.get("media_url"), draft.get("media_type")) > 0,
-                    source_url=draft.get("source_url"),
-                    source_image_url=draft.get("source_image_url"),
-                ),
-            )
-
-        elif action == "edit_text":
-            if not _can_edit(draft.get("status")):
-                await _edit_callback_message(query, _status_guard_message("edit", draft.get("status")))
-                return
-            _clear_pending_media(context)
-            _set_pending_edit(context, draft_id)
-            await _edit_callback_message(
-                query,
-                f"✏️ Редактирование черновика #{draft_id}\n\n"
-                "Пришли новый текст поста одним сообщением.\n\n"
-                "Чтобы отменить, нажми кнопку ниже.",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("❌ Отменить редактирование", callback_data=f"edit_cancel:{draft_id}")]]
-                ),
-            )
-
-        elif action == "attach_source_image":
-            status = str(draft.get("status") or "")
-            if not _can_edit(status):
-                await _edit_callback_message(query, _status_guard_message("edit", status))
-                return
-            source_image_url = str(draft.get("source_image_url") or "").strip()
-            if not source_image_url:
-                await _edit_callback_message(query, "У черновика нет сохранённой картинки источника.")
-                return
-            if media_count(draft.get("media_url"), draft.get("media_type")) > 0:
-                await _edit_callback_message(
-                    query,
-                    "У черновика уже есть медиа. Сначала убери его, потом прикрепи картинку источника.",
-                )
-                return
-            db.attach_media(draft_id, source_image_url, "photo")
-            db.update_status(draft_id, "draft")
-            refreshed = db.get_draft(draft_id) or draft
-            await _edit_callback_message(query, f"Картинка источника прикреплена к черновику #{draft_id}.")
-            await _send_moderation_preview(
-                context,
-                settings.admin_id,
-                draft_id,
-                str(refreshed.get("content") or ""),
-                source_url=refreshed.get("source_url"),
-                media_url=refreshed.get("media_url"),
-                media_type=refreshed.get("media_type"),
-                source_image_url=refreshed.get("source_image_url"),
-            )
-
-        elif action == "attach_media_flow":
-            if not _can_edit(draft.get("status")):
-                await _edit_callback_message(query, _status_guard_message("edit", draft.get("status")))
-                return
-            _clear_pending_edit(context)
-            _set_pending_media(context, draft_id)
-            await _edit_callback_message(
-                query,
-                f"📎 Прикрепление медиа к черновику #{draft_id}\n\n"
-                "Пришли одно или несколько фото/видео/GIF.\n"
-                "Можно отправлять по одному сообщению.\n"
-                "Когда закончишь, нажми «✅ Готово».\n\n"
-                "Лимит: до 10 файлов.",
-                reply_markup=InlineKeyboardMarkup(
-                    [
-                        [InlineKeyboardButton("✅ Готово", callback_data=f"attach_media_done:{draft_id}")],
-                        [InlineKeyboardButton("❌ Отменить прикрепление", callback_data=f"attach_media_cancel:{draft_id}")],
-                    ]
-                ),
-            )
-        elif action == "attach_media_done":
-            if _get_pending_media(context) != draft_id:
-                await _edit_callback_message(query, "Нет активного режима прикрепления для этого черновика.")
-                return
-            status = str(draft.get("status") or "")
-            if not _can_edit(status):
-                _clear_pending_media(context)
-                await _edit_callback_message(query, _status_guard_message("edit", status))
-                return
-            items = context.user_data.get("pending_media_items") or []
-            if not items:
-                await query.answer("Медиа ещё не добавлено. Пришли фото, видео или GIF/анимацию.", show_alert=True)
-                return
-            if len(items) == 1:
-                db.attach_media(draft_id, items[0]["file_id"], items[0]["type"])
-            else:
-                db.attach_media(draft_id, encode_media_group(items[:10]), "media_group")
-            db.update_status(draft_id, "draft")
-            _clear_pending_media(context)
-            await _edit_callback_message(query, f"Готово. Медиа прикреплено к черновику #{draft_id}: {len(items)} файл(ов).")
-            refreshed = db.get_draft(draft_id) or draft
-            await _send_moderation_preview(
-                context,
-                settings.admin_id,
-                draft_id,
-                str(refreshed.get('content') or ''),
-                source_url=refreshed.get("source_url"),
-                media_url=refreshed.get("media_url"),
-                media_type=refreshed.get("media_type"),
-                source_image_url=refreshed.get("source_image_url"),
-            )
-
-        elif action == "attach_media_cancel":
-            _clear_pending_media(context)
-            if not draft:
-                await _edit_callback_message(query, "Прикрепление медиа отменено.")
-                return
-            await _edit_callback_message(
-                query,
-                _build_moderation_text(
-                    draft_id,
-                    draft["content"],
-                    draft.get("source_url"),
-                    draft.get("media_type"),
-                    draft.get("media_url"),
-                    source_image_url=draft.get("source_image_url"),
-                    custom_emoji_aliases=settings.custom_emoji_aliases,
-                ),
-                reply_markup=_moderation_keyboard(
-                    draft_id,
-                    str(draft.get("status") or ""),
-                    has_media=media_count(draft.get("media_url"), draft.get("media_type")) > 0,
-                    source_url=draft.get("source_url"),
-                    source_image_url=draft.get("source_image_url"),
-                ),
-            )
-            if query.message:
-                await query.message.reply_text("Прикрепление медиа отменено.")
-        elif action == "remove_media":
-            if not _can_edit(draft.get("status")):
-                await _edit_callback_message(query, _status_guard_message("edit", draft.get("status")))
-                return
-            db.clear_media(draft_id)
-            db.update_status(draft_id, "draft")
-            await _edit_callback_message(query, f"Медиа удалено из черновика #{draft_id}.")
-            refreshed = db.get_draft(draft_id) or draft
-            await _send_moderation_preview(
-                context,
-                settings.admin_id,
-                draft_id,
-                str(refreshed.get("content") or ""),
-                source_url=refreshed.get("source_url"),
-                source_image_url=refreshed.get("source_image_url"),
-            )
-
-        elif action == "edit_cancel":
-            _clear_pending_edit(context)
-            if not draft:
-                await _edit_callback_message(query, "Редактирование отменено.")
-                return
-            await _edit_callback_message(
-                query,
-                _build_moderation_text(
-                    draft_id,
-                    draft["content"],
-                    draft.get("source_url"),
-                    draft.get("media_type"),
-                    draft.get("media_url"),
-                    source_image_url=draft.get("source_image_url"),
-                    custom_emoji_aliases=settings.custom_emoji_aliases,
-                ),
-                reply_markup=_moderation_keyboard_for_draft(draft_id, draft),
-            )
-            if query.message:
-                await query.message.reply_text("Редактирование отменено.")
-
-        elif action in REWRITE_DRAFT_ACTIONS:
-            status = str(draft.get("status") or "")
-            if status not in ACTIONABLE_DRAFT_STATUSES:
-                await _edit_callback_message(query, _status_guard_message("edit", status))
-                return
-            if not settings.has_ai_provider:
-                await _edit_callback_message(query, "AI-провайдер не настроен.")
-                return
-            config = _rewrite_action_config(action)
-            await _edit_callback_message(query, config["progress"].format(draft_id=draft_id))
-            api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
-            logger.info("rewrite provider=%s model=%s mode=%s", provider, settings.model_polish, config["mode"])
-            try:
-                rewritten = await _run_rewrite_post_draft(
-                    api_key,
-                    model=settings.model_polish,
-                    draft_text=draft["content"],
-                    source_url=draft.get("source_url"),
-                    mode=config["mode"],
-                    max_chars=settings.post_max_chars,
-                    soft_chars=settings.post_soft_chars,
-                    base_url=base_url,
-                    extra_headers=extra_headers,
-                )
-            except EmptyAIResponseError:
-                await _edit_callback_message(
-                    query,
-                    EMPTY_AI_REPLY_TEXT.replace("Черновик не создан", "Черновик не обновлён"),
-                )
-                return
-            estimated_cost = estimate_ai_cost(provider, rewritten.prompt_tokens, rewritten.completion_tokens, settings)
-            db.record_ai_usage(
-                provider=provider,
-                model=rewritten.model or settings.model_polish,
-                operation=config["operation"],
-                prompt_tokens=rewritten.prompt_tokens,
-                completion_tokens=rewritten.completion_tokens,
-                total_tokens=rewritten.total_tokens,
-                estimated_cost_usd=estimated_cost,
-                source_url=draft.get("source_url"),
-                draft_id=draft_id,
-            )
-            logger.info(
-                "AI usage provider=%s model=%s operation=%s prompt=%s completion=%s total=%s cost=%s",
-                provider,
-                rewritten.model or settings.model_polish,
-                config["operation"],
-                rewritten.prompt_tokens,
-                rewritten.completion_tokens,
-                rewritten.total_tokens,
-                estimated_cost,
-            )
-            db.update_draft_content(draft_id, rewritten.content)
-            db.update_status(draft_id, "draft")
-            refreshed = db.get_draft(draft_id) or draft
-            await _edit_callback_message(
-                query,
-                _build_moderation_text(
-                    draft_id,
-                    rewritten.content,
-                    refreshed.get("source_url"),
-                    refreshed.get("media_type"),
-                    refreshed.get("media_url"),
-                    source_image_url=refreshed.get("source_image_url"),
-                    custom_emoji_aliases=settings.custom_emoji_aliases,
-                ),
-                reply_markup=_moderation_keyboard(
-                    draft_id,
-                    "draft",
-                    has_media=media_count(refreshed.get("media_url"), refreshed.get("media_type")) > 0,
-                    source_url=refreshed.get("source_url"),
-                    source_image_url=refreshed.get("source_image_url"),
-                ),
-            )
-
-        elif action == "polish":
-            if not _can_edit(draft.get("status")):
-                await _edit_callback_message(query, _status_guard_message("edit", draft.get("status")))
-                return
-            if not settings.has_ai_provider:
-                await _edit_callback_message(query, "AI-провайдер не настроен.")
-                return
-            await _edit_callback_message(query, "Улучшаю текст через Claude...")
-            api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
-            logger.info("polish provider=%s model=%s", provider, settings.model_polish)
-            polished = await _run_polish_post_draft(
-                api_key,
-                model=settings.model_polish,
-                draft_text=draft["content"],
-                source_url=draft.get("source_url"),
-                max_chars=settings.post_max_chars,
-                soft_chars=settings.post_soft_chars,
-                base_url=base_url,
-                extra_headers=extra_headers,
-            )
-            estimated_cost = estimate_ai_cost(provider, polished.prompt_tokens, polished.completion_tokens, settings)
-            db.record_ai_usage(
-                provider=provider, model=polished.model or settings.model_polish, operation="polish",
-                prompt_tokens=polished.prompt_tokens, completion_tokens=polished.completion_tokens,
-                total_tokens=polished.total_tokens, estimated_cost_usd=estimated_cost, source_url=draft.get("source_url"), draft_id=draft_id
-            )
-            logger.info("AI usage provider=%s model=%s operation=%s prompt=%s completion=%s total=%s cost=%s", provider, polished.model or settings.model_polish, "polish", polished.prompt_tokens, polished.completion_tokens, polished.total_tokens, estimated_cost)
-            db.update_draft_content(draft_id, polished.content)
-            db.update_status(draft_id, "draft")
-            await _edit_callback_message(
-                query,
-                _build_moderation_text(
-                    draft_id,
-                    polished.content,
-                    draft.get("source_url"),
-                    draft.get("media_type"),
-                    draft.get("media_url"),
-                    source_image_url=draft.get("source_image_url"),
-                    custom_emoji_aliases=settings.custom_emoji_aliases,
-                ),
-                reply_markup=_moderation_keyboard(
-                    draft_id,
-                    "draft",
-                    has_media=media_count(draft.get("media_url"), draft.get("media_type")) > 0,
-                    source_url=draft.get("source_url"),
-                    source_image_url=draft.get("source_image_url"),
-                ),
-            )
-
-        elif action == "draft_info":
-            reply_markup = _moderation_keyboard_for_draft(draft_id, draft)
-            await _edit_callback_message(
-                query,
-                _full_draft_text(draft),
-                reply_markup=reply_markup,
-            )
-
-        else:
             await _edit_callback_message(query, "Неизвестное действие.")
 
     except Exception as exc:  # Keep user-facing flow stable on runtime errors.
