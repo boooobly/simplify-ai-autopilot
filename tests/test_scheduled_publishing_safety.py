@@ -83,6 +83,37 @@ def test_scheduled_publish_failure_marks_draft_recoverably(
     assert db.get_draft(draft_id)["status"] == "draft"
 
 
+def test_scheduler_recovers_stale_publishing_draft_without_resending(
+    db: DraftDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    draft_id = _schedule_due(db)
+    assert db.mark_draft_publishing(draft_id) is True
+    with db._connect() as conn:
+        conn.execute(
+            """
+            UPDATE drafts
+            SET publishing_started_at = datetime('now', '-31 minutes')
+            WHERE id = ?
+            """,
+            (draft_id,),
+        )
+        conn.commit()
+
+    async def unexpected_publish(*args, **kwargs):
+        raise AssertionError("stale publishing draft must not be resent automatically")
+
+    monkeypatch.setattr(publisher, "publish_to_channel", unexpected_publish)
+
+    asyncio.run(run_scheduled_publishing(_context(db)))
+
+    draft = db.get_draft(draft_id)
+    assert draft is not None
+    assert draft["status"] == "failed"
+    assert draft["scheduled_at"] is None
+    assert draft["publishing_started_at"] is None
+    assert "Recovered from stale publishing state" in draft["publish_error"]
+
+
 def test_successful_scheduled_publish_records_sent_metadata_and_is_not_reselected(
     db: DraftDatabase, monkeypatch: pytest.MonkeyPatch
 ) -> None:

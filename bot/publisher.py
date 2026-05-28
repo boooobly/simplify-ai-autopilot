@@ -221,6 +221,12 @@ async def run_scheduled_publishing(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     settings = context.application.bot_data["settings"]
     db: DraftDatabase = context.application.bot_data["db"]
+    recovered_count = db.recover_stuck_publishing_drafts()
+    if recovered_count:
+        logger.warning(
+            "scheduled_publish recovered_stale_publishing count=%s status_transition=publishing->failed",
+            recovered_count,
+        )
     due_drafts = db.get_due_scheduled_drafts()
     logger.info("scheduled_publish scan due_count=%s", len(due_drafts))
 
