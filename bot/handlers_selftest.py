@@ -9,6 +9,7 @@ from bot.database import DraftDatabase
 from bot.writer import GenerationResult
 from bot.sources import TopicItem, _with_scoring
 import bot.handlers as handlers
+import bot.moderation_handlers as moderation_handlers
 from bot.handlers import (
     _build_media_preview_caption,
     _build_moderation_text,
@@ -828,10 +829,10 @@ async def _run_topic_model_routing_selftest() -> None:
 
     draft_source = inspect.getsource(handlers._generate_topic_metadata_fallback_draft)
     assert "model=settings.model_draft" in draft_source
-    callback_source = inspect.getsource(handlers.moderation_callback)
+    callback_source = inspect.getsource(moderation_handlers.handle_draft_moderation_callback)
     assert "model=settings.model_polish" in callback_source
-    assert "_run_polish_post_draft" in callback_source
-    assert "_run_rewrite_post_draft" in callback_source
+    assert "run_polish_post_draft" in callback_source
+    assert "run_rewrite_post_draft" in callback_source
 
 
 async def _run_weak_topic_metadata_overwrite_selftest() -> None:
