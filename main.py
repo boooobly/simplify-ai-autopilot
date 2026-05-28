@@ -118,7 +118,7 @@ def main() -> None:
     db = DraftDatabase(settings.db_path)
     recovered_count = db.recover_stuck_publishing_drafts()
     logging.getLogger(__name__).info(
-        "startup: recovered %s stuck publishing drafts to failed", recovered_count
+        "startup: recovered %s stale publishing drafts to failed", recovered_count
     )
 
     application = Application.builder().token(settings.bot_token).post_init(_post_init).build()

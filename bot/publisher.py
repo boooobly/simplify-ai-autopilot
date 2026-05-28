@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from telegram import Bot, InputMediaPhoto, InputMediaVideo, LinkPreviewOptions
 from telegram.ext import ContextTypes
@@ -28,6 +29,25 @@ class SafeCaption:
     text: str
     parse_mode: str | None
     send_full_text_after: bool
+
+
+@dataclass(frozen=True)
+class PublishResult:
+    message_ids: list[int]
+
+
+def _message_id(message: Any) -> int | None:
+    value = getattr(message, "message_id", None)
+    return int(value) if value is not None else None
+
+
+def _message_ids(messages: Any) -> list[int]:
+    if messages is None:
+        return []
+    if isinstance(messages, (list, tuple)):
+        return [message_id for message in messages if (message_id := _message_id(message)) is not None]
+    message_id = _message_id(messages)
+    return [message_id] if message_id is not None else []
 
 
 def _render_or_plain(
@@ -103,7 +123,7 @@ async def publish_to_channel(
     media_type: str | None = None,
     custom_emoji_map: dict[str, str] | None = None,
     custom_emoji_aliases: dict[str, tuple[str, str]] | None = None,
-) -> None:
+) -> PublishResult:
     """Publish text or media post to the configured Telegram channel."""
 
     rendered_text, parse_mode = _render_or_plain(content, custom_emoji_map=custom_emoji_map, custom_emoji_aliases=custom_emoji_aliases)
@@ -116,15 +136,15 @@ async def publish_to_channel(
     if len(media_items) > 1:
         has_animation = any(item["type"] == "animation" for item in media_items)
         if has_animation:
-            await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))
+            sent_messages = _message_ids(await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True)))
             for item in media_items:
                 if item["type"] == "photo":
-                    await bot.send_photo(chat_id=channel_id, photo=item["file_id"])
+                    sent_messages.extend(_message_ids(await bot.send_photo(chat_id=channel_id, photo=item["file_id"])))
                 elif item["type"] == "video":
-                    await bot.send_video(chat_id=channel_id, video=item["file_id"])
+                    sent_messages.extend(_message_ids(await bot.send_video(chat_id=channel_id, video=item["file_id"])))
                 else:
-                    await bot.send_animation(chat_id=channel_id, animation=item["file_id"])
-            return
+                    sent_messages.extend(_message_ids(await bot.send_animation(chat_id=channel_id, animation=item["file_id"])))
+            return PublishResult(message_ids=sent_messages)
         safe_caption = _prepare_media_caption(
             content,
             custom_emoji_map=custom_emoji_map,
@@ -139,10 +159,10 @@ async def publish_to_channel(
             elif item["type"] == "video":
                 group.append(InputMediaVideo(media=item["file_id"], caption=caption if idx == 0 else None, parse_mode=caption_mode if idx == 0 else None))
         if group:
-            await bot.send_media_group(chat_id=channel_id, media=group)
+            sent_messages = _message_ids(await bot.send_media_group(chat_id=channel_id, media=group))
             if safe_caption.send_full_text_after:
-                await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))
-            return
+                sent_messages.extend(_message_ids(await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))))
+            return PublishResult(message_ids=sent_messages)
 
     if media_items and media_items[0]["type"] == "photo":
         media_url = media_items[0]["file_id"]
@@ -151,15 +171,15 @@ async def publish_to_channel(
             custom_emoji_map=custom_emoji_map,
             custom_emoji_aliases=custom_emoji_aliases,
         )
-        await bot.send_photo(
+        sent_messages = _message_ids(await bot.send_photo(
             chat_id=channel_id,
             photo=media_url,
             caption=safe_caption.text,
             parse_mode=safe_caption.parse_mode,
-        )
+        ))
         if safe_caption.send_full_text_after:
-            await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))
-        return
+            sent_messages.extend(_message_ids(await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))))
+        return PublishResult(message_ids=sent_messages)
     if media_items and media_items[0]["type"] == "video":
         media_url = media_items[0]["file_id"]
         safe_caption = _prepare_media_caption(
@@ -167,15 +187,15 @@ async def publish_to_channel(
             custom_emoji_map=custom_emoji_map,
             custom_emoji_aliases=custom_emoji_aliases,
         )
-        await bot.send_video(
+        sent_messages = _message_ids(await bot.send_video(
             chat_id=channel_id,
             video=media_url,
             caption=safe_caption.text,
             parse_mode=safe_caption.parse_mode,
-        )
+        ))
         if safe_caption.send_full_text_after:
-            await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))
-        return
+            sent_messages.extend(_message_ids(await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))))
+        return PublishResult(message_ids=sent_messages)
     if media_items and media_items[0]["type"] == "animation":
         media_url = media_items[0]["file_id"]
         safe_caption = _prepare_media_caption(
@@ -183,17 +203,17 @@ async def publish_to_channel(
             custom_emoji_map=custom_emoji_map,
             custom_emoji_aliases=custom_emoji_aliases,
         )
-        await bot.send_animation(
+        sent_messages = _message_ids(await bot.send_animation(
             chat_id=channel_id,
             animation=media_url,
             caption=safe_caption.text,
             parse_mode=safe_caption.parse_mode,
-        )
+        ))
         if safe_caption.send_full_text_after:
-            await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))
-        return
+            sent_messages.extend(_message_ids(await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))))
+        return PublishResult(message_ids=sent_messages)
 
-    await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))
+    return PublishResult(message_ids=_message_ids(await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))))
 
 
 async def run_scheduled_publishing(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -201,19 +221,28 @@ async def run_scheduled_publishing(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     settings = context.application.bot_data["settings"]
     db: DraftDatabase = context.application.bot_data["db"]
+    recovered_count = db.recover_stuck_publishing_drafts()
+    if recovered_count:
+        logger.warning(
+            "scheduled_publish recovered_stale_publishing count=%s status_transition=publishing->failed",
+            recovered_count,
+        )
     due_drafts = db.get_due_scheduled_drafts()
+    logger.info("scheduled_publish scan due_count=%s", len(due_drafts))
 
     for draft in due_drafts:
         draft_id = int(draft["id"])
+        logger.info("scheduled_publish claim_attempt draft_id=%s status_transition=scheduled->publishing", draft_id)
         if not db.mark_draft_publishing(draft_id):
-            logger.info("Skipping draft %s because it is no longer scheduled", draft_id)
+            logger.info("scheduled_publish claim_skip draft_id=%s reason=status_changed", draft_id)
             continue
+        logger.info("scheduled_publish claim_success draft_id=%s status_transition=scheduled->publishing", draft_id)
         refreshed = db.get_draft(draft_id)
         if not refreshed:
-            logger.warning("Draft %s disappeared after publishing lock", draft_id)
+            logger.warning("scheduled_publish draft_missing_after_claim draft_id=%s", draft_id)
             continue
         try:
-            await publish_to_channel(
+            result = await publish_to_channel(
                 context.bot,
                 settings.channel_id,
                 refreshed["content"],
@@ -222,8 +251,13 @@ async def run_scheduled_publishing(context: ContextTypes.DEFAULT_TYPE) -> None:
                 settings.custom_emoji_map,
                 settings.custom_emoji_aliases,
             )
-        except Exception:
-            logger.exception("Scheduled publishing failed for draft %s", draft_id)
-            db.mark_draft_failed(draft_id)
+        except Exception as exc:
+            logger.exception("scheduled_publish failure draft_id=%s status_transition=publishing->failed", draft_id)
+            db.mark_draft_failed(draft_id, error=type(exc).__name__)
             continue
-        db.mark_draft_published(draft_id)
+        db.mark_draft_published(draft_id, channel_id=settings.channel_id, message_ids=result.message_ids)
+        logger.info(
+            "scheduled_publish success draft_id=%s status_transition=publishing->published message_count=%s",
+            draft_id,
+            len(result.message_ids),
+        )

@@ -3271,7 +3271,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     await _edit_callback_message(query, f"Черновик #{draft_id} не найден.")
                     return
             try:
-                await publish_to_channel(
+                publish_result = await publish_to_channel(
                     context.bot,
                     settings.channel_id,
                     draft_to_publish["content"],
@@ -3280,11 +3280,11 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                     settings.custom_emoji_map,
                     settings.custom_emoji_aliases,
                 )
-            except Exception:
+            except Exception as exc:
                 if was_scheduled:
-                    db.mark_draft_failed(draft_id)
+                    db.mark_draft_failed(draft_id, error=type(exc).__name__)
                 raise
-            db.mark_draft_published(draft_id)
+            db.mark_draft_published(draft_id, channel_id=settings.channel_id, message_ids=publish_result.message_ids)
             await _edit_callback_message(query, f"✅ Черновик #{draft_id} опубликован в канал.")
 
         elif action == "schedule":

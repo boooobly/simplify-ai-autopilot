@@ -63,6 +63,11 @@ class DraftDatabase:
                     media_type TEXT,
                     status TEXT NOT NULL DEFAULT 'draft',
                     scheduled_at TIMESTAMP,
+                    publishing_started_at TIMESTAMP,
+                    published_at TIMESTAMP,
+                    published_channel_id TEXT,
+                    published_message_ids TEXT,
+                    publish_error TEXT,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
@@ -71,6 +76,11 @@ class DraftDatabase:
             self._ensure_column(conn, "drafts", "source_url", "TEXT")
             self._ensure_column(conn, "drafts", "source_image_url", "TEXT")
             self._ensure_column(conn, "drafts", "scheduled_at", "TIMESTAMP")
+            self._ensure_column(conn, "drafts", "publishing_started_at", "TIMESTAMP")
+            self._ensure_column(conn, "drafts", "published_at", "TIMESTAMP")
+            self._ensure_column(conn, "drafts", "published_channel_id", "TEXT")
+            self._ensure_column(conn, "drafts", "published_message_ids", "TEXT")
+            self._ensure_column(conn, "drafts", "publish_error", "TEXT")
             self._ensure_column(conn, "drafts", "media_url", "TEXT")
             self._ensure_column(conn, "drafts", "media_type", "TEXT")
             conn.execute(
@@ -569,7 +579,11 @@ class DraftDatabase:
             conn.execute(
                 """
                 UPDATE drafts
-                SET status = 'scheduled', scheduled_at = ?, updated_at = CURRENT_TIMESTAMP
+                SET status = 'scheduled',
+                    scheduled_at = ?,
+                    publishing_started_at = NULL,
+                    publish_error = NULL,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """,
                 (scheduled_at_utc, draft_id),
@@ -623,7 +637,10 @@ class DraftDatabase:
             cursor = conn.execute(
                 """
                 UPDATE drafts
-                SET status = 'publishing', updated_at = CURRENT_TIMESTAMP
+                SET status = 'publishing',
+                    publishing_started_at = CURRENT_TIMESTAMP,
+                    publish_error = NULL,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND status = 'scheduled'
                 """,
                 (draft_id,),
@@ -631,27 +648,46 @@ class DraftDatabase:
             conn.commit()
             return cursor.rowcount == 1
 
-    def mark_draft_published(self, draft_id: int) -> None:
+    def mark_draft_published(
+        self,
+        draft_id: int,
+        *,
+        channel_id: str | None = None,
+        message_ids: list[int] | None = None,
+    ) -> None:
+        serialized_message_ids = ",".join(str(message_id) for message_id in (message_ids or [])) or None
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE drafts
-                SET status = 'published', scheduled_at = NULL, updated_at = CURRENT_TIMESTAMP
+                SET status = 'published',
+                    scheduled_at = NULL,
+                    publishing_started_at = NULL,
+                    published_at = COALESCE(published_at, CURRENT_TIMESTAMP),
+                    published_channel_id = COALESCE(?, published_channel_id),
+                    published_message_ids = COALESCE(?, published_message_ids),
+                    publish_error = NULL,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """,
-                (draft_id,),
+                (channel_id, serialized_message_ids, draft_id),
             )
             conn.commit()
 
-    def mark_draft_failed(self, draft_id: int) -> None:
+    def mark_draft_failed(self, draft_id: int, error: str | None = None) -> None:
+        stored_error = (error or "").strip()[:1000] or None
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE drafts
-                SET status = 'failed', updated_at = CURRENT_TIMESTAMP
+                SET status = 'failed',
+                    scheduled_at = NULL,
+                    publishing_started_at = NULL,
+                    publish_error = COALESCE(?, publish_error),
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """,
-                (draft_id,),
+                (stored_error, draft_id),
             )
             conn.commit()
 
@@ -669,14 +705,21 @@ class DraftDatabase:
             ).fetchall()
             return [dict(row) for row in rows]
 
-    def recover_stuck_publishing_drafts(self) -> int:
+    def recover_stuck_publishing_drafts(self, stale_after_minutes: int = 30) -> int:
+        cutoff = f"-{max(0, int(stale_after_minutes))} minutes"
         with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE drafts
-                SET status = 'failed', scheduled_at = NULL, updated_at = CURRENT_TIMESTAMP
+                SET status = 'failed',
+                    scheduled_at = NULL,
+                    publishing_started_at = NULL,
+                    publish_error = 'Recovered from stale publishing state; verify Telegram channel before retrying.',
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE status = 'publishing'
-                """
+                  AND (publishing_started_at IS NULL OR publishing_started_at <= datetime('now', ?))
+                """,
+                (cutoff,),
             )
             conn.commit()
             return cursor.rowcount
@@ -686,7 +729,11 @@ class DraftDatabase:
             cursor = conn.execute(
                 """
                 UPDATE drafts
-                SET status = 'draft', scheduled_at = NULL, updated_at = CURRENT_TIMESTAMP
+                SET status = 'draft',
+                    scheduled_at = NULL,
+                    publishing_started_at = NULL,
+                    publish_error = NULL,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND status = 'failed'
                 """,
                 (draft_id,),
