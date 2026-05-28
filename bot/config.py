@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 import re
+import tempfile
 
 from dotenv import load_dotenv
 
@@ -61,6 +63,14 @@ class Settings:
 
 
 TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+RAILWAY_ENV_MARKERS = ("RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID")
+DEFAULT_DB_PATH = "data/drafts.db"
+RAILWAY_DEFAULT_DB_WARNING = (
+    "DB_PATH указывает на локальный data/drafts.db. На Railway без persistent volume "
+    "SQLite-база с черновиками, отложенными публикациями, источниками и историей может "
+    "потеряться после redeploy. Подключи Railway Volume и задай DB_PATH=/data/drafts.db "
+    "или другой путь внутри mounted volume."
+)
 
 
 class ConfigWarningCollector:
@@ -223,12 +233,34 @@ def _validate_channel_id(channel_id: str) -> str:
     raise ValueError("CHANNEL_ID должен быть @username канала или числовым id вида -100..., а не invite-ссылкой.")
 
 
-def _detect_railway_with_local_db_path(db_path: str) -> bool:
-    is_railway = any(os.getenv(name, "").strip() for name in ("RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID"))
-    if not is_railway:
-        return False
+def _is_railway_environment() -> bool:
+    return any(os.getenv(name, "").strip() for name in RAILWAY_ENV_MARKERS)
+
+
+def _is_default_local_db_path(db_path: str) -> bool:
     normalized = db_path.strip().replace("\\", "/").lower()
-    return normalized in {"data/drafts.db", "./data/drafts.db"}
+    return normalized in {DEFAULT_DB_PATH, f"./{DEFAULT_DB_PATH}"}
+
+
+def _detect_railway_with_local_db_path(db_path: str) -> bool:
+    return _is_railway_environment() and _is_default_local_db_path(db_path)
+
+
+def _validate_db_path_parent(db_path: str) -> None:
+    db_file = Path(db_path).expanduser()
+    parent = db_file.parent if str(db_file.parent) else Path(".")
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValueError(f"DB_PATH parent directory cannot be created: {parent} ({exc})") from exc
+    if not parent.is_dir():
+        raise ValueError(f"DB_PATH parent path exists but is not a directory: {parent}")
+    try:
+        with tempfile.NamedTemporaryFile(prefix=".db-path-check-", dir=parent, delete=True) as probe:
+            probe.write(b"ok")
+            probe.flush()
+    except OSError as exc:
+        raise ValueError(f"DB_PATH parent directory is not writable: {parent} ({exc})") from exc
 
 
 def _ai_provider_label(openrouter_api_key: str | None, openai_api_key: str | None) -> str:
@@ -268,10 +300,8 @@ def startup_diagnostics(settings: Settings) -> list[str]:
     ]
     for warning in settings.config_warnings:
         lines.append(f"CONFIG WARNING: {warning}")
-    if _detect_railway_with_local_db_path(settings.db_path):
-        lines.append(
-            "Внимание: DB_PATH указывает на локальный data/drafts.db. На Railway без persistent volume база может потеряться после redeploy. Лучше использовать путь volume, например /data/drafts.db."
-        )
+    if _detect_railway_with_local_db_path(settings.db_path) and RAILWAY_DEFAULT_DB_WARNING not in settings.config_warnings:
+        lines.append(f"CONFIG WARNING: {RAILWAY_DEFAULT_DB_WARNING}")
     return lines
 
 
@@ -295,6 +325,9 @@ def load_settings() -> Settings:
     db_path = os.getenv("DB_PATH", "data/drafts.db").strip() or "data/drafts.db"
     strict_config = _parse_bool_env("STRICT_CONFIG", False)
     config_warnings = ConfigWarningCollector(strict=strict_config)
+    if _detect_railway_with_local_db_path(db_path):
+        config_warnings.add(RAILWAY_DEFAULT_DB_WARNING)
+    _validate_db_path_parent(db_path)
     openrouter_input_cost_per_1m = _parse_float_env("OPENROUTER_INPUT_COST_PER_1M", 0.0, config_warnings)
     openrouter_output_cost_per_1m = _parse_float_env("OPENROUTER_OUTPUT_COST_PER_1M", 0.0, config_warnings)
     openai_input_cost_per_1m = _parse_float_env("OPENAI_INPUT_COST_PER_1M", 0.0, config_warnings)

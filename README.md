@@ -194,11 +194,13 @@ python main.py
 ```
 
 Важно:
-- Разворачивай бота как **worker/background service** (долгоживущий процесс).
+- Разворачивай бота как **один worker/background process** (долгоживущий процесс с long polling), а не как web server. `PORT`, который Railway обычно выдаёт web-сервисам, боту не нужен.
+- Не запускай несколько экземпляров бота одновременно: до отдельного PR с DB-level lease/idempotency несколько workers могут продублировать отложенную публикацию.
 - Для приватных каналов используй числовой `CHANNEL_ID` вида `-100...` (а не invite-ссылку).
-- Если нужно сохранять черновики и отложенные публикации после рестарта, размести SQLite-файл на persistent storage / volume и укажи путь через `DB_PATH` (например, `/data/drafts.db`).
+- SQLite хранит черновики, отложенные публикации, источники, состояние сборщиков и операционную историю. Для Railway обязательно подключи persistent storage / volume и укажи путь через `DB_PATH` (рекомендуется `/data/drafts.db` или другой путь внутри mounted volume).
 - SQLite в боте использует WAL и `busy_timeout` для более надёжной работы при частых обращениях к базе, но WAL не заменяет persistent storage.
-- На Railway путь `data/drafts.db`/`./data/drafts.db` без volume не персистентный: база может потеряться после redeploy.
+- На Railway путь `data/drafts.db`/`./data/drafts.db` без volume не персистентный: база может потеряться после redeploy. В обычном режиме бот покажет startup warning, а при `STRICT_CONFIG=1` завершится с ошибкой, если Railway обнаружен и `DB_PATH` оставлен локальным значением по умолчанию.
+- При старте бот проверяет, что родительская директория `DB_PATH` существует или может быть создана и доступна для записи; эта проверка не создаёт бизнес-таблицы.
 - Отложенные публикации проверяются каждые 60 секунд.
 - Задай переменные окружения в настройках проекта Railway:
   - `BOT_TOKEN`
@@ -210,7 +212,8 @@ python main.py
   - `MODEL_POLISH`
   - `OPENROUTER_SITE_URL` (опционально)
   - `OPENROUTER_APP_NAME` (опционально)
-  - `DB_PATH` (опционально; по умолчанию `data/drafts.db`)
+  - `DB_PATH=/data/drafts.db` (или другой путь на mounted volume; локальный default `data/drafts.db` только для разработки)
+  - `STRICT_CONFIG=1` (рекомендуется для production, чтобы unsafe Railway/SQLite config не запускался)
 
 ## Безопасность
 
