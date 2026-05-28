@@ -5,22 +5,19 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from bot.database import DraftDatabase
-from bot.drafts import rewrite_test_draft
-from bot.media_utils import encode_media_group, media_count
-from bot.publisher import publish_to_channel
-from bot.queue_helpers import ACTIONABLE_DRAFT_STATUSES, _queue_keyboard, _schedule_draft_to_nearest_slot
+from bot.media_utils import media_count
+from bot.queue_helpers import ACTIONABLE_DRAFT_STATUSES
 from bot.telegram_formatting import strip_quote_markers
 from bot.writer import EmptyAIResponseError
 
 logger = logging.getLogger(__name__)
-
-EMPTY_AI_REPLY_TEXT = "Модель вернула пустой ответ. Черновик не создан. Попробуй ещё раз или смени MODEL_DRAFT."
 
 REWRITE_DRAFT_ACTIONS = {
     "rewrite_remove_fluff": {
@@ -80,28 +77,34 @@ def _rewrite_action_config(action: str) -> dict[str, str]:
 
 @dataclass(frozen=True)
 class ModerationCallbackDeps:
-    edit_callback_message: object
-    schedule_keyboard: object
-    can_publish: object
-    can_schedule: object
-    can_edit: object
-    status_guard_message: object
-    regenerate_draft_from_source: object
-    build_moderation_text: object
-    moderation_keyboard: object
-    moderation_keyboard_for_draft: object
-    preview_keyboard: object
-    full_draft_text: object
-    clear_pending_edit: object
-    set_pending_edit: object
-    clear_pending_media: object
-    get_pending_media: object
-    set_pending_media: object
-    send_moderation_preview: object
-    resolve_ai_provider: object
-    run_rewrite_post_draft: object
-    run_polish_post_draft: object
-    estimate_ai_cost: object
+    edit_callback_message: Callable[..., Awaitable[None]]
+    publish_to_channel: Callable[..., Awaitable[Any]]
+    schedule_keyboard: Callable[[int, list[str]], InlineKeyboardMarkup]
+    queue_keyboard: Callable[[DraftDatabase, Any, int], InlineKeyboardMarkup]
+    schedule_draft_to_nearest_slot: Callable[[DraftDatabase, Any, int], str]
+    can_publish: Callable[[str | None], bool]
+    can_schedule: Callable[[str | None], bool]
+    can_edit: Callable[[str | None], bool]
+    status_guard_message: Callable[[str, str | None], str]
+    regenerate_draft_from_source: Callable[..., Awaitable[tuple[str | None, str | None]]]
+    build_moderation_text: Callable[..., str]
+    moderation_keyboard: Callable[..., InlineKeyboardMarkup]
+    moderation_keyboard_for_draft: Callable[[int, dict[str, object]], InlineKeyboardMarkup]
+    preview_keyboard: Callable[[int], InlineKeyboardMarkup]
+    full_draft_text: Callable[[dict[str, object]], str]
+    clear_pending_edit: Callable[[Any], None]
+    set_pending_edit: Callable[[Any, int], None]
+    clear_pending_media: Callable[[Any], None]
+    get_pending_media: Callable[[Any], int | None]
+    set_pending_media: Callable[[Any, int], None]
+    send_moderation_preview: Callable[..., Awaitable[None]]
+    resolve_ai_provider: Callable[[Any], tuple[str, str, str | None, dict[str, str] | None]]
+    run_rewrite_post_draft: Callable[..., Awaitable[Any]]
+    run_polish_post_draft: Callable[..., Awaitable[Any]]
+    rewrite_test_draft: Callable[[str], str]
+    encode_media_group: Callable[[list[dict]], str]
+    estimate_ai_cost: Callable[[str, int, int, Any], float]
+    empty_ai_reply_text: str
 
 
 async def handle_draft_moderation_callback(
@@ -143,7 +146,7 @@ async def handle_draft_moderation_callback(
                 await deps.edit_callback_message(query, f"Черновик #{draft_id} не найден.")
                 return True
         try:
-            publish_result = await publish_to_channel(
+            publish_result = await deps.publish_to_channel(
                 context.bot,
                 settings.channel_id,
                 draft_to_publish["content"],
@@ -210,14 +213,14 @@ async def handle_draft_moderation_callback(
             await deps.edit_callback_message(query, deps.status_guard_message("schedule", draft.get("status")))
             return True
         try:
-            scheduled_text = _schedule_draft_to_nearest_slot(db, settings, draft_id)
+            scheduled_text = deps.schedule_draft_to_nearest_slot(db, settings, draft_id)
         except ValueError as exc:
             await deps.edit_callback_message(query, str(exc))
             return True
         await deps.edit_callback_message(
             query,
             f"Черновик #{draft_id} поставлен в ближайший слот: {scheduled_text}",
-            reply_markup=_queue_keyboard(db, settings, 0),
+            reply_markup=deps.queue_keyboard(db, settings, 0),
         )
 
     elif action == "regenerate":
@@ -265,7 +268,7 @@ async def handle_draft_moderation_callback(
         await deps.edit_callback_message(
             query,
             "Черновик #{0} снят с очереди.".format(draft_id),
-            reply_markup=_queue_keyboard(db, settings, 0),
+            reply_markup=deps.queue_keyboard(db, settings, 0),
         )
 
     elif action == "preview":
@@ -337,7 +340,7 @@ async def handle_draft_moderation_callback(
         if not deps.can_edit(draft.get("status")):
             await deps.edit_callback_message(query, deps.status_guard_message("edit", draft.get("status")))
             return True
-        rewritten = rewrite_test_draft(draft["content"])
+        rewritten = deps.rewrite_test_draft(draft["content"])
         db.update_draft_content(draft_id, rewritten)
         db.update_status(draft_id, "draft")
         await deps.edit_callback_message(
@@ -432,7 +435,7 @@ async def handle_draft_moderation_callback(
         if len(items) == 1:
             db.attach_media(draft_id, items[0]["file_id"], items[0]["type"])
         else:
-            db.attach_media(draft_id, encode_media_group(items[:10]), "media_group")
+            db.attach_media(draft_id, deps.encode_media_group(items[:10]), "media_group")
         db.update_status(draft_id, "draft")
         deps.clear_pending_media(context)
         await deps.edit_callback_message(query, f"Готово. Медиа прикреплено к черновику #{draft_id}: {len(items)} файл(ов).")
@@ -538,7 +541,7 @@ async def handle_draft_moderation_callback(
                 extra_headers=extra_headers,
             )
         except EmptyAIResponseError:
-            await deps.edit_callback_message(query, EMPTY_AI_REPLY_TEXT.replace("Черновик не создан", "Черновик не обновлён"))
+            await deps.edit_callback_message(query, deps.empty_ai_reply_text.replace("Черновик не создан", "Черновик не обновлён"))
             return True
         estimated_cost = deps.estimate_ai_cost(provider, rewritten.prompt_tokens, rewritten.completion_tokens, settings)
         db.record_ai_usage(

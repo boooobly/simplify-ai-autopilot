@@ -27,8 +27,9 @@ from bot.cleanup_handlers import (
     _store_cleanup_preview,
     handle_cleanup_callback,
 )
-from bot.drafts import create_test_draft
-from bot.media_utils import decode_media_items, media_count
+from bot.drafts import create_test_draft, rewrite_test_draft
+from bot.media_utils import decode_media_items, encode_media_group, media_count
+from bot.publisher import publish_to_channel
 from bot.moderation_handlers import (
     ModerationCallbackDeps,
     _rewrite_action_config,
@@ -3239,7 +3240,10 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             slot,
             ModerationCallbackDeps(
                 edit_callback_message=_edit_callback_message,
+                publish_to_channel=publish_to_channel,
                 schedule_keyboard=_schedule_keyboard,
+                queue_keyboard=_queue_keyboard,
+                schedule_draft_to_nearest_slot=_schedule_draft_to_nearest_slot,
                 can_publish=_can_publish,
                 can_schedule=_can_schedule,
                 can_edit=_can_edit,
@@ -3259,7 +3263,10 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 resolve_ai_provider=_resolve_ai_provider,
                 run_rewrite_post_draft=_run_rewrite_post_draft,
                 run_polish_post_draft=_run_polish_post_draft,
+                rewrite_test_draft=rewrite_test_draft,
+                encode_media_group=encode_media_group,
                 estimate_ai_cost=estimate_ai_cost,
+                empty_ai_reply_text=EMPTY_AI_REPLY_TEXT,
             ),
         )
         if not handled:

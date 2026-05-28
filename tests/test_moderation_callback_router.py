@@ -64,3 +64,9 @@ def test_moderation_callback_dispatches_draft_card_callbacks(monkeypatch):
     assert draft_id == 42
     assert slot == "09:30"
     assert deps.edit_callback_message is handlers._edit_callback_message
+    assert deps.publish_to_channel is handlers.publish_to_channel
+    assert deps.queue_keyboard is handlers._queue_keyboard
+    assert deps.schedule_draft_to_nearest_slot is handlers._schedule_draft_to_nearest_slot
+    assert deps.rewrite_test_draft is handlers.rewrite_test_draft
+    assert deps.encode_media_group is handlers.encode_media_group
+    assert deps.empty_ai_reply_text is handlers.EMPTY_AI_REPLY_TEXT
