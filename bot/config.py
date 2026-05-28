@@ -52,6 +52,8 @@ class Settings:
     daily_post_slots: list[str] = field(default_factory=lambda: ["10:00", "14:00", "18:00", "21:00"])
     custom_emoji_map: dict[str, str] = field(default_factory=dict)
     custom_emoji_aliases: dict[str, tuple[str, str]] = field(default_factory=dict)
+    strict_config: bool = False
+    config_warnings: list[str] = field(default_factory=list)
 
     @property
     def has_ai_provider(self) -> bool:
@@ -59,6 +61,19 @@ class Settings:
 
 
 TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+
+
+class ConfigWarningCollector:
+    """Collect non-fatal configuration warnings, or fail fast in strict mode."""
+
+    def __init__(self, *, strict: bool = False) -> None:
+        self.strict = strict
+        self.warnings: list[str] = []
+
+    def add(self, message: str) -> None:
+        if self.strict:
+            raise ValueError(message)
+        self.warnings.append(message)
 
 
 def _parse_bool_env(name: str, default: bool = False) -> bool:
@@ -84,42 +99,64 @@ def _parse_csv_env(name: str) -> list[str]:
     return values
 
 
-def _parse_int_env(name: str, default: int) -> int:
+def _parse_int_env(name: str, default: int, warnings: ConfigWarningCollector | None = None) -> int:
     raw = os.getenv(name, "").strip()
     if not raw:
         return default
     try:
         return int(raw)
     except ValueError:
+        if warnings is not None:
+            warnings.add(f"{name} has invalid integer value; using default {default}.")
         return default
 
 
-
-def _parse_int_range_env(name: str, default: int, min_value: int, max_value: int) -> int:
-    value = _parse_int_env(name, default)
+def _parse_int_range_env(
+    name: str,
+    default: int,
+    min_value: int,
+    max_value: int,
+    warnings: ConfigWarningCollector | None = None,
+) -> int:
+    raw = os.getenv(name, "").strip()
+    value = _parse_int_env(name, default, warnings)
+    if not raw:
+        return value
     if value < min_value or value > max_value:
+        if warnings is not None:
+            warnings.add(f"{name} must be between {min_value} and {max_value}; using default {default}.")
         return default
     return value
 
-def _parse_float_env(name: str, default: float) -> float:
+
+def _parse_float_env(name: str, default: float, warnings: ConfigWarningCollector | None = None) -> float:
     raw = os.getenv(name, "").strip()
     if not raw:
         return default
     try:
         return float(raw)
     except ValueError:
+        if warnings is not None:
+            warnings.add(f"{name} has invalid numeric value; using default {default}.")
         return default
 
 
-
-def _parse_daily_post_slots(raw: str) -> list[str]:
+def _parse_daily_post_slots(raw: str, warnings: ConfigWarningCollector | None = None) -> list[str]:
     default_slots = ["10:00", "14:00", "18:00", "21:00"]
     slot_re = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
     slots: list[str] = []
+    invalid_count = 0
     for part in raw.split(","):
         value = part.strip()
-        if value and slot_re.match(value):
+        if not value:
+            continue
+        if slot_re.match(value):
             slots.append(value)
+        else:
+            invalid_count += 1
+    if invalid_count and warnings is not None:
+        fallback = default_slots if not slots else slots
+        warnings.add(f"DAILY_POST_SLOTS contains {invalid_count} invalid time slots; using {', '.join(fallback)}.")
     return slots or default_slots
 
 
@@ -128,37 +165,49 @@ CHANNEL_USERNAME_RE = re.compile(r"^@[A-Za-z0-9_]{5,}$")
 CHANNEL_NUMERIC_ID_RE = re.compile(r"^-?\d+$")
 
 
-def _parse_custom_emoji_map(raw: str) -> dict[str, str]:
+def _parse_custom_emoji_map(raw: str, warnings: ConfigWarningCollector | None = None) -> dict[str, str]:
     result: dict[str, str] = {}
+    skipped = 0
     for part in raw.split(";"):
         item = part.strip()
-        if not item or "|" not in item:
+        if not item:
+            continue
+        if "|" not in item:
+            skipped += 1
             continue
         fallback_emoji, custom_emoji_id = item.split("|", 1)
         fallback_emoji = fallback_emoji.strip()
         custom_emoji_id = custom_emoji_id.strip()
         if not fallback_emoji or not custom_emoji_id.isdigit():
+            skipped += 1
             continue
         result[fallback_emoji] = custom_emoji_id
+    if skipped and warnings is not None:
+        warnings.add(f"CUSTOM_EMOJI_MAP has {skipped} malformed entries; skipped invalid entries.")
     return result
 
 
-
-def _parse_custom_emoji_aliases(raw: str) -> dict[str, tuple[str, str]]:
+def _parse_custom_emoji_aliases(raw: str, warnings: ConfigWarningCollector | None = None) -> dict[str, tuple[str, str]]:
     result: dict[str, tuple[str, str]] = {}
+    skipped = 0
     for part in raw.split(";"):
         item = part.strip()
         if not item:
             continue
         pieces = item.split("|", 2)
         if len(pieces) != 3:
+            skipped += 1
             continue
         alias, fallback_emoji, custom_emoji_id = (piece.strip() for piece in pieces)
         if not ALIAS_RE.match(alias):
+            skipped += 1
             continue
         if not fallback_emoji or not custom_emoji_id.isdigit():
+            skipped += 1
             continue
         result[alias] = (fallback_emoji, custom_emoji_id)
+    if skipped and warnings is not None:
+        warnings.add(f"CUSTOM_EMOJI_ALIASES has {skipped} malformed entries; skipped invalid entries.")
     return result
 
 
@@ -215,12 +264,16 @@ def startup_diagnostics(settings: Settings) -> list[str]:
         f"CHANNEL_ID type: {channel_type}",
         f"custom emoji aliases count: {len(settings.custom_emoji_aliases)}",
         f"custom emoji map count: {len(settings.custom_emoji_map)}",
+        f"strict_config: {settings.strict_config}",
     ]
+    for warning in settings.config_warnings:
+        lines.append(f"CONFIG WARNING: {warning}")
     if _detect_railway_with_local_db_path(settings.db_path):
         lines.append(
             "Внимание: DB_PATH указывает на локальный data/drafts.db. На Railway без persistent volume база может потеряться после redeploy. Лучше использовать путь volume, например /data/drafts.db."
         )
     return lines
+
 
 def load_settings() -> Settings:
     """Load and validate all required environment variables."""
@@ -240,38 +293,65 @@ def load_settings() -> Settings:
     openrouter_app_name = os.getenv("OPENROUTER_APP_NAME", "Simplify AI Autopilot").strip() or "Simplify AI Autopilot"
     schedule_timezone = os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow").strip() or "Europe/Moscow"
     db_path = os.getenv("DB_PATH", "data/drafts.db").strip() or "data/drafts.db"
-    openrouter_input_cost_per_1m = _parse_float_env("OPENROUTER_INPUT_COST_PER_1M", 0.0)
-    openrouter_output_cost_per_1m = _parse_float_env("OPENROUTER_OUTPUT_COST_PER_1M", 0.0)
-    openai_input_cost_per_1m = _parse_float_env("OPENAI_INPUT_COST_PER_1M", 0.0)
-    openai_output_cost_per_1m = _parse_float_env("OPENAI_OUTPUT_COST_PER_1M", 0.0)
+    strict_config = _parse_bool_env("STRICT_CONFIG", False)
+    config_warnings = ConfigWarningCollector(strict=strict_config)
+    openrouter_input_cost_per_1m = _parse_float_env("OPENROUTER_INPUT_COST_PER_1M", 0.0, config_warnings)
+    openrouter_output_cost_per_1m = _parse_float_env("OPENROUTER_OUTPUT_COST_PER_1M", 0.0, config_warnings)
+    openai_input_cost_per_1m = _parse_float_env("OPENAI_INPUT_COST_PER_1M", 0.0, config_warnings)
+    openai_output_cost_per_1m = _parse_float_env("OPENAI_OUTPUT_COST_PER_1M", 0.0, config_warnings)
     daily_post_slots_raw = os.getenv("DAILY_POST_SLOTS", "10:00,14:00,18:00,21:00")
-    daily_post_slots = _parse_daily_post_slots(daily_post_slots_raw)
-    custom_emoji_map = _parse_custom_emoji_map(os.getenv("CUSTOM_EMOJI_MAP", ""))
-    custom_emoji_aliases = _parse_custom_emoji_aliases(os.getenv("CUSTOM_EMOJI_ALIASES", ""))
-    max_topic_age_days = _parse_int_range_env("MAX_TOPIC_AGE_DAYS", 14, 1, 60)
-    topic_ai_enrich_limit = _parse_int_range_env("TOPIC_AI_ENRICH_LIMIT", 8, 0, 30)
-    topic_ai_translate_limit = _parse_int_range_env("TOPIC_AI_TRANSLATE_LIMIT", 8, 0, 30)
+    daily_post_slots = _parse_daily_post_slots(daily_post_slots_raw, config_warnings)
+    custom_emoji_map = _parse_custom_emoji_map(os.getenv("CUSTOM_EMOJI_MAP", ""), config_warnings)
+    custom_emoji_aliases = _parse_custom_emoji_aliases(os.getenv("CUSTOM_EMOJI_ALIASES", ""), config_warnings)
+    max_topic_age_days = _parse_int_range_env("MAX_TOPIC_AGE_DAYS", 14, 1, 60, config_warnings)
+    topic_ai_enrich_limit = _parse_int_range_env("TOPIC_AI_ENRICH_LIMIT", 8, 0, 30, config_warnings)
+    topic_ai_translate_limit = _parse_int_range_env("TOPIC_AI_TRANSLATE_LIMIT", 8, 0, 30, config_warnings)
     enable_reddit_sources = _parse_bool_env("ENABLE_REDDIT_SOURCES", False)
     enable_x_sources = _parse_bool_env("ENABLE_X_SOURCES", False)
     x_api_bearer_token = os.getenv("X_API_BEARER_TOKEN", "").strip()
     x_accounts = _parse_csv_env("X_ACCOUNTS")
-    x_max_posts_per_account = _parse_int_range_env("X_MAX_POSTS_PER_ACCOUNT", 5, 1, 20)
+    x_max_posts_per_account = _parse_int_range_env("X_MAX_POSTS_PER_ACCOUNT", 5, 1, 20, config_warnings)
+    if enable_x_sources and (not x_api_bearer_token or not x_accounts):
+        missing_x = []
+        if not x_api_bearer_token:
+            missing_x.append("X_API_BEARER_TOKEN")
+        if not x_accounts:
+            missing_x.append("X_ACCOUNTS")
+        config_warnings.add(f"ENABLE_X_SOURCES is true but {', '.join(missing_x)} is not configured; X sources will not work until configured.")
     enable_telegram_channel_sources = _parse_bool_env("ENABLE_TELEGRAM_CHANNEL_SOURCES", False)
     telegram_api_id_raw = os.getenv("TELEGRAM_API_ID", "").strip()
+    if telegram_api_id_raw and not telegram_api_id_raw.isdigit():
+        config_warnings.add("TELEGRAM_API_ID has invalid integer value; using no Telegram API id.")
     telegram_api_id = int(telegram_api_id_raw) if telegram_api_id_raw.isdigit() else None
     telegram_api_hash = os.getenv("TELEGRAM_API_HASH", "").strip()
     telegram_session_string = os.getenv("TELEGRAM_SESSION_STRING", "").strip()
     telegram_source_channels = _parse_csv_env("TELEGRAM_SOURCE_CHANNELS")
-    telegram_source_lookback_hours = _parse_int_range_env("TELEGRAM_SOURCE_LOOKBACK_HOURS", 24, 1, 168)
-    telegram_source_max_posts_per_channel = _parse_int_range_env("TELEGRAM_SOURCE_MAX_POSTS_PER_CHANNEL", 20, 1, 100)
+    telegram_source_lookback_hours = _parse_int_range_env("TELEGRAM_SOURCE_LOOKBACK_HOURS", 24, 1, 168, config_warnings)
+    telegram_source_max_posts_per_channel = _parse_int_range_env("TELEGRAM_SOURCE_MAX_POSTS_PER_CHANNEL", 20, 1, 100, config_warnings)
+    if enable_telegram_channel_sources and (not telegram_api_id or not telegram_api_hash or not telegram_session_string or not telegram_source_channels):
+        missing_telegram = []
+        if not telegram_api_id:
+            missing_telegram.append("TELEGRAM_API_ID")
+        if not telegram_api_hash:
+            missing_telegram.append("TELEGRAM_API_HASH")
+        if not telegram_session_string:
+            missing_telegram.append("TELEGRAM_SESSION_STRING")
+        if not telegram_source_channels:
+            missing_telegram.append("TELEGRAM_SOURCE_CHANNELS")
+        config_warnings.add(
+            f"ENABLE_TELEGRAM_CHANNEL_SOURCES is true but {', '.join(missing_telegram)} is not configured; Telegram channel sources will not work until configured."
+        )
 
-    post_max_chars = _parse_int_env("POST_MAX_CHARS", 1400)
-    post_soft_chars = _parse_int_env("POST_SOFT_CHARS", 1100)
+    post_max_chars = _parse_int_env("POST_MAX_CHARS", 1400, config_warnings)
+    post_soft_chars = _parse_int_env("POST_SOFT_CHARS", 1100, config_warnings)
     if post_max_chars < 500:
+        config_warnings.add("POST_MAX_CHARS must be at least 500; using default 1400.")
         post_max_chars = 1400
     if post_soft_chars < 400:
+        config_warnings.add("POST_SOFT_CHARS must be at least 400; using default 1100.")
         post_soft_chars = 1100
     if post_soft_chars > post_max_chars:
+        config_warnings.add("POST_SOFT_CHARS is greater than POST_MAX_CHARS; using POST_MAX_CHARS value.")
         post_soft_chars = post_max_chars
 
     missing = []
@@ -329,4 +409,6 @@ def load_settings() -> Settings:
         daily_post_slots=daily_post_slots,
         custom_emoji_map=custom_emoji_map,
         custom_emoji_aliases=custom_emoji_aliases,
+        strict_config=strict_config,
+        config_warnings=list(config_warnings.warnings),
     )
