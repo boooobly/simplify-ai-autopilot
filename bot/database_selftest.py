@@ -28,7 +28,7 @@ def _create_with_status(db: DraftDatabase, status: str) -> int:
         assert db.mark_draft_publishing(draft_id) is True
         return draft_id
     if status == "published":
-        db.mark_draft_published(draft_id)
+        db.mark_draft_published(draft_id, channel_id="channel", message_ids=[101, 102])
         return draft_id
     db.update_status(draft_id, status)
     return draft_id
@@ -48,7 +48,14 @@ def _assert_database_settings(db: DraftDatabase) -> None:
         assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
         topic_columns = {row["name"] for row in conn.execute("PRAGMA table_info(topic_candidates)").fetchall()}
         draft_columns = {row["name"] for row in conn.execute("PRAGMA table_info(drafts)").fetchall()}
-        assert "source_image_url" in draft_columns
+        assert {
+            "source_image_url",
+            "publishing_started_at",
+            "published_at",
+            "published_channel_id",
+            "published_message_ids",
+            "publish_error",
+        } <= draft_columns
         assert {"title_ru", "summary_ru", "angle_ru", "reason_ru", "original_description"} <= topic_columns
 
 
@@ -77,10 +84,12 @@ def _assert_basic_draft_flow(db: DraftDatabase) -> None:
     publishing_drafts = db.list_publishing_drafts()
     assert [draft["id"] for draft in publishing_drafts] == [draft_id]
 
-    db.mark_draft_failed(draft_id)
+    db.mark_draft_failed(draft_id, error="test failure")
     failed = db.get_draft(draft_id)
     assert failed is not None
     assert failed["status"] == "failed"
+    assert failed["scheduled_at"] is None
+    assert failed["publish_error"] == "test failure"
 
     assert db.restore_draft(draft_id) is True
     restored = db.get_draft(draft_id)
@@ -95,7 +104,7 @@ def _assert_publishing_recovery(db: DraftDatabase) -> None:
     db.schedule_draft(draft_id, "2000-01-01 00:00:00")
     assert db.mark_draft_publishing(draft_id) is True
 
-    recovered_count = db.recover_stuck_publishing_drafts()
+    recovered_count = db.recover_stuck_publishing_drafts(stale_after_minutes=0)
     assert recovered_count == 1
     recovered = db.get_draft(draft_id)
     assert recovered is not None
