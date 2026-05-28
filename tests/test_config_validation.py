@@ -30,6 +30,10 @@ _OPTIONAL_ENV_NAMES = [
     "TELEGRAM_SOURCE_CHANNELS",
     "CUSTOM_EMOJI_MAP",
     "CUSTOM_EMOJI_ALIASES",
+    "DB_PATH",
+    "RAILWAY_ENVIRONMENT",
+    "RAILWAY_PROJECT_ID",
+    "RAILWAY_SERVICE_ID",
 ]
 
 
@@ -107,4 +111,55 @@ def test_enabled_telegram_channel_sources_without_credentials_raises_in_strict_m
     monkeypatch.setenv("ENABLE_TELEGRAM_CHANNEL_SOURCES", "true")
 
     with pytest.raises(ValueError, match="ENABLE_TELEGRAM_CHANNEL_SOURCES"):
+        load_settings()
+
+
+def test_railway_default_db_path_warns_in_non_strict_mode(monkeypatch):
+    _clean_config_env(monkeypatch)
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    monkeypatch.setenv("DB_PATH", "data/drafts.db")
+
+    settings = load_settings()
+
+    assert any(
+        "Railway" in warning and "DB_PATH" in warning and "/data/drafts.db" in warning
+        for warning in settings.config_warnings
+    )
+    assert any(
+        "CONFIG WARNING:" in line and "DB_PATH" in line
+        for line in startup_diagnostics(settings)
+    )
+
+
+def test_railway_default_db_path_raises_in_strict_mode(monkeypatch):
+    _clean_config_env(monkeypatch)
+    monkeypatch.setenv("RAILWAY_PROJECT_ID", "project-id")
+    monkeypatch.setenv("DB_PATH", "./data/drafts.db")
+    monkeypatch.setenv("STRICT_CONFIG", "1")
+
+    with pytest.raises(ValueError, match="DB_PATH.*Railway"):
+        load_settings()
+
+
+def test_railway_custom_db_path_does_not_warn_or_fail(monkeypatch, tmp_path):
+    _clean_config_env(monkeypatch)
+    custom_db_path = tmp_path / "volume" / "drafts.db"
+    monkeypatch.setenv("RAILWAY_SERVICE_ID", "service-id")
+    monkeypatch.setenv("DB_PATH", str(custom_db_path))
+    monkeypatch.setenv("STRICT_CONFIG", "1")
+
+    settings = load_settings()
+
+    assert settings.db_path == str(custom_db_path)
+    assert not any("persistent volume" in warning for warning in settings.config_warnings)
+    assert custom_db_path.parent.is_dir()
+
+
+def test_db_path_parent_validation_fails_when_parent_is_file(monkeypatch, tmp_path):
+    _clean_config_env(monkeypatch)
+    file_parent = tmp_path / "not-a-directory"
+    file_parent.write_text("already a file", encoding="utf-8")
+    monkeypatch.setenv("DB_PATH", str(file_parent / "drafts.db"))
+
+    with pytest.raises(ValueError, match="DB_PATH parent"):
         load_settings()
