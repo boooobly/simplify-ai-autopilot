@@ -346,11 +346,21 @@ def build_deterministic_topic_metadata_ru(topic: object) -> dict[str, str]:
     }
 
 
+def _has_ai_metadata(topic: object) -> bool:
+    value = _topic_value(topic, "ai_value_score")
+    if value is None or value == "":
+        return False
+    try:
+        score = int(str(value).strip())
+    except (TypeError, ValueError):
+        return False
+    return 0 <= score <= 100
+
 def topic_display_title(topic: object) -> str:
     """Return the Russian display title when available, otherwise deterministic wrapper."""
     explicit = _clean_text(_topic_value(topic, "title_ru"))
     original = _clean_text(_topic_value(topic, "title"))
-    if explicit and not is_weak_topic_metadata(explicit, _topic_value(topic, "summary_ru"), _topic_value(topic, "angle_ru"), original_title=original):
+    if explicit and (_has_ai_metadata(topic) or not is_weak_topic_metadata(explicit, _topic_value(topic, "summary_ru"), _topic_value(topic, "angle_ru"), original_title=original)):
         return explicit
     metadata = build_deterministic_topic_metadata_ru(topic)
     return metadata.get("title_ru") or explicit or original or "Без названия"
@@ -359,7 +369,7 @@ def topic_display_title(topic: object) -> str:
 def topic_display_reason(topic: object) -> str:
     """Return the Russian display reason when available, otherwise deterministic scoring context."""
     explicit = _clean_text(_topic_value(topic, "reason_ru"))
-    if explicit and "Нужен ручной просмотр" not in explicit:
+    if explicit and (_has_ai_metadata(topic) or "Нужен ручной просмотр" not in explicit):
         return explicit
     metadata = build_deterministic_topic_metadata_ru(topic)
     return metadata.get("reason_ru") or explicit or _clean_text(_topic_value(topic, "reason")) or "без пояснения"
@@ -371,7 +381,7 @@ MANUAL_REVIEW_NOTE_RU = "Нужен ручной просмотр: не удал
 def topic_summary_ru(topic: object) -> str:
     """Return topic-specific Russian summary with deterministic fallback."""
     explicit = _clean_text(_topic_value(topic, "summary_ru"))
-    if explicit and "Нужен ручной просмотр" not in explicit:
+    if explicit and (_has_ai_metadata(topic) or "Нужен ручной просмотр" not in explicit):
         return explicit
     metadata = build_deterministic_topic_metadata_ru(topic)
     return metadata.get("summary_ru") or explicit or MANUAL_REVIEW_NOTE_RU
@@ -380,7 +390,7 @@ def topic_summary_ru(topic: object) -> str:
 def topic_angle_ru(topic: object) -> str:
     """Return Russian post-angle suggestion with deterministic fallback."""
     explicit = _clean_text(_topic_value(topic, "angle_ru"))
-    if explicit and "AI-обогащение не дало" not in explicit and "проверь тему вручную" not in explicit:
+    if explicit and (_has_ai_metadata(topic) or ("AI-обогащение не дало" not in explicit and "проверь тему вручную" not in explicit)):
         return explicit
     metadata = build_deterministic_topic_metadata_ru(topic)
     return metadata.get("angle_ru") or explicit or "Сначала открой источник и вручную проверь смысл темы: AI-обогащение не дало понятный русский ракурс."

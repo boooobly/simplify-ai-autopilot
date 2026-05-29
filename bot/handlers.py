@@ -80,7 +80,7 @@ from bot.topic_handlers import (
 )
 
 
-from bot.topic_scoring import hybrid_topic_score
+from bot.topic_scoring import canonical_topic_key, hybrid_topic_score
 from bot.sources import (
     COMMUNITY_RSS,
     OFFICIAL_AI_RSS,
@@ -140,6 +140,9 @@ def _apply_topic_enrichment_fallback(item, db: DraftDatabase, *, force: bool = F
         item.summary_ru = metadata["summary_ru"]
         item.angle_ru = metadata["angle_ru"]
         item.reason_ru = metadata["reason_ru"]
+        setattr(item, "ai_value_score", None)
+        setattr(item, "ai_value_reason_ru", None)
+        setattr(item, "audience_fit_ru", None)
         setattr(item, "_deterministic_fallback_used", True)
     else:
         item.title_ru = item.title_ru or metadata["title_ru"]
@@ -162,6 +165,7 @@ def _apply_topic_enrichment_fallback(item, db: DraftDatabase, *, force: bool = F
                 summary_ru=item.summary_ru,
                 angle_ru=item.angle_ru,
                 reason_ru=item.reason_ru or "",
+                clear_ai_value=True,
             )
         else:
             db.update_topic_candidate_display_fields(
@@ -271,6 +275,7 @@ class TopicCollectStats:
     ai_enrichment_json_mode_unsupported: int = 0
     ai_enrichment_model: str = ""
     skipped_examples: dict[str, list[str]] | None = None
+    ai_enrichment_selected: list[str] | None = None
 
     @property
     def enrichment_failed(self) -> int:
@@ -453,7 +458,7 @@ def _lane_label_ru(lane: str | None) -> str:
 
 
 def _format_label_ru(fmt: str | None) -> str:
-    mapping = {"post":"пост","short_video":"короткое видео","meme":"мем","tool_review":"обзор сервиса","guide":"гайд","news":"новость"}
+    mapping = {"post":"пост","short_video":"короткое видео","meme":"мем","tool_review":"обзор сервиса","guide":"гайд","news":"новость","tool":"инструмент","video":"видео","fail":"фейл","github":"GitHub","telegram":"Telegram"}
     return mapping.get((fmt or "").strip().lower(), "пост")
 
 
@@ -993,7 +998,16 @@ def _combined_topic_reason_ru(deterministic_reason_ru: str, ai_reason_ru: str = 
 
 def _parse_topic_metadata_result_content(content: str) -> dict[str, str] | None:
     values = _parse_topic_metadata_fields(content)
-    if all(values.get(k) for k in ("title_ru", "summary_ru", "angle_ru", "reason_ru")):
+    required = (
+        "title_ru",
+        "summary_ru",
+        "angle_ru",
+        "reason_ru",
+        "ai_value_score",
+        "ai_value_reason_ru",
+        "audience_fit_ru",
+    )
+    if all(values.get(k) for k in required) and _parse_ai_value_score(values.get("ai_value_score")) is not None:
         return values
     return None
 
@@ -1048,13 +1062,15 @@ async def _reenrich_topic_candidate_display_metadata(
     angle_ru = parsed["angle_ru"]
     ai_score = _parse_ai_value_score(parsed.get("ai_value_score"))
     content_format = (parsed.get("content_format") or "").strip()[:40]
-    deterministic_reason_ru = str(topic.get("reason_ru") or parsed["reason_ru"] or "")
+    ai_value_reason_ru = (parsed.get("ai_value_reason_ru") or "").strip()[:180]
+    audience_fit_ru = (parsed.get("audience_fit_ru") or "").strip()[:180]
+    deterministic_reason_ru = str(parsed["reason_ru"] or topic.get("reason_ru") or "")
     final_score = hybrid_topic_score(int(topic.get("deterministic_score") or topic.get("score") or 0), ai_score)
     reason_ru = (
         _combined_topic_reason_ru(
             deterministic_reason_ru,
-            parsed.get("ai_value_reason_ru", ""),
-            parsed.get("audience_fit_ru", ""),
+            ai_value_reason_ru,
+            audience_fit_ru,
         )
         if ai_score is not None
         else parsed["reason_ru"]
@@ -1073,6 +1089,9 @@ async def _reenrich_topic_candidate_display_metadata(
         reason_ru=reason_ru,
         score=final_score if ai_score is not None else None,
         content_format=content_format,
+        ai_value_score=ai_score,
+        ai_value_reason_ru=ai_value_reason_ru,
+        audience_fit_ru=audience_fit_ru,
     )
     estimated_cost = estimate_ai_cost(provider, result.prompt_tokens, result.completion_tokens, settings)
     db.record_ai_usage(
@@ -1174,13 +1193,15 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
     angle_ru = parsed["angle_ru"]
     ai_score = _parse_ai_value_score(parsed.get("ai_value_score"))
     content_format = (parsed.get("content_format") or "").strip()[:40]
+    ai_value_reason_ru = (parsed.get("ai_value_reason_ru") or "").strip()[:180]
+    audience_fit_ru = (parsed.get("audience_fit_ru") or "").strip()[:180]
     deterministic_reason_ru = existing_reason_ru or item.reason_ru or parsed["reason_ru"]
     final_score = hybrid_topic_score(item.score, ai_score)
     reason_ru = (
         _combined_topic_reason_ru(
             deterministic_reason_ru,
-            parsed.get("ai_value_reason_ru", ""),
-            parsed.get("audience_fit_ru", ""),
+            ai_value_reason_ru,
+            audience_fit_ru,
         )
         if ai_score is not None
         else parsed["reason_ru"]
@@ -1204,6 +1225,10 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
         item.summary_ru = summary_ru
         item.angle_ru = angle_ru
         item.reason_ru = reason_ru
+        setattr(item, "ai_value_score", ai_score)
+        setattr(item, "ai_value_reason_ru", ai_value_reason_ru)
+        setattr(item, "audience_fit_ru", audience_fit_ru)
+        setattr(item, "content_format", content_format)
         if ai_score is not None:
             item.score = final_score
         db.force_update_topic_candidate_display_fields(
@@ -1214,12 +1239,19 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
             reason_ru=reason_ru,
             score=final_score if ai_score is not None else None,
             content_format=content_format,
+            ai_value_score=ai_score,
+            ai_value_reason_ru=ai_value_reason_ru,
+            audience_fit_ru=audience_fit_ru,
         )
     else:
         item.title_ru = existing_title_ru or title_ru
         item.summary_ru = existing_summary_ru or summary_ru
         item.angle_ru = existing_angle_ru or angle_ru
         item.reason_ru = reason_ru if ai_score is not None else (existing_reason_ru or reason_ru)
+        setattr(item, "ai_value_score", ai_score)
+        setattr(item, "ai_value_reason_ru", ai_value_reason_ru)
+        setattr(item, "audience_fit_ru", audience_fit_ru)
+        setattr(item, "content_format", content_format)
         if ai_score is not None:
             item.score = final_score
         db.update_topic_candidate_display_fields(
@@ -1230,6 +1262,9 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
             reason_ru=reason_ru,
             score=final_score if ai_score is not None else None,
             content_format=content_format,
+            ai_value_score=ai_score,
+            ai_value_reason_ru=ai_value_reason_ru,
+            audience_fit_ru=audience_fit_ru,
         )
     estimated_cost = estimate_ai_cost(provider, result.prompt_tokens, result.completion_tokens, settings)
     db.record_ai_usage(
@@ -2596,29 +2631,82 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
 def _topic_candidate_keys(item) -> list[str]:
     keys: list[str] = []
     for attr in ("id", "url", "canonical_key", "normalized_title", "title"):
-        value = str(getattr(item, attr, "") or "").strip().casefold()
+        raw_value = item.get(attr, "") if isinstance(item, dict) else getattr(item, attr, "")
+        value = str(raw_value or "").strip().casefold()
         if value:
             keys.append(f"{attr}:{value}")
+    if not any(key.startswith("canonical_key:") for key in keys):
+        title = str((item.get("title", "") if isinstance(item, dict) else getattr(item, "title", "")) or "")
+        source_group = str((item.get("source_group", "") if isinstance(item, dict) else getattr(item, "source_group", "")) or "")
+        canonical = canonical_topic_key(title, source_group).strip().casefold()
+        if canonical:
+            keys.append(f"canonical_key:{canonical}")
     return keys or [f"object:{id(item)}"]
+
+
+def _dedupe_topic_items_by_identity(candidates: list) -> list:
+    seen: set[str] = set()
+    unique: list = []
+    for item in candidates:
+        keys = _topic_candidate_keys(item)
+        if any(key in seen for key in keys):
+            continue
+        seen.update(keys)
+        unique.append(item)
+    return unique
 
 
 def select_topic_ai_enrichment_candidates(candidates: list, limit: int) -> tuple[list, int]:
     """Select the highest-value unique topic-card enrichment candidates.
 
     Pure helper: no DB/network access. It deduplicates by URL/canonical-ish key and
-    prefers high-scoring fresh/hot topics before the caller invokes the AI provider.
+    preserves the caller's final-preview ranking. Callers should pass already ranked
+    preview candidates, not raw collection items.
     """
+    unique = _dedupe_topic_items_by_identity(candidates)
     if limit <= 0:
-        return [], len(candidates)
-    seen: set[str] = set()
-    unique: list = []
-    for item in sorted(candidates, key=lambda i: int(getattr(i, "score", 0) or 0), reverse=True):
-        keys = _topic_candidate_keys(item)
-        if any(key in seen for key in keys):
-            continue
-        seen.update(keys)
-        unique.append(item)
+        return [], len(unique)
     return unique[:limit], max(0, len(unique) - limit)
+
+
+def _is_ai_enriched_topic(topic: object) -> bool:
+    value = topic.get("ai_value_score") if isinstance(topic, dict) else getattr(topic, "ai_value_score", None)
+    return _parse_ai_value_score(value) is not None
+
+
+def _topic_ai_marker(topic: object) -> str:
+    return "[AI]" if _is_ai_enriched_topic(topic) else "[fallback]"
+
+
+def _collect_preview_candidates(inserted: list, accepted_items: list) -> list:
+    """Return and mark the exact ranked candidate pool used by /collect preview sections."""
+    top_new = sorted(inserted, key=lambda i: int(getattr(i, "score", 0) or 0), reverse=True)[:5]
+    lively = [
+        i
+        for i in sorted(accepted_items, key=lambda i: int(getattr(i, "score", 0) or 0), reverse=True)
+        if int(getattr(i, "score", 0) or 0) >= 50
+        and (
+            getattr(i, "source_group", "") in {"community", "github", "x", "tools", "custom"}
+            or getattr(i, "category", "") in {"drama", "meme", "guide", "creator"}
+        )
+    ][:5]
+    for index, item in enumerate(top_new):
+        setattr(item, "_collect_preview_top_new", True)
+        setattr(item, "_collect_preview_top_new_order", index)
+    for index, item in enumerate(lively):
+        setattr(item, "_collect_preview_lively", True)
+        setattr(item, "_collect_preview_lively_order", index)
+    return _dedupe_topic_items_by_identity([*top_new, *lively])
+
+
+def _short_debug_topic_label(item) -> str:
+    score = int(getattr(item, "score", 0) or 0)
+    title = str(getattr(item, "title", "") or getattr(item, "title_ru", "") or "").strip()
+    if len(title) > 72:
+        title = title[:71].rstrip() + "…"
+    topic_id = getattr(item, "id", None)
+    prefix = f"#{topic_id} " if topic_id else ""
+    return f"- {prefix}{score} {getattr(item, 'source', '')}: {title}"
 
 
 def _topic_ai_zero_reason_ru(stats: TopicCollectStats) -> str:
@@ -2657,7 +2745,7 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
     stats = TopicCollectStats(total=len(items), source_seconds=source_seconds)
     stats.skipped_examples = {"low_score": [], "stale": [], "spam": [], "invalid": []}
     inserted = []
-    enrichment_candidates = []
+    accepted_items = []
     skipped_existing_metadata = 0
     spam_words = ["casino", "porn", "xxx", "bet", "viagra", "airdrop", "token presale"]
     max_topic_age_days = int(getattr(settings, "max_topic_age_days", 14) or 14)
@@ -2714,28 +2802,19 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
             stats.near_duplicate += 1
         if result in {"inserted", "existing_url", "merged_story"} and item.score >= 50:
             stored_topic = db.find_topic_candidate_by_url(item.url)
+            if stored_topic:
+                setattr(item, "id", stored_topic.get("id"))
+                setattr(item, "canonical_key", stored_topic.get("canonical_key") or canonical_topic_key(item.title, item.source_group))
+                setattr(item, "ai_value_score", stored_topic.get("ai_value_score"))
+                setattr(item, "ai_value_reason_ru", stored_topic.get("ai_value_reason_ru"))
+                setattr(item, "audience_fit_ru", stored_topic.get("audience_fit_ru"))
+                setattr(item, "content_format", stored_topic.get("content_format"))
+            setattr(item, "_accepted_for_preview", True)
+            accepted_items.append(item)
             stored_title_ru = str(stored_topic.get("title_ru") or "") if stored_topic else (item.title_ru or "")
             stored_summary_ru = str(stored_topic.get("summary_ru") or "") if stored_topic else (item.summary_ru or "")
             stored_angle_ru = str(stored_topic.get("angle_ru") or "") if stored_topic else (item.angle_ru or "")
-            needs_enrichment = needs_ai_enrichment_initial or not (stored_title_ru and stored_summary_ru and stored_angle_ru) or is_weak_topic_metadata(
-                stored_title_ru,
-                stored_summary_ru,
-                stored_angle_ru,
-                original_title=item.title,
-            )
-            if (
-                item.source_group == "github"
-                and stored_title_ru
-                and stored_summary_ru
-                and stored_angle_ru
-                and stored_title_ru == (item.title_ru or "")
-                and stored_summary_ru == (item.summary_ru or "")
-                and stored_angle_ru == (item.angle_ru or "")
-            ):
-                needs_enrichment = True
-            if needs_enrichment and (not stored_topic or str(stored_topic.get("status") or "new") == "new"):
-                enrichment_candidates.append(item)
-            elif not needs_enrichment:
+            if not is_weak_topic_metadata(stored_title_ru, stored_summary_ru, stored_angle_ru, original_title=item.title):
                 skipped_existing_metadata += 1
     stats.store_seconds = time.monotonic() - store_started
     stats.ai_enrichment_skipped_existing_metadata = skipped_existing_metadata
@@ -2744,18 +2823,20 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
     stats.ai_enrich_limit = max(0, min(30, enrich_limit))
     stats.ai_enrichment_model = _topic_enrich_model(settings) if settings else ""
     ai_started = time.monotonic()
-    if not enrichment_candidates:
+    preview_candidates = _collect_preview_candidates(inserted, accepted_items)
+    selected_candidates, skipped_by_limit_count = select_topic_ai_enrichment_candidates(preview_candidates, stats.ai_enrich_limit)
+    stats.ai_enrichment_selected = [_short_debug_topic_label(item) for item in selected_candidates]
+    if not preview_candidates:
         stats.ai_enrichment_skipped_no_candidates = 1
     elif not (settings and getattr(settings, "has_ai_provider", False)):
-        stats.ai_enrichment_skipped_no_provider = len(enrichment_candidates)
-        if enrichment_candidates:
-            logger.info("Topic metadata AI enrichment skipped: no AI provider for %s candidates; deterministic fallback is used", len(enrichment_candidates))
+        stats.ai_enrichment_skipped_no_provider = len(preview_candidates)
+        if preview_candidates:
+            logger.info("Topic metadata AI enrichment skipped: no AI provider for %s final preview candidates; deterministic fallback is used", len(preview_candidates))
     elif stats.ai_enrich_limit <= 0:
-        stats.ai_enrichment_skipped_limit = len(enrichment_candidates)
-        if enrichment_candidates:
-            logger.info("Topic metadata AI enrichment skipped: enrichment limit reached/disabled for %s candidates", len(enrichment_candidates))
+        stats.ai_enrichment_skipped_limit = len(preview_candidates)
+        if preview_candidates:
+            logger.info("Topic metadata AI enrichment skipped: enrichment limit reached/disabled for %s final preview candidates", len(preview_candidates))
     else:
-        selected_candidates, skipped_by_limit_count = select_topic_ai_enrichment_candidates(enrichment_candidates, stats.ai_enrich_limit)
         stats.ai_enrichment_skipped_limit = skipped_by_limit_count
         if skipped_by_limit_count:
             logger.info("Topic metadata AI enrichment skipped: enrichment limit reached for %s candidates", skipped_by_limit_count)
@@ -2816,13 +2897,24 @@ def _render_sources_health(db: DraftDatabase) -> str:
     return source_handlers.render_sources_health(db)
 
 
-def _render_collect_topic_line(topic) -> list[str]:
-    preview = topic_compact_preview_ru(topic, max_len=160).splitlines()
-    score = int(getattr(topic, "score", 0) or 0) if not isinstance(topic, dict) else int(topic.get("score") or 0)
-    category = getattr(topic, "category", None) if not isinstance(topic, dict) else topic.get("category")
-    title = preview[0] if preview else topic_display_title(topic)
-    details = preview[1:] or [f"  О чем: {topic_summary_ru(topic)}"]
-    return [f"- {score} - {_category_label(category)} - {title}", *details]
+def _topic_get(topic, key: str, default=None):
+    return topic.get(key, default) if isinstance(topic, dict) else getattr(topic, key, default)
+
+
+def _render_collect_topic_line(topic, *, debug: bool = False) -> list[str]:
+    score = int(_topic_get(topic, "score", 0) or 0)
+    category = _topic_get(topic, "category")
+    title = topic_display_title(topic)
+    marker = f" {_topic_ai_marker(topic)}" if debug else ""
+    lines = [
+        f"- {score} - {_category_label(category)} - {title}{marker}",
+        f"  О чем: {topic_summary_ru(topic)}",
+        f"  Идея: {topic_angle_ru(topic)}",
+    ]
+    content_format = str(_topic_get(topic, "content_format", "") or "").strip()
+    if content_format:
+        lines.append(f"  Формат: {_format_label_ru(content_format)}")
+    return lines
 
 
 def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list, debug: bool = False) -> str:
@@ -2867,6 +2959,10 @@ def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list, 
                 "",
             ]
         )
+        if stats.ai_enrichment_selected:
+            lines.append("Выбраны для AI-обогащения:")
+            lines.extend(stats.ai_enrichment_selected[:8])
+            lines.append("")
         if stats.skipped_examples:
             lines.append("Примеры пропусков:")
             labels = {"low_score": "low_score", "stale": "stale", "spam": "spam", "invalid": "invalid"}
@@ -2877,20 +2973,37 @@ def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list, 
                 lines.append(f"{labels[key]}:")
                 lines.extend(examples[:2])
             lines.append("")
+    displayed_preview_topics = []
     if inserted:
-        top = sorted(inserted, key=lambda i: i.score, reverse=True)[:5]
+        marked_top = [i for i in inserted if getattr(i, "_collect_preview_top_new", False)]
+        top = sorted(marked_top, key=lambda i: getattr(i, "_collect_preview_top_new_order", 999)) if marked_top else sorted(inserted, key=lambda i: i.score, reverse=True)[:5]
+        displayed_preview_topics.extend(top)
         lines.append("Лучшие новые:")
         for item in top:
-            lines.extend(_render_collect_topic_line(item))
+            lines.extend(_render_collect_topic_line(item, debug=debug))
     else:
         lines.append("Новых сильных тем нет. Посмотри старые через /topics_all или добавь источники в CUSTOM_TOPIC_FEEDS.")
-    lively = [i for i in sorted(items, key=lambda i: i.score, reverse=True) if i.score >= 50 and (i.source_group in {"community","github","x","tools","custom"} or i.category in {"drama","meme","guide","creator"})][:5]
+    preview_source_items = [i for i in items if getattr(i, "_accepted_for_preview", False)] or items
+    marked_lively = [i for i in preview_source_items if getattr(i, "_collect_preview_lively", False)]
+    lively = (
+        sorted(marked_lively, key=lambda i: getattr(i, "_collect_preview_lively_order", 999))
+        if marked_lively
+        else [i for i in sorted(preview_source_items, key=lambda i: i.score, reverse=True) if i.score >= 50 and (i.source_group in {"community","github","x","tools","custom"} or i.category in {"drama","meme","guide","creator"})][:5]
+    )
     lines.extend(["", "Живые темы:"])
     if lively:
+        displayed_preview_topics.extend(lively)
         for item in lively:
-            lines.extend(_render_collect_topic_line(item))
+            lines.extend(_render_collect_topic_line(item, debug=debug))
     else:
         lines.append("- пока нет")
+    if debug:
+        unique_displayed = _dedupe_topic_items_by_identity(displayed_preview_topics)
+        ai_count = sum(1 for item in unique_displayed if _is_ai_enriched_topic(item))
+        fallback_count = max(0, len(unique_displayed) - ai_count)
+        lines.extend(["", f"Покрытие preview: [AI] {ai_count}, [fallback] {fallback_count}"])
+        if stats.ai_enriched and ai_count == 0:
+            lines.append("AI enriched topics are not present in preview list. Check enrichment candidate selection.")
     return "\n".join(lines)
 
 

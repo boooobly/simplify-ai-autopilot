@@ -338,10 +338,21 @@ def _parse_topic_metadata_fields(content: str) -> dict[str, str]:
     return values
 
 
+def _parse_topic_ai_value_score(value: object) -> int | None:
+    text = str(value or "").strip()
+    if not re.fullmatch(r"\d{1,3}", text):
+        return None
+    score = int(text)
+    return score if 0 <= score <= 100 else None
+
+
 def _topic_metadata_failure_reason(values: dict[str, str], title_ru: str = "", original_title: str = "") -> str:
-    missing = [key for key in ("title_ru", "summary_ru", "angle_ru", "reason_ru") if not values.get(key)]
+    required = ("title_ru", "summary_ru", "angle_ru", "reason_ru", "ai_value_score", "ai_value_reason_ru", "audience_fit_ru")
+    missing = [key for key in required if not values.get(key)]
     if missing:
         return "missing fields: " + ", ".join(missing)
+    if _parse_topic_ai_value_score(values.get("ai_value_score")) is None:
+        return "invalid ai_value_score"
     if original_title and _normalize_topic_text_for_compare(title_ru) == _normalize_topic_text_for_compare(original_title):
         return "title equals original English title"
     if _is_mostly_english_text(title_ru):
@@ -401,7 +412,7 @@ def enrich_topic_metadata_ru(
         "Пиши только по-русски, кроме неизменяемых имен. "
         "Верни только strict JSON object без markdown и комментариев. "
         "Обязательные поля: title_ru, summary_ru, angle_ru, reason_ru, ai_value_score, ai_value_reason_ru, audience_fit_ru. "
-        "Опционально можно добавить content_format. "
+        "Опционально можно добавить content_format: news, tool, video, meme, guide, fail, github, telegram или other. "
         "title_ru должен быть понятным с первого взгляда русским заголовком, а не буквальным переводом. "
         "summary_ru в 1-2 коротких предложениях ясно объясняет тему на русском; нельзя просто копировать английский description. "
         "angle_ru предлагает спокойный редакционный угол для @simplify_ai. "
@@ -427,7 +438,7 @@ def enrich_topic_metadata_ru(
         "Пример плохого TITLE: LLMs-from-scratch - open-source проект: Implement a ChatGPT-like LLM in PyTorch from scratch, step by step\n\n"
         "Верни JSON ровно такого вида:\n"
         "{\"title_ru\":\"...\",\"summary_ru\":\"...\",\"angle_ru\":\"...\",\"reason_ru\":\"...\","
-        "\"ai_value_score\":80,\"ai_value_reason_ru\":\"...\",\"audience_fit_ru\":\"...\",\"content_format\":\"news|tool|github|telegram|other\"}"
+        "\"ai_value_score\":80,\"ai_value_reason_ru\":\"...\",\"audience_fit_ru\":\"...\",\"content_format\":\"news|tool|video|meme|guide|fail|github|telegram|other\"}"
     )
     try:
         try:
@@ -464,7 +475,8 @@ def enrich_topic_metadata_ru(
         logger.warning("Topic metadata enrichment provider failed: model=%s reason=%s", model, exc)
         return None
     values = _parse_topic_metadata_fields(result.content)
-    if not all(values.get(k) for k in ("title_ru", "summary_ru", "angle_ru", "reason_ru")):
+    required_fields = ("title_ru", "summary_ru", "angle_ru", "reason_ru", "ai_value_score", "ai_value_reason_ru", "audience_fit_ru")
+    if not all(values.get(k) for k in required_fields) or _parse_topic_ai_value_score(values.get("ai_value_score")) is None:
         invalid_kind = _topic_metadata_invalid_kind(result.content, values)
         _increment_topic_metadata_diagnostic(diagnostics, f"ai_{invalid_kind}")
         _log_invalid_topic_metadata(model, clean_title, _topic_metadata_failure_reason(values), result.content)

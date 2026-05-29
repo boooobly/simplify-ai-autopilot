@@ -91,6 +91,50 @@ def run() -> None:
     assert hybrid_topic_score(65, 90) > 65
     assert hybrid_topic_score(85, 40) < 85
 
+    marktech_devops, marktech_category, marktech_reason = score_topic(
+        "How to Design an End-to-End Ansible Automation Lab with AI Agents",
+        "MarkTechPost",
+        "https://www.marktechpost.com/ansible-automation-lab/",
+        "tech_media",
+        description="A long tutorial about DevOps infrastructure and Ansible automation.",
+        published_at="2026-05-12 00:00:00",
+    )
+    assert marktech_devops < 60
+    assert "MarkTechPost" in marktech_reason or "техническая" in marktech_reason or "devops" in marktech_reason
+
+    major_release, major_category, _ = score_topic(
+        "Anthropic releases Claude Opus 4.8 with Dynamic Workflows for AI agents",
+        "Anthropic news",
+        "https://anthropic.com/news/claude-opus-4-8",
+        "official_ai",
+        description="A major model update with new agent workflows for users.",
+        published_at="2026-05-12 00:00:00",
+    )
+    assert major_release >= 75
+    assert major_category in {"agent", "model", "news"}
+
+    product_hunt_tool, product_category, _ = score_topic(
+        "ClipMagic AI turns long videos into Shorts automatically",
+        "Product Hunt",
+        "https://producthunt.com/posts/clipmagic-ai",
+        "tools",
+        description="AI app for creators that makes short clips from videos.",
+        published_at="2026-05-12 00:00:00",
+    )
+    assert product_hunt_tool >= 75
+    assert product_category in {"creator", "tool", "mobile"}
+
+    github_opaque, _, github_reason = score_topic(
+        "GitHub Trending: owner / vector-kernel-bench",
+        "GitHub Trending AI",
+        "https://github.com/owner/vector-kernel-bench",
+        "github",
+        description="Kernel benchmark library for vector database internals",
+        stars_today="800 stars today",
+    )
+    assert github_opaque < 75
+    assert "узко" in github_reason or "GitHub" in github_reason
+
 
 if __name__ == "__main__":
     run()
