@@ -80,17 +80,21 @@ def _generate_with_chat_completion(
     base_url: str | None = None,
     extra_headers: dict[str, str] | None = None,
     max_tokens: int = 900,
+    response_format: dict[str, str] | None = None,
 ) -> GenerationResult:
     client = _build_client(api_key=api_key, base_url=base_url)
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
+    request_kwargs = {
+        "model": model,
+        "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        max_tokens=max_tokens,
-        extra_headers=extra_headers,
-    )
+        "max_tokens": max_tokens,
+        "extra_headers": extra_headers,
+    }
+    if response_format is not None:
+        request_kwargs["response_format"] = response_format
+    response = client.chat.completions.create(**request_kwargs)
     choice = response.choices[0]
     finish_reason = choice.finish_reason
     message_content = choice.message.content
@@ -178,6 +182,52 @@ def _strip_topic_metadata_markdown(content: str) -> str:
     return text
 
 
+def _extract_first_balanced_json_object(content: str) -> str | None:
+    """Return the first balanced JSON object found in a model response."""
+    text = content or ""
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        in_string = False
+        escape = False
+        for index in range(start, len(text)):
+            ch = text[index]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : index + 1]
+        start = text.find("{", start + 1)
+    return None
+
+
+def _topic_metadata_json_payload(content: str) -> dict | None:
+    cleaned = _strip_topic_metadata_markdown(content)
+    candidates = [cleaned]
+    balanced = _extract_first_balanced_json_object(cleaned)
+    if balanced and balanced != cleaned:
+        candidates.append(balanced)
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
 def _clean_topic_metadata_value(value: object) -> str:
     text = str(value or "").strip()
     text = re.sub(r"^[-*•]+\s*", "", text).strip()
@@ -199,10 +249,7 @@ def _topic_metadata_key_map() -> dict[str, str]:
 
 
 def _parse_topic_metadata_json(content: str, field_map: dict[str, str]) -> dict[str, str]:
-    try:
-        payload = json.loads(content)
-    except json.JSONDecodeError:
-        return {}
+    payload = _topic_metadata_json_payload(content)
     if not isinstance(payload, dict):
         return {}
     values: dict[str, str] = {}
@@ -312,6 +359,28 @@ def _log_invalid_topic_metadata(model: str, original_title: str, reason: str, ra
     )
 
 
+def _increment_topic_metadata_diagnostic(diagnostics: dict[str, int] | None, key: str) -> None:
+    if diagnostics is not None:
+        diagnostics[key] = int(diagnostics.get(key, 0) or 0) + 1
+
+
+def _looks_like_response_format_unsupported(exc: Exception) -> bool:
+    message = str(exc).casefold()
+    return (
+        "response_format" in message
+        or "json mode" in message
+        or "json_object" in message
+        or "extra inputs are not permitted" in message
+        or "unexpected keyword argument" in message
+    )
+
+
+def _topic_metadata_invalid_kind(content: str, values: dict[str, str]) -> str:
+    if not _topic_metadata_json_payload(content) and not values:
+        return "invalid_json"
+    return "invalid_fields"
+
+
 def enrich_topic_metadata_ru(
     *,
     api_key: str,
@@ -321,6 +390,7 @@ def enrich_topic_metadata_ru(
     description: str | None = None,
     base_url: str | None = None,
     extra_headers: dict[str, str] | None = None,
+    diagnostics: dict[str, int] | None = None,
 ) -> GenerationResult | None:
     """Generate strict Russian topic display metadata fields."""
     clean_title = title.strip()
@@ -360,20 +430,43 @@ def enrich_topic_metadata_ru(
         "\"ai_value_score\":80,\"ai_value_reason_ru\":\"...\",\"audience_fit_ru\":\"...\",\"content_format\":\"news|tool|github|telegram|other\"}"
     )
     try:
-        result = _generate_with_chat_completion(
-            api_key=api_key,
-            model=model,
-            user_prompt=user_prompt,
-            system_prompt=system_prompt,
-            base_url=base_url,
-            extra_headers=extra_headers,
-            max_tokens=220,
-        )
+        try:
+            result = _generate_with_chat_completion(
+                api_key=api_key,
+                model=model,
+                user_prompt=user_prompt,
+                system_prompt=system_prompt,
+                base_url=base_url,
+                extra_headers=extra_headers,
+                max_tokens=220,
+                response_format={"type": "json_object"},
+            )
+        except Exception as exc:
+            if not _looks_like_response_format_unsupported(exc):
+                raise
+            _increment_topic_metadata_diagnostic(diagnostics, "ai_json_mode_unsupported")
+            logger.info(
+                "Topic metadata enrichment JSON mode unsupported: model=%s reason=%s; retrying without response_format",
+                model,
+                exc,
+            )
+            result = _generate_with_chat_completion(
+                api_key=api_key,
+                model=model,
+                user_prompt=user_prompt,
+                system_prompt=system_prompt,
+                base_url=base_url,
+                extra_headers=extra_headers,
+                max_tokens=220,
+            )
     except Exception as exc:
-        logger.warning("Topic metadata enrichment failed: %s", exc)
+        _increment_topic_metadata_diagnostic(diagnostics, "ai_provider_errors")
+        logger.warning("Topic metadata enrichment provider failed: model=%s reason=%s", model, exc)
         return None
     values = _parse_topic_metadata_fields(result.content)
     if not all(values.get(k) for k in ("title_ru", "summary_ru", "angle_ru", "reason_ru")):
+        invalid_kind = _topic_metadata_invalid_kind(result.content, values)
+        _increment_topic_metadata_diagnostic(diagnostics, f"ai_{invalid_kind}")
         _log_invalid_topic_metadata(model, clean_title, _topic_metadata_failure_reason(values), result.content)
         return None
     title_ru = values["title_ru"][:180]
@@ -385,6 +478,7 @@ def enrich_topic_metadata_ru(
     audience_fit_ru = values.get("audience_fit_ru", "")[:180]
     content_format = values.get("content_format", "")[:40]
     if not _looks_like_useful_russian_metadata(title_ru, summary_ru, angle_ru, original_title=clean_title):
+        _increment_topic_metadata_diagnostic(diagnostics, "ai_invalid_fields")
         _log_invalid_topic_metadata(
             model,
             clean_title,

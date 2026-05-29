@@ -1276,6 +1276,12 @@ async def _run_collect_ai_diagnostics_selftest() -> None:
     text_no_provider = _render_collect_text(stats_no_provider, [item], inserted_no_provider, debug=True)
     assert stats_no_provider.ai_enrichment_skipped_no_provider == 1
     assert "не настроен провайдер" in text_no_provider
+    assert "ai_enrichment_attempted=0" in text_no_provider
+    assert "ai_invalid_json=0" in text_no_provider
+    assert "ai_invalid_fields=0" in text_no_provider
+    assert "ai_provider_errors=0" in text_no_provider
+    assert "ai_json_mode_unsupported=0" in text_no_provider
+    assert "deterministic_fallback_used=1" in text_no_provider
     assert "ai_enrichment_skipped_no_provider=1" in text_no_provider
 
     item2 = _with_scoring(TopicItem("Useful AI product launch", "https://example.com/limit-zero", "Product Hunt", fresh_date, source_group="tools"))
@@ -1289,6 +1295,47 @@ async def _run_collect_ai_diagnostics_selftest() -> None:
     assert "TOPIC_AI_ENRICH_LIMIT=0" in text_limit
     assert "ai_enrichment_skipped_limit=1" in text_limit
     tmp.cleanup()
+
+
+async def _run_collect_partial_ai_enrichment_selftest() -> None:
+    tmp = TemporaryDirectory()
+    fresh_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    settings = _topic_settings()
+    settings.topic_ai_enrich_limit = 8
+    items = [
+        _with_scoring(TopicItem("Broken AI response topic", "https://example.com/broken-ai", "Test Source", fresh_date, source_group="tools", original_description="Useful AI tool")),
+        _with_scoring(TopicItem("Valid AI response topic", "https://example.com/valid-ai", "Test Source", fresh_date, source_group="tools", original_description="Useful AI tool")),
+    ]
+    for item in items:
+        item.score = 80
+    original_enrich = handlers._run_enrich_topic_metadata_ru
+
+    async def fake_enrich(**kwargs):
+        diagnostics = kwargs.get("diagnostics")
+        if "Broken" in kwargs["title"]:
+            if diagnostics is not None:
+                diagnostics["ai_invalid_json"] = diagnostics.get("ai_invalid_json", 0) + 1
+            return None
+        return GenerationResult(
+            content=(
+                '{"title_ru":"Валидная AI-карточка темы","summary_ru":"Модель вернула понятное русское описание для второй темы, поэтому пакет не должен падать целиком.",'
+                '"angle_ru":"Показать, что одна ошибка не ломает остальные карточки.","reason_ru":"Важная проверка надежности обогащения.",'
+                '"ai_value_score":82,"ai_value_reason_ru":"полезная тема","audience_fit_ru":"подходит аудитории"}'
+            ),
+            model=kwargs["model"],
+        )
+
+    handlers._run_enrich_topic_metadata_ru = fake_enrich
+    try:
+        stats, _, _ = await _collect_topics_with_stats(DraftDatabase(f"{tmp.name}/partial.db"), items=items, settings=settings)
+    finally:
+        handlers._run_enrich_topic_metadata_ru = original_enrich
+        tmp.cleanup()
+
+    assert stats.ai_enrichment_attempted == 2
+    assert stats.ai_enriched == 1
+    assert stats.ai_enrichment_invalid_json == 1
+    assert stats.ai_enrichment_failed == 1
 
 
 def _run_english_fallback_readable_selftest() -> None:
@@ -1415,6 +1462,7 @@ def run() -> None:
     _run_topic_ai_candidate_selection_selftest()
     asyncio.run(_run_ai_topic_card_enrichment_success_selftest())
     asyncio.run(_run_collect_ai_diagnostics_selftest())
+    asyncio.run(_run_collect_partial_ai_enrichment_selftest())
     _run_english_fallback_readable_selftest()
     _run_source_fallback_examples_selftest()
     asyncio.run(_run_topic_403_fallback_and_failure_selftest())

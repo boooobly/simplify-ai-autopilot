@@ -221,6 +221,14 @@ def _assert_topic_metadata_parser_variants() -> None:
         "reason_ru": "Fenced причина",
     }
 
+    extra_text_json = _parse_topic_metadata_fields(
+        "Вот JSON для карточки:\n"
+        '{"title_ru":"Extra заголовок","summary_ru":"Extra сводка","angle_ru":"Extra ракурс","reason_ru":"Extra причина"}'
+        "\nГотово."
+    )
+    assert extra_text_json["title_ru"] == "Extra заголовок"
+    assert extra_text_json["reason_ru"] == "Extra причина"
+
     ai_json = _parse_topic_metadata_fields(
         '{"title_ru":"JSON заголовок","summary_ru":"JSON сводка","angle_ru":"JSON ракурс","reason_ru":"JSON причина","ai_value_score":82,"ai_value_reason_ru":"AI причина","audience_fit_ru":"Подходит новичкам"}'
     )
@@ -341,6 +349,92 @@ def _assert_topic_metadata_enrichment() -> None:
     assert "strict JSON" in calls[0][1]
     assert "Не пиши пост" in calls[0][1]
     assert "Пример плохого TITLE" in calls[0][0]
+
+    def fenced_json_generate(api_key, model, user_prompt, system_prompt, base_url=None, extra_headers=None, max_tokens=900, response_format=None):
+        return GenerationResult(
+            content=(
+                "```json\n"
+                '{"title_ru":"Siri - русский заголовок про AI-редизайн","summary_ru":"Apple готовит заметное обновление Siri с более понятным AI-интерфейсом для обычных пользователей.","angle_ru":"Объяснить, зачем Apple перестраивает Siri вокруг AI-функций.","reason_ru":"Тема важна для понимания AI в iPhone."}'
+                "\n```"
+            ),
+            model=model,
+        )
+
+    writer._generate_with_chat_completion = fenced_json_generate
+    try:
+        fenced_result = enrich_topic_metadata_ru(api_key="key", model="model-x", title="Siri redesign", source="The Verge AI")
+    finally:
+        writer._generate_with_chat_completion = original
+    assert fenced_result is not None
+    assert json.loads(fenced_result.content)["summary_ru"].startswith("Apple готовит")
+
+    def extra_text_generate(api_key, model, user_prompt, system_prompt, base_url=None, extra_headers=None, max_tokens=900, response_format=None):
+        return GenerationResult(
+            content=(
+                "Конечно, вот данные:\n"
+                '{"title_ru":"ChatGPT - русская карточка обновления","summary_ru":"OpenAI обновила ChatGPT, и пользователям стоит проверить новые функции в привычном интерфейсе.","angle_ru":"Коротко разобрать, что изменится для обычных пользователей.","reason_ru":"Обновления ChatGPT часто важны для аудитории канала."}'
+                "\nЕсли нужно, могу сделать пост."
+            ),
+            model=model,
+        )
+
+    writer._generate_with_chat_completion = extra_text_generate
+    try:
+        extra_result = enrich_topic_metadata_ru(api_key="key", model="model-x", title="ChatGPT update", source="OpenAI Blog")
+    finally:
+        writer._generate_with_chat_completion = original
+    assert extra_result is not None
+    assert json.loads(extra_result.content)["title_ru"].startswith("ChatGPT")
+
+    diagnostics: dict[str, int] = {}
+
+    def missing_field_generate(api_key, model, user_prompt, system_prompt, base_url=None, extra_headers=None, max_tokens=900, response_format=None):
+        return GenerationResult(content='{"title_ru":"Русский заголовок","summary_ru":"Русская сводка","angle_ru":"Русский ракурс"}', model=model)
+
+    writer._generate_with_chat_completion = missing_field_generate
+    try:
+        assert enrich_topic_metadata_ru(api_key="key", model="model-x", title="Missing field", source="Test", diagnostics=diagnostics) is None
+    finally:
+        writer._generate_with_chat_completion = original
+    assert diagnostics["ai_invalid_fields"] == 1
+
+    diagnostics = {}
+
+    def english_summary_generate(api_key, model, user_prompt, system_prompt, base_url=None, extra_headers=None, max_tokens=900, response_format=None):
+        return GenerationResult(
+            content=(
+                '{"title_ru":"Русский заголовок про AI","summary_ru":"This update adds persistent memory for coding agents and improves real world benchmarks with developer workflow details.","angle_ru":"Русский ракурс для канала.","reason_ru":"Русская причина важности."}'
+            ),
+            model=model,
+        )
+
+    writer._generate_with_chat_completion = english_summary_generate
+    try:
+        assert enrich_topic_metadata_ru(api_key="key", model="model-x", title="English summary", source="Test", diagnostics=diagnostics) is None
+    finally:
+        writer._generate_with_chat_completion = original
+    assert diagnostics["ai_invalid_fields"] == 1
+
+    retry_calls: list[dict | None] = []
+
+    def unsupported_json_mode_generate(api_key, model, user_prompt, system_prompt, base_url=None, extra_headers=None, max_tokens=900, response_format=None):
+        retry_calls.append(response_format)
+        if response_format is not None:
+            raise TypeError("unexpected keyword argument 'response_format'")
+        return GenerationResult(
+            content='{ "title_ru":"JSON mode retry - русская карточка", "summary_ru":"После отказа JSON mode бот повторяет запрос и получает нормальные русские метаданные.", "angle_ru":"Показать устойчивость обогащения тем.", "reason_ru":"Это помогает не терять полезные темы." }',
+            model=model,
+        )
+
+    diagnostics = {}
+    writer._generate_with_chat_completion = unsupported_json_mode_generate
+    try:
+        retry_result = enrich_topic_metadata_ru(api_key="key", model="model-x", title="Retry", source="Test", diagnostics=diagnostics)
+    finally:
+        writer._generate_with_chat_completion = original
+    assert retry_result is not None
+    assert retry_calls == [{"type": "json_object"}, None]
+    assert diagnostics["ai_json_mode_unsupported"] == 1
 
     def bad_generate(api_key, model, user_prompt, system_prompt, base_url=None, extra_headers=None, max_tokens=900):
         return GenerationResult(
