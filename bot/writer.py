@@ -401,7 +401,7 @@ def enrich_topic_metadata_ru(
         "Пиши только по-русски, кроме неизменяемых имен. "
         "Верни только strict JSON object без markdown и комментариев. "
         "Обязательные поля: title_ru, summary_ru, angle_ru, reason_ru, ai_value_score, ai_value_reason_ru, audience_fit_ru. "
-        "Опционально можно добавить content_format. "
+        "Опционально можно добавить content_format: news, tool, video, meme, guide, fail, github, telegram или other. "
         "title_ru должен быть понятным с первого взгляда русским заголовком, а не буквальным переводом. "
         "summary_ru в 1-2 коротких предложениях ясно объясняет тему на русском; нельзя просто копировать английский description. "
         "angle_ru предлагает спокойный редакционный угол для @simplify_ai. "
@@ -427,7 +427,7 @@ def enrich_topic_metadata_ru(
         "Пример плохого TITLE: LLMs-from-scratch - open-source проект: Implement a ChatGPT-like LLM in PyTorch from scratch, step by step\n\n"
         "Верни JSON ровно такого вида:\n"
         "{\"title_ru\":\"...\",\"summary_ru\":\"...\",\"angle_ru\":\"...\",\"reason_ru\":\"...\","
-        "\"ai_value_score\":80,\"ai_value_reason_ru\":\"...\",\"audience_fit_ru\":\"...\",\"content_format\":\"news|tool|github|telegram|other\"}"
+        "\"ai_value_score\":80,\"ai_value_reason_ru\":\"...\",\"audience_fit_ru\":\"...\",\"content_format\":\"news|tool|video|meme|guide|fail|github|telegram|other\"}"
     )
     try:
         try:

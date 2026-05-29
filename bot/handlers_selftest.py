@@ -346,9 +346,16 @@ async def _run_collect_stats_selftest() -> None:
     handlers._enrich_topic_metadata_if_available = fake_enrich
     try:
         db_limited = DraftDatabase(f"{tmp.name}/topics-limit.db")
+        limit_titles = [
+            "OpenAI launches useful ChatGPT voice update",
+            "Anthropic releases Claude agent workflow tool",
+            "Google launches Gemini image app",
+            "Microsoft adds Copilot audio feature",
+            "Perplexity releases new research assistant",
+        ]
         limit_items = [
-            _with_scoring(TopicItem(f"OpenAI launches useful model update {idx}", f"https://example.com/limit-{idx}", "OpenAI blog", fresh_date, source_group="official_ai"))
-            for idx in range(5)
+            _with_scoring(TopicItem(title, f"https://example.com/limit-{idx}", "OpenAI blog", fresh_date, source_group="official_ai"))
+            for idx, title in enumerate(limit_titles)
         ]
         stats_limited, _items_limited, _inserted_limited = await _collect_topics_with_stats(
             db_limited,
@@ -1213,9 +1220,75 @@ def _run_topic_ai_candidate_selection_selftest() -> None:
         SimpleNamespace(id=2, url="https://example.com/b", canonical_key="same", normalized_title="same", title="B", score=95),
         SimpleNamespace(id=3, url="https://example.com/c", canonical_key="other", normalized_title="other", title="C", score=80),
     ]
-    selected, skipped = handlers.select_topic_ai_enrichment_candidates(candidates, 1)
+    selected, skipped = handlers.select_topic_ai_enrichment_candidates(sorted(candidates, key=lambda item: item.score, reverse=True), 1)
     assert [item.url for item in selected] == ["https://example.com/b"]
     assert skipped == 1
+
+
+
+def _run_topic_preview_candidate_selection_selftest() -> None:
+    inserted = [
+        SimpleNamespace(id=i, url=f"https://example.com/new-{i}", canonical_key=f"new-{i}", normalized_title=f"new {i}", title=f"New topic {i}", source="Source", source_group="official_ai", category="news", score=95 - i)
+        for i in range(6)
+    ]
+    lively = [
+        SimpleNamespace(id=20 + i, url=f"https://example.com/tool-{i}", canonical_key=f"tool-{i}", normalized_title=f"tool {i}", title=f"Tool topic {i}", source="Product Hunt", source_group="tools", category="tool", score=88 - i)
+        for i in range(5)
+    ]
+    raw_only = SimpleNamespace(id=99, url="https://example.com/raw", canonical_key="raw", normalized_title="raw", title="Raw unshown topic", source="Raw", source_group="tech_media", category="news", score=100)
+    preview = handlers._collect_preview_candidates(inserted, [*inserted, *lively, raw_only])
+    selected, skipped = handlers.select_topic_ai_enrichment_candidates(preview, 8)
+    selected_urls = {item.url for item in selected}
+    assert raw_only.url not in selected_urls
+    assert all(item.url in selected_urls for item in inserted[:5])
+    assert skipped == max(0, len(preview) - 8)
+
+
+def _run_topic_preview_ai_display_selftest() -> None:
+    topic = {
+        "id": 1,
+        "title": "Original English fallback title",
+        "url": "https://example.com/ai",
+        "source": "Test",
+        "source_group": "tech_media",
+        "category": "model",
+        "score": 91,
+        "title_ru": "Claude получил новый инструмент для агентов",
+        "summary_ru": "Anthropic добавила понятную функцию для работы с группой подагентов.",
+        "angle_ru": "Объяснить простыми словами, почему агенты становятся рабочими помощниками.",
+        "reason_ru": "Высокая ценность для аудитории.",
+        "ai_value_score": 94,
+        "content_format": "news",
+    }
+    normal = handlers._render_collect_topic_line(topic, debug=False)
+    debug = handlers._render_collect_topic_line(topic, debug=True)
+    assert "Claude получил новый инструмент" in normal[0]
+    assert "О чем: Anthropic добавила" in "\n".join(normal)
+    assert "Идея: Объяснить" in "\n".join(normal)
+    assert "[AI]" not in "\n".join(normal)
+    assert "[AI]" in "\n".join(debug)
+
+
+def _run_collect_debug_preview_coverage_selftest() -> None:
+    stats = handlers.TopicCollectStats(total=1, new=1, ai_enriched=1, ai_enrich_limit=8)
+    ai_item = SimpleNamespace(
+        id=1, title="AI source title", url="https://example.com/ai", source="OpenAI blog", published_at=None,
+        category="model", score=90, reason="", normalized_title="ai", source_group="official_ai",
+        title_ru="Русский AI-заголовок", summary_ru="Понятное русское описание темы.", angle_ru="Сделать короткий пост о пользе.",
+        reason_ru="AI оценил тему высоко.", ai_value_score=90, content_format="news",
+    )
+    text = handlers._render_collect_text(stats, [ai_item], [ai_item], debug=True)
+    assert "Покрытие preview: [AI] 1, [fallback] 0" in text
+    assert "[AI]" in text
+    fallback_stats = handlers.TopicCollectStats(total=1, new=1, ai_enriched=1, ai_enrich_limit=8)
+    fallback_item = SimpleNamespace(
+        id=2, title="Fallback title", url="https://example.com/fallback", source="Source", published_at=None,
+        category="news", score=80, reason="", normalized_title="fallback", source_group="official_ai",
+        title_ru="Новость от Source: Fallback title", summary_ru="Источник пишет про тему.", angle_ru="Проверить вручную.", reason_ru="",
+    )
+    fallback_text = handlers._render_collect_text(fallback_stats, [fallback_item], [fallback_item], debug=True)
+    assert "Покрытие preview: [AI] 0, [fallback] 1" in fallback_text
+    assert "AI enriched topics are not present in preview list. Check enrichment candidate selection." in fallback_text
 
 async def _run_ai_topic_card_enrichment_success_selftest() -> None:
     tmp = TemporaryDirectory()
@@ -1460,6 +1533,9 @@ def run() -> None:
     _run_topic_card_final_score_concise_selftest()
     asyncio.run(_run_topic_enrichment_failure_fallback_selftest())
     _run_topic_ai_candidate_selection_selftest()
+    _run_topic_preview_candidate_selection_selftest()
+    _run_topic_preview_ai_display_selftest()
+    _run_collect_debug_preview_coverage_selftest()
     asyncio.run(_run_ai_topic_card_enrichment_success_selftest())
     asyncio.run(_run_collect_ai_diagnostics_selftest())
     asyncio.run(_run_collect_partial_ai_enrichment_selftest())

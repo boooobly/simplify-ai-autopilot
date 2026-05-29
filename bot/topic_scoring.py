@@ -51,8 +51,10 @@ _CORPORATE_KEYWORDS = [
 ]
 _SPAM_KEYWORDS = ["casino", "betting", "sportsbook", "porn", "xxx", "viagra", "crypto casino", "airdrop", "token presale"]
 _RESEARCH_KEYWORDS = ["paper", "research", "arxiv", "study", "dataset", "eval", "benchmark", "исследован", "датасет"]
-_NARROW_DEV_KEYWORDS = ["library", "framework", "sdk", "api wrapper", "bindings", "kernel", "compiler", "runtime", "orm"]
+_NARROW_DEV_KEYWORDS = ["library", "framework", "sdk", "api wrapper", "bindings", "kernel", "compiler", "runtime", "orm", "kubernetes", "ansible", "devops", "pgvector", "vector database", "vector search", "semantic search", "hybrid search", "sparse", "quantized", "terraform"]
 _USER_IMPACT_KEYWORDS = ["privacy", "leak", "hack", "lawsuit", "ban", "tracking", "data breach", "утеч", "взлом", "бан", "слеж"]
+_MAJOR_AI_BRANDS = ["openai", "chatgpt", "anthropic", "claude", "google", "gemini", "meta", "llama", "perplexity", "adobe", "apple", "microsoft", "copilot", "sora", "runway", "midjourney"]
+_TECHNICAL_TUTORIAL_KEYWORDS = ["ansible", "kubernetes", "devops", "pgvector", "vector database", "vector search", "semantic search", "hybrid search", "sparse", "quantized", "benchmark", "benchmarks", "infrastructure", "deployment", "postgres", "docker", "terraform", "llmops", "rag pipeline"]
 
 
 
@@ -203,10 +205,16 @@ def score_topic(
             score += 24
             category = "privacy" if _has_any(text, ["privacy", "data", "tracking", "leak", "утеч", "слеж"]) else "drama"
             reason_parts.append("затрагивает пользователей")
+        is_technical_tutorial = _has_any(text, _TECHNICAL_TUTORIAL_KEYWORDS) and not _has_any(text, _MAJOR_AI_BRANDS + ["product hunt", "chatgpt", "consumer", "app", "tool", "video", "image", "audio"])
         if _has_any(text, ["guide", "tutorial", "prompt", "course", "курс", "гайд", "how to"]):
-            score += 18
-            category = "guide"
-            reason_parts.append("можно сделать мини-гайд")
+            if is_technical_tutorial:
+                score -= 22
+                category = "dev"
+                reason_parts.append("штраф: узкий devops/tutorial")
+            else:
+                score += 18
+                category = "guide"
+                reason_parts.append("можно сделать мини-гайд")
         if _has_any(text, ["creator", "image", "video", "audio", "voice", "avatar", "music", "design", "editor"]):
             score += 20
             category = "creator"
@@ -236,7 +244,7 @@ def score_topic(
             score += 14
             category = "meme" if category == "other" else category
             reason_parts.append("соцсети/вирусность")
-        if _has_any(text, ["gpt", "claude", "gemini", "llama", "mistral", "qwen", "model"]):
+        if _has_any(text, _MAJOR_AI_BRANDS + ["gpt", "claude", "gemini", "llama", "mistral", "qwen", "model"]):
             if _has_any(text, ["app", "tool", "api", "free", "voice", "image", "video", "faster", "cheaper", "local"]):
                 score += 12
                 reason_parts.append("модель с практическим смыслом")
@@ -244,6 +252,22 @@ def score_topic(
                 score += 6
             if category == "other":
                 category = "model"
+        if _has_any(text, _TECHNICAL_TUTORIAL_KEYWORDS) and not _has_any(text, _MAJOR_AI_BRANDS + ["product hunt", "consumer", "app", "tool", "image", "video", "audio", "agent"]):
+            score -= 18
+            if category == "other":
+                category = "dev"
+            reason_parts.append("штраф: слишком техническая тема")
+        if "marktechpost" in text and _has_any(text, _TECHNICAL_TUTORIAL_KEYWORDS + ["tutorial", "how to design", "how to build"]):
+            score -= 16
+            reason_parts.append("штраф: MarkTechPost tutorial/devops")
+        if _has_any(text, _MAJOR_AI_BRANDS) and _has_any(text, ["launch", "launched", "release", "released", "introduces", "unveils", "new", "update", "tool", "feature"]):
+            score += 16
+            reason_parts.append("крупный релиз AI-продукта")
+        if source_group == "tools" and _has_any(text, ["product hunt", "app", "tool", "service", "workflow", "image", "video", "audio", "assistant"]):
+            score += 10
+            if category == "other":
+                category = "tool"
+            reason_parts.append("практичный AI-инструмент")
         if _has_any(text, _RESEARCH_KEYWORDS):
             if _has_any(text, ["tool", "demo", "app", "benchmark", "faster", "cheaper", "open-source", "open source"]):
                 score += 6
