@@ -99,33 +99,219 @@ def is_weak_topic_metadata(
     return False
 
 
+
+_SOURCE_GROUP_LABELS_RU = {
+    "official_ai": "официального AI-блога",
+    "tech_media": "техно-медиа",
+    "ru_tech": "русского техно-медиа",
+    "tools": "каталога AI-инструментов",
+    "community": "сообщества",
+    "github": "GitHub",
+    "x": "X/Twitter",
+    "custom": "добавленного источника",
+    "telegram": "Telegram-канала",
+    "other": "источника",
+}
+
+_CATEGORY_LABELS_RU = {
+    "agent": "AI-агенты",
+    "creator": "инструменты для авторов",
+    "dev": "разработка",
+    "drama": "обсуждение/драма",
+    "fun": "развлекательная AI-тема",
+    "guide": "практический гайд",
+    "meme": "мем/сообщество",
+    "mobile": "мобильные AI-инструменты",
+    "model": "AI-модели",
+    "news": "AI-новость",
+    "research": "исследование",
+    "tool": "AI-инструмент",
+    "video": "видео/демо",
+    "other": "AI-тема",
+}
+
+_GENERIC_METADATA_FALLBACK_RU = "Нужен ручной просмотр: не удалось нормально обработать тему."
+
+
+def _shorten_sentence(value: object, max_len: int = 220) -> str:
+    text = " ".join(_clean_text(value).split())
+    if len(text) <= max_len:
+        return text
+    return text[: max(1, max_len - 1)].rstrip(" .,;:") + "…"
+
+
+def _domain_from_url(url: object) -> str:
+    raw = _clean_text(url)
+    if not raw:
+        return ""
+    try:
+        from urllib.parse import urlparse
+
+        host = (urlparse(raw).netloc or "").lower()
+    except Exception:
+        host = ""
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def _source_context_ru(source: str, source_group: str) -> str:
+    group_label = _SOURCE_GROUP_LABELS_RU.get(source_group or "other", "источника")
+    if source:
+        if source_group == "telegram":
+            return f"Telegram-канала {source}"
+        if source_group == "github":
+            return source
+        return f"{group_label} {source}"
+    return group_label
+
+
+def _repo_name_from_topic(title: str, url: str) -> str:
+    clean_title = re.sub(r"(?i)^github\s+trending\s*:\s*", "", _clean_text(title)).strip()
+    if clean_title:
+        return clean_title
+    domain = _domain_from_url(url)
+    if domain == "github.com":
+        path = _clean_text(url).split("github.com/", 1)[-1].strip("/")
+        parts = [p for p in path.split("/") if p][:2]
+        if parts:
+            return " / ".join(parts)
+    return "GitHub-репозиторий"
+
+
+def build_deterministic_topic_metadata_ru(topic: object) -> dict[str, str]:
+    """Build topic-specific Russian display metadata without network or AI calls.
+
+    The fallback is intentionally conservative: it reuses only already collected
+    title/source/description/scoring fields and asks the admin to verify details
+    when the source text is not enough for a factual Russian summary.
+    """
+    title = _clean_text(_topic_value(topic, "title"))
+    source = _clean_text(_topic_value(topic, "source"))
+    source_group = _clean_text(_topic_value(topic, "source_group")) or "other"
+    description = _shorten_sentence(_topic_value(topic, "original_description"), 240)
+    category = _clean_text(_topic_value(topic, "category")) or "other"
+    score_raw = _topic_value(topic, "score")
+    try:
+        score = int(score_raw or 0)
+    except (TypeError, ValueError):
+        score = 0
+    reason_ru_existing = _clean_text(_topic_value(topic, "reason_ru"))
+    reason = _clean_text(_topic_value(topic, "reason"))
+    url = _clean_text(_topic_value(topic, "url"))
+    domain = _domain_from_url(url)
+    stars_today = _clean_text(_topic_value(topic, "stars_today"))
+    category_ru = _CATEGORY_LABELS_RU.get(category, category or "AI-тема")
+    source_context = _source_context_ru(source, source_group)
+
+    if not any([title, source, description]):
+        return {
+            "title_ru": "Тема без названия: нужен ручной просмотр",
+            "summary_ru": _GENERIC_METADATA_FALLBACK_RU,
+            "angle_ru": "Нет названия, источника и описания — тему можно оценить только после ручной проверки.",
+            "reason_ru": reason_ru_existing or "Недостаточно данных для нормальной оценки темы.",
+        }
+
+    title_for_display = title or description or source or domain or "тема без названия"
+    title_short = _shorten_sentence(title_for_display, 120)
+
+    if source_group == "github" or domain == "github.com":
+        repo = _repo_name_from_topic(title, url)
+        title_ru = _shorten_sentence(f"GitHub-репозиторий: {repo}", 120)
+        details = []
+        if description:
+            details.append(f"описание: {description}")
+        if stars_today:
+            details.append(f"звезды сегодня: {stars_today}")
+        detail_text = "; ".join(details) if details else "описание и метрики нужно проверить по ссылке"
+        summary_ru = _shorten_sentence(
+            f"GitHub-репозиторий {repo}. Данные из источника: {detail_text}. Подойдет как тема про новый инструмент или open-source проект, если после проверки он реально полезен аудитории.",
+            320,
+        )
+        angle_ru = "Проверить README, демо и пользу: можно сделать короткий пост о том, какую задачу закрывает репозиторий и кому он пригодится."
+    elif source_group == "telegram":
+        title_ru = _shorten_sentence(f"Пост из Telegram: {title_short}", 120)
+        summary_ru = _shorten_sentence(
+            f"Пост из {source_context}: {description or title_short}. Можно использовать как сигнал, но перед публикацией лучше проверить первоисточник и факты.",
+            300,
+        )
+        angle_ru = "Взять как повод для поста только после проверки первоисточника: объяснить, что произошло и почему это важно обычному читателю."
+    elif source_group == "tools" or "product hunt" in source.casefold():
+        title_ru = _shorten_sentence(f"Новый AI-инструмент: {title_short}", 120)
+        summary_ru = _shorten_sentence(
+            f"Новый AI-инструмент из {source_context}: {description or title_short}. Нужно проверить сайт и понять, есть ли практическая польза для аудитории.",
+            300,
+        )
+        angle_ru = "Проверить продукт, цену и реальный сценарий использования; если польза есть — показать простыми словами, какую задачу он решает."
+    elif source_group in {"official_ai", "tech_media", "ru_tech"}:
+        title_ru = _shorten_sentence(f"Новость от {source or domain or 'источника'}: {title_short}", 120)
+        summary_ru = _shorten_sentence(
+            f"Источник {source or domain or 'новости'} сообщает: {description or title_short}. Стоит проверить детали и сделать короткий пост про пользу для обычных пользователей.",
+            300,
+        )
+        angle_ru = "Сфокусироваться не на пресс-релизе, а на практическом выводе: что меняется для пользователя, автора или разработчика."
+    else:
+        title_ru = _shorten_sentence(f"Тема из {source or domain or 'источника'}: {title_short}", 120)
+        summary_ru = _shorten_sentence(
+            f"Источник {source_context} дает тему: {description or title_short}. Перед публикацией нужно проверить детали, но уже видно, о каком сюжете речь.",
+            300,
+        )
+        angle_ru = "Проверить первоисточник и выбрать простой пользовательский вывод: зачем аудитории знать об этой теме сейчас."
+
+    score_part = f"скоринг {score}/100" if score else "скоринг не указан"
+    if reason_ru_existing and "Нужен ручной просмотр" not in reason_ru_existing:
+        reason_ru = reason_ru_existing
+    elif reason:
+        reason_ru = _shorten_sentence(f"Категория: {category_ru}; {score_part}. Сигналы скоринга: {reason}.", 220)
+    else:
+        reason_ru = _shorten_sentence(f"Категория: {category_ru}; {score_part}. Источник: {source or domain or source_group}.", 220)
+
+    return {
+        "title_ru": title_ru,
+        "summary_ru": summary_ru,
+        "angle_ru": angle_ru,
+        "reason_ru": reason_ru,
+    }
+
+
 def topic_display_title(topic: object) -> str:
-    """Return the Russian display title when available, otherwise original title."""
-    return _clean_text(_topic_value(topic, "title_ru")) or _clean_text(_topic_value(topic, "title")) or "Без названия"
+    """Return the Russian display title when available, otherwise deterministic wrapper."""
+    explicit = _clean_text(_topic_value(topic, "title_ru"))
+    original = _clean_text(_topic_value(topic, "title"))
+    if explicit and not is_weak_topic_metadata(explicit, _topic_value(topic, "summary_ru"), _topic_value(topic, "angle_ru"), original_title=original):
+        return explicit
+    metadata = build_deterministic_topic_metadata_ru(topic)
+    return metadata.get("title_ru") or explicit or original or "Без названия"
 
 
 def topic_display_reason(topic: object) -> str:
-    """Return the Russian display reason when available, otherwise original reason."""
-    return _clean_text(_topic_value(topic, "reason_ru")) or _clean_text(_topic_value(topic, "reason")) or "без пояснения"
+    """Return the Russian display reason when available, otherwise deterministic scoring context."""
+    explicit = _clean_text(_topic_value(topic, "reason_ru"))
+    if explicit and "Нужен ручной просмотр" not in explicit:
+        return explicit
+    metadata = build_deterministic_topic_metadata_ru(topic)
+    return metadata.get("reason_ru") or explicit or _clean_text(_topic_value(topic, "reason")) or "без пояснения"
 
 
 MANUAL_REVIEW_NOTE_RU = "Нужен ручной просмотр: не удалось перевести тему"
 
 
 def topic_summary_ru(topic: object) -> str:
-    """Return short Russian summary with explicit manual-review fallback."""
+    """Return topic-specific Russian summary with deterministic fallback."""
     explicit = _clean_text(_topic_value(topic, "summary_ru"))
-    if explicit:
+    if explicit and "Нужен ручной просмотр" not in explicit:
         return explicit
-    return MANUAL_REVIEW_NOTE_RU
+    metadata = build_deterministic_topic_metadata_ru(topic)
+    return metadata.get("summary_ru") or explicit or MANUAL_REVIEW_NOTE_RU
 
 
 def topic_angle_ru(topic: object) -> str:
-    """Return Russian post-angle suggestion with explicit manual-review fallback."""
+    """Return Russian post-angle suggestion with deterministic fallback."""
     explicit = _clean_text(_topic_value(topic, "angle_ru"))
-    if explicit:
+    if explicit and "AI-обогащение не дало" not in explicit and "проверь тему вручную" not in explicit:
         return explicit
-    return "Сначала открой источник и вручную проверь смысл темы: AI-обогащение не дало понятный русский ракурс."
+    metadata = build_deterministic_topic_metadata_ru(topic)
+    return metadata.get("angle_ru") or explicit or "Сначала открой источник и вручную проверь смысл темы: AI-обогащение не дало понятный русский ракурс."
 
 
 def _shorten_text(value: str, max_len: int) -> str:
@@ -137,9 +323,7 @@ def _shorten_text(value: str, max_len: int) -> str:
 
 def topic_compact_preview_ru(topic: object, max_len: int = 160) -> str:
     """Return a compact Russian preview for collection summaries."""
-    title_ru = _clean_text(_topic_value(topic, "title_ru"))
-    original = _clean_text(_topic_value(topic, "title"))
-    title = title_ru or (f"Нужна проверка: {original}" if original else "Нужна проверка: без названия")
+    title = topic_display_title(topic)
     summary = topic_summary_ru(topic)
     return f"{_shorten_text(title, 90)}\n  О чем: {_shorten_text(summary, max_len)}"
 

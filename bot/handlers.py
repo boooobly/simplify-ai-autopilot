@@ -96,7 +96,7 @@ from bot.sources import (
     x_sources_enabled,
     get_builtin_source_override,
 )
-from bot.topic_display import is_weak_topic_metadata, related_sources_summary, topic_angle_ru, topic_compact_preview_ru, topic_display_reason, topic_display_title, topic_original_title_line, topic_summary_ru
+from bot.topic_display import build_deterministic_topic_metadata_ru, is_weak_topic_metadata, related_sources_summary, topic_angle_ru, topic_compact_preview_ru, topic_display_reason, topic_display_title, topic_original_title_line, topic_summary_ru
 from bot.writer import (
     EmptyAIResponseError,
     GenerationResult,
@@ -131,19 +131,47 @@ def _topic_enrich_model(settings) -> str:
     return (getattr(settings, "model_topic_enrich", "") or getattr(settings, "model_draft", "")).strip() or getattr(settings, "model_draft", "")
 
 
-def _apply_topic_enrichment_fallback(item, db: DraftDatabase) -> None:
-    item.title_ru = item.title_ru or item.title
-    item.summary_ru = item.summary_ru or TOPIC_ENRICH_FALLBACK_SUMMARY_RU
-    item.angle_ru = item.angle_ru or TOPIC_ENRICH_FALLBACK_ANGLE_RU
+def _apply_topic_enrichment_fallback(item, db: DraftDatabase, *, force: bool = False) -> bool:
+    metadata = build_deterministic_topic_metadata_ru(item)
+    before = (item.title_ru or "", item.summary_ru or "", item.angle_ru or "", item.reason_ru or "")
+    existing_is_weak = is_weak_topic_metadata(item.title_ru, item.summary_ru, item.angle_ru, original_title=item.title)
+    if force or existing_is_weak:
+        item.title_ru = metadata["title_ru"]
+        item.summary_ru = metadata["summary_ru"]
+        item.angle_ru = metadata["angle_ru"]
+        item.reason_ru = metadata["reason_ru"]
+        setattr(item, "_deterministic_fallback_used", True)
+    else:
+        item.title_ru = item.title_ru or metadata["title_ru"]
+        item.summary_ru = item.summary_ru or metadata["summary_ru"]
+        item.angle_ru = item.angle_ru or metadata["angle_ru"]
+        item.reason_ru = item.reason_ru or metadata["reason_ru"]
+    changed = before != (item.title_ru or "", item.summary_ru or "", item.angle_ru or "", item.reason_ru or "")
     topic = db.find_topic_candidate_by_url(item.url)
     if topic:
-        db.update_topic_candidate_display_fields(
-            int(topic["id"]),
-            title_ru=item.title_ru,
-            summary_ru=item.summary_ru,
-            angle_ru=item.angle_ru,
-            reason_ru=item.reason_ru,
+        topic_is_weak = is_weak_topic_metadata(
+            str(topic.get("title_ru") or ""),
+            str(topic.get("summary_ru") or ""),
+            str(topic.get("angle_ru") or ""),
+            original_title=str(topic.get("title") or item.title or ""),
         )
+        if force or topic_is_weak:
+            db.force_update_topic_candidate_display_fields(
+                int(topic["id"]),
+                title_ru=item.title_ru,
+                summary_ru=item.summary_ru,
+                angle_ru=item.angle_ru,
+                reason_ru=item.reason_ru or "",
+            )
+        else:
+            db.update_topic_candidate_display_fields(
+                int(topic["id"]),
+                title_ru=item.title_ru,
+                summary_ru=item.summary_ru,
+                angle_ru=item.angle_ru,
+                reason_ru=item.reason_ru,
+            )
+    return changed
 
 
 
@@ -229,6 +257,10 @@ class TopicCollectStats:
     total_seconds: float = 0.0
     ai_enriched: int = 0
     ai_enrich_limit: int = 0
+    deterministic_fallback_used: int = 0
+    enrichment_failed: int = 0
+    enrichment_skipped_limit: int = 0
+    enrichment_skipped_no_provider: int = 0
     skipped_examples: dict[str, list[str]] | None = None
 
 
@@ -1011,9 +1043,11 @@ async def _reenrich_topic_candidate_display_metadata(
     return db.get_topic_candidate(topic_id), None
 
 
-async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase) -> None:
+async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase) -> str:
     if not settings or not getattr(settings, "has_ai_provider", False):
-        return
+        logger.info("Topic metadata AI enrichment skipped: no AI provider url=%s source=%s", item.url, item.source)
+        _apply_topic_enrichment_fallback(item, db)
+        return "skipped_no_provider"
     topic = db.find_topic_candidate_by_url(item.url)
     db_title_ru = str(topic.get("title_ru") or "") if topic else ""
     db_summary_ru = str(topic.get("summary_ru") or "") if topic else ""
@@ -1030,22 +1064,25 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
         original_title=item.title,
     )
     is_github_topic = (getattr(item, "source_group", "") or (str(topic.get("source_group") or "") if topic else "")) == "github"
-    github_existing_matches_item = bool(
-        is_github_topic
-        and existing_title_ru
+    display_existing_matches_item = bool(
+        existing_title_ru
         and existing_title_ru == (item.title_ru or "")
         and existing_summary_ru == (item.summary_ru or "")
         and existing_angle_ru == (item.angle_ru or "")
     )
-    if existing_is_complete and not existing_is_weak and not github_existing_matches_item:
+    github_existing_matches_item = bool(is_github_topic and display_existing_matches_item)
+    item_has_deterministic_fallback = bool(getattr(item, "_deterministic_fallback_used", False))
+    if existing_is_complete and not existing_is_weak and not (display_existing_matches_item and item_has_deterministic_fallback):
         item.title_ru = existing_title_ru
         item.summary_ru = existing_summary_ru
         item.angle_ru = existing_angle_ru
         item.reason_ru = existing_reason_ru or item.reason_ru
-        return
+        return "already_good"
     api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
     if not api_key:
-        return
+        logger.info("Topic metadata AI enrichment skipped: no AI provider api key url=%s source=%s", item.url, item.source)
+        _apply_topic_enrichment_fallback(item, db)
+        return "skipped_no_provider"
     try:
         result = await _run_enrich_topic_metadata_ru(
             api_key=api_key,
@@ -1057,16 +1094,18 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
             extra_headers=extra_headers,
         )
     except Exception as exc:
-        logger.warning("Topic metadata enrichment failed: %s", exc)
-        _apply_topic_enrichment_fallback(item, db)
-        return
+        logger.warning("Topic metadata AI enrichment failed: provider exception url=%s source=%s error=%s", item.url, item.source, exc)
+        _apply_topic_enrichment_fallback(item, db, force=True)
+        return "failed"
     if not result or not result.content.strip():
-        _apply_topic_enrichment_fallback(item, db)
-        return
+        logger.warning("Topic metadata AI enrichment failed: empty AI response url=%s source=%s", item.url, item.source)
+        _apply_topic_enrichment_fallback(item, db, force=True)
+        return "failed"
     parsed = _parse_topic_metadata_result_content(result.content)
     if parsed is None:
-        _apply_topic_enrichment_fallback(item, db)
-        return
+        logger.warning("Topic metadata AI enrichment failed: invalid metadata format url=%s source=%s", item.url, item.source)
+        _apply_topic_enrichment_fallback(item, db, force=True)
+        return "failed"
     title_ru = parsed["title_ru"]
     summary_ru = parsed["summary_ru"]
     angle_ru = parsed["angle_ru"]
@@ -1085,13 +1124,15 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
     if not all([title_ru, summary_ru, angle_ru, reason_ru]) or is_weak_topic_metadata(
         title_ru, summary_ru, angle_ru, original_title=item.title
     ):
-        _apply_topic_enrichment_fallback(item, db)
-        return
+        logger.warning("Topic metadata AI enrichment failed: failed Russian usefulness validation url=%s source=%s", item.url, item.source)
+        _apply_topic_enrichment_fallback(item, db, force=True)
+        return "failed"
     if not topic:
         topic = db.find_topic_candidate_by_url(item.url)
     if not topic:
-        _apply_topic_enrichment_fallback(item, db)
-        return
+        logger.warning("Topic metadata AI enrichment failed: topic row missing after collection url=%s source=%s", item.url, item.source)
+        _apply_topic_enrichment_fallback(item, db, force=True)
+        return "failed"
 
     should_force_update = existing_is_weak or github_existing_matches_item
     if should_force_update:
@@ -1136,6 +1177,7 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
         source_url=item.url,
         draft_id=None,
     )
+    return "enriched"
 
 
 def _moderation_keyboard(
@@ -2532,6 +2574,10 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
             stats.low_quality += 1
             _remember_skip("low_score", item, item.reason or "score < 50")
             continue
+        needs_ai_enrichment_initial = is_weak_topic_metadata(item.title_ru, item.summary_ru, item.angle_ru, original_title=item.title)
+        if needs_ai_enrichment_initial:
+            if _apply_topic_enrichment_fallback(item, db):
+                stats.deterministic_fallback_used += 1
         result = db.upsert_topic_candidate_with_reason(
             item.title, item.url, item.source, item.published_at, item.category, item.score, item.reason, item.normalized_title, item.source_group, item.title_ru, item.summary_ru, item.angle_ru, item.reason_ru, item.original_description
         )
@@ -2549,7 +2595,7 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
             stored_title_ru = str(stored_topic.get("title_ru") or "") if stored_topic else (item.title_ru or "")
             stored_summary_ru = str(stored_topic.get("summary_ru") or "") if stored_topic else (item.summary_ru or "")
             stored_angle_ru = str(stored_topic.get("angle_ru") or "") if stored_topic else (item.angle_ru or "")
-            needs_enrichment = not (stored_title_ru and stored_summary_ru and stored_angle_ru) or is_weak_topic_metadata(
+            needs_enrichment = needs_ai_enrichment_initial or not (stored_title_ru and stored_summary_ru and stored_angle_ru) or is_weak_topic_metadata(
                 stored_title_ru,
                 stored_summary_ru,
                 stored_angle_ru,
@@ -2573,17 +2619,37 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
     translate_limit = int(getattr(settings, "topic_ai_translate_limit", 8) or 0)
     stats.ai_enrich_limit = max(0, min(30, enrich_limit, translate_limit))
     ai_started = time.monotonic()
-    if stats.ai_enrich_limit > 0 and settings and getattr(settings, "has_ai_provider", False):
-        enrichment_candidates = sorted(enrichment_candidates, key=lambda i: i.score, reverse=True)[: stats.ai_enrich_limit]
-        for item in enrichment_candidates:
+    if not (settings and getattr(settings, "has_ai_provider", False)):
+        stats.enrichment_skipped_no_provider = len(enrichment_candidates)
+        if enrichment_candidates:
+            logger.info("Topic metadata AI enrichment skipped: no AI provider for %s candidates; deterministic fallback is used", len(enrichment_candidates))
+    elif stats.ai_enrich_limit <= 0:
+        stats.enrichment_skipped_limit = len(enrichment_candidates)
+        if enrichment_candidates:
+            logger.info("Topic metadata AI enrichment skipped: enrichment limit reached/disabled for %s candidates", len(enrichment_candidates))
+    else:
+        enrichment_candidates = sorted(enrichment_candidates, key=lambda i: i.score, reverse=True)
+        selected_candidates = enrichment_candidates[: stats.ai_enrich_limit]
+        skipped_by_limit = enrichment_candidates[stats.ai_enrich_limit :]
+        stats.enrichment_skipped_limit = len(skipped_by_limit)
+        if skipped_by_limit:
+            logger.info("Topic metadata AI enrichment skipped: enrichment limit reached for %s candidates", len(skipped_by_limit))
+        for item in selected_candidates:
             try:
-                before = (item.title_ru, item.summary_ru, item.angle_ru)
-                await _enrich_topic_metadata_if_available(item, settings, db)
-                after = (item.title_ru, item.summary_ru, item.angle_ru)
-                if after != before and any(after):
+                before = (item.title_ru, item.summary_ru, item.angle_ru, item.reason_ru)
+                status = await _enrich_topic_metadata_if_available(item, settings, db)
+                after = (item.title_ru, item.summary_ru, item.angle_ru, item.reason_ru)
+                if status == "enriched" or (status is None and after != before and any(after)):
                     stats.ai_enriched += 1
+                elif status == "failed":
+                    stats.enrichment_failed += 1
+                    if after != before:
+                        stats.deterministic_fallback_used += 1
+                elif status == "skipped_no_provider":
+                    stats.enrichment_skipped_no_provider += 1
             except Exception as exc:
-                logger.warning("Topic enrichment skipped after error: %s", exc)
+                stats.enrichment_failed += 1
+                logger.warning("Topic enrichment skipped after exception from provider/fallback: %s", exc)
                 continue
     stats.ai_seconds = time.monotonic() - ai_started
     stats.total_seconds = time.monotonic() - total_started
@@ -2631,6 +2697,12 @@ def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list, 
                 f"Сохранение/скоринг: {stats.store_seconds:.1f} сек",
                 f"AI-обогащение: {stats.ai_seconds:.1f} сек",
                 f"AI-обогащено: {stats.ai_enriched} / {stats.ai_enrich_limit}",
+                "Диагностика метаданных: "
+                f"enriched_by_ai={stats.ai_enriched}, "
+                f"deterministic_fallback_used={stats.deterministic_fallback_used}, "
+                f"enrichment_failed={stats.enrichment_failed}, "
+                f"enrichment_skipped_limit={stats.enrichment_skipped_limit}, "
+                f"enrichment_skipped_no_provider={stats.enrichment_skipped_no_provider}",
                 "",
             ]
         )
