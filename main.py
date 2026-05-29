@@ -15,21 +15,9 @@ from bot.handlers import (
     admin_url_message,
     draft_command,
     generate_command,
-    collect_command,
-    collect_debug_command,
     attach_media_command,
     moderation_callback,
     start_command,
-    topics_command,
-    topics_all_command,
-    topics_tools_command,
-    topics_news_command,
-    topics_fun_command,
-    topics_video_command,
-    topics_guides_command,
-    topics_best_command,
-    topics_hot_command,
-    sources_status_command,
     usage_7d_command,
     usage_month_command,
     style_guide_command,
@@ -53,7 +41,21 @@ from bot.handlers import (
     health_command,
 )
 from bot.cleanup_handlers import cleanup_confirm_command, cleanup_preview_command
+from bot.topic_handlers import (
+    collect_command,
+    collect_debug_command,
+    topics_command,
+    topics_all_command,
+    topics_tools_command,
+    topics_news_command,
+    topics_fun_command,
+    topics_video_command,
+    topics_guides_command,
+    topics_best_command,
+    topics_hot_command,
+)
 from bot.publisher import run_scheduled_publishing
+from bot.source_handlers import sources_status_command
 
 
 def setup_logging() -> None:

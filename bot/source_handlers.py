@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio, os, time
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ContextTypes
 from bot.database import DraftDatabase
 from bot.source_normalization import normalize_source_url, normalize_telegram_channel_input
 from bot.sources import COMMUNITY_RSS, OFFICIAL_AI_RSS, RU_TECH_RSS, TECH_MEDIA_RSS, TOOLS_RSS, discover_rss_feed_url, get_builtin_source_override, parse_custom_topic_feeds, reddit_sources_enabled, x_sources_enabled
@@ -214,3 +215,20 @@ async def handle_sources_callback(update, context, data, edit_callback_message, 
         if sid in running: return await edit_callback_message(query,"Проверка этого источника уже идёт. Дождись результата.",reply_markup=sources_hub_keyboard())
         running.add(sid); await edit_callback_message(query,"Проверяю RSS..." if row["source_type"]=="rss" else "Проверяю источник...",reply_markup=sources_hub_keyboard()); context.application.create_task(run_source_test_background(context=context,settings=settings,db=db,row=row)); return
     await edit_callback_message(query,"Неизвестное действие источников.",reply_markup=sources_hub_keyboard())
+
+
+async def sources_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from bot import handlers
+
+    settings = context.bot_data["settings"]
+    db: DraftDatabase = context.bot_data["db"]
+    user_id = update.effective_user.id if update.effective_user else None
+    if not handlers._is_admin(user_id, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+    if update.message:
+        await update.message.reply_text("Проверяю источники...")
+    _items, reports = await handlers._run_collect_topics_with_diagnostics(settings=settings, db=db)
+    if update.message:
+        await update.message.reply_text(handlers._render_sources_status(reports, db), reply_markup=handlers._admin_reply_keyboard())
