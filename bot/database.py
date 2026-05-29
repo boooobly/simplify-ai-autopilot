@@ -1035,6 +1035,7 @@ class DraftDatabase:
         ai_value_score: int | None = None,
         ai_value_reason_ru: str | None = None,
         audience_fit_ru: str | None = None,
+        clear_ai_value: bool = False,
     ) -> bool:
         with self._connect() as conn:
             cursor = conn.execute(
@@ -1046,12 +1047,26 @@ class DraftDatabase:
                     reason_ru = COALESCE(NULLIF(?, ''), reason_ru),
                     score = COALESCE(?, score),
                     content_format = COALESCE(NULLIF(?, ''), content_format),
-                    ai_value_score = COALESCE(?, ai_value_score),
-                    ai_value_reason_ru = COALESCE(NULLIF(?, ''), ai_value_reason_ru),
-                    audience_fit_ru = COALESCE(NULLIF(?, ''), audience_fit_ru)
+                    ai_value_score = CASE WHEN ? THEN NULL ELSE COALESCE(?, ai_value_score) END,
+                    ai_value_reason_ru = CASE WHEN ? THEN NULL ELSE COALESCE(NULLIF(?, ''), ai_value_reason_ru) END,
+                    audience_fit_ru = CASE WHEN ? THEN NULL ELSE COALESCE(NULLIF(?, ''), audience_fit_ru) END
                 WHERE id = ?
                 """,
-                (title_ru, summary_ru, angle_ru, reason_ru, score, content_format, ai_value_score, ai_value_reason_ru, audience_fit_ru, topic_id),
+                (
+                    title_ru,
+                    summary_ru,
+                    angle_ru,
+                    reason_ru,
+                    score,
+                    content_format,
+                    clear_ai_value,
+                    ai_value_score,
+                    clear_ai_value,
+                    ai_value_reason_ru,
+                    clear_ai_value,
+                    audience_fit_ru,
+                    topic_id,
+                ),
             )
             conn.commit()
             return cursor.rowcount > 0
@@ -1068,6 +1083,7 @@ class DraftDatabase:
         ai_value_score: int | None = None,
         ai_value_reason_ru: str | None = None,
         audience_fit_ru: str | None = None,
+        clear_ai_value: bool = False,
     ) -> bool:
         with self._connect() as conn:
             cursor = conn.execute(
@@ -1079,12 +1095,26 @@ class DraftDatabase:
                     reason_ru = ?,
                     score = COALESCE(?, score),
                     content_format = COALESCE(NULLIF(?, ''), content_format),
-                    ai_value_score = COALESCE(?, ai_value_score),
-                    ai_value_reason_ru = COALESCE(NULLIF(?, ''), ai_value_reason_ru),
-                    audience_fit_ru = COALESCE(NULLIF(?, ''), audience_fit_ru)
+                    ai_value_score = CASE WHEN ? THEN NULL ELSE COALESCE(?, ai_value_score) END,
+                    ai_value_reason_ru = CASE WHEN ? THEN NULL ELSE COALESCE(NULLIF(?, ''), ai_value_reason_ru) END,
+                    audience_fit_ru = CASE WHEN ? THEN NULL ELSE COALESCE(NULLIF(?, ''), audience_fit_ru) END
                 WHERE id = ?
                 """,
-                (title_ru, summary_ru, angle_ru, reason_ru, score, content_format, ai_value_score, ai_value_reason_ru, audience_fit_ru, topic_id),
+                (
+                    title_ru,
+                    summary_ru,
+                    angle_ru,
+                    reason_ru,
+                    score,
+                    content_format,
+                    clear_ai_value,
+                    ai_value_score,
+                    clear_ai_value,
+                    ai_value_reason_ru,
+                    clear_ai_value,
+                    audience_fit_ru,
+                    topic_id,
+                ),
             )
             conn.commit()
             return cursor.rowcount > 0

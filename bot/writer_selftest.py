@@ -318,7 +318,10 @@ def _assert_topic_metadata_enrichment() -> None:
                 "title_ru: LLMs-from-scratch - пошаговая сборка ChatGPT-подобной модели на PyTorch\n"
                 "summary_ru: Репозиторий показывает, как с нуля собрать ChatGPT-подобную LLM на PyTorch.\n"
                 "angle_ru: Можно подать как полезный open-source проект для тех, кто хочет понять, как LLM устроены изнутри.\n"
-                "reason_ru: Полезно для читателей, которые хотят понять устройство LLM на практике."
+                "reason_ru: Полезно для читателей, которые хотят понять устройство LLM на практике.\n"
+                "ai_value_score: 72\n"
+                "ai_value_reason_ru: полезно как понятный образовательный open-source проект\n"
+                "audience_fit_ru: подходит части аудитории, которая хочет понимать LLM"
             ),
             prompt_tokens=10,
             completion_tokens=20,
@@ -354,7 +357,7 @@ def _assert_topic_metadata_enrichment() -> None:
         return GenerationResult(
             content=(
                 "```json\n"
-                '{"title_ru":"Siri - русский заголовок про AI-редизайн","summary_ru":"Apple готовит заметное обновление Siri с более понятным AI-интерфейсом для обычных пользователей.","angle_ru":"Объяснить, зачем Apple перестраивает Siri вокруг AI-функций.","reason_ru":"Тема важна для понимания AI в iPhone."}'
+                '{"title_ru":"Siri - русский заголовок про AI-редизайн","summary_ru":"Apple готовит заметное обновление Siri с более понятным AI-интерфейсом для обычных пользователей.","angle_ru":"Объяснить, зачем Apple перестраивает Siri вокруг AI-функций.","reason_ru":"Тема важна для понимания AI в iPhone.","ai_value_score":86,"ai_value_reason_ru":"понятная тема про iPhone","audience_fit_ru":"хорошо подходит новичкам"}'
                 "\n```"
             ),
             model=model,
@@ -372,7 +375,7 @@ def _assert_topic_metadata_enrichment() -> None:
         return GenerationResult(
             content=(
                 "Конечно, вот данные:\n"
-                '{"title_ru":"ChatGPT - русская карточка обновления","summary_ru":"OpenAI обновила ChatGPT, и пользователям стоит проверить новые функции в привычном интерфейсе.","angle_ru":"Коротко разобрать, что изменится для обычных пользователей.","reason_ru":"Обновления ChatGPT часто важны для аудитории канала."}'
+                '{"title_ru":"ChatGPT - русская карточка обновления","summary_ru":"OpenAI обновила ChatGPT, и пользователям стоит проверить новые функции в привычном интерфейсе.","angle_ru":"Коротко разобрать, что изменится для обычных пользователей.","reason_ru":"Обновления ChatGPT часто важны для аудитории канала.","ai_value_score":90,"ai_value_reason_ru":"важное обновление массового продукта","audience_fit_ru":"хорошо подходит широкой аудитории"}'
                 "\nЕсли нужно, могу сделать пост."
             ),
             model=model,
@@ -422,7 +425,7 @@ def _assert_topic_metadata_enrichment() -> None:
         if response_format is not None:
             raise TypeError("unexpected keyword argument 'response_format'")
         return GenerationResult(
-            content='{ "title_ru":"JSON mode retry - русская карточка", "summary_ru":"После отказа JSON mode бот повторяет запрос и получает нормальные русские метаданные.", "angle_ru":"Показать устойчивость обогащения тем.", "reason_ru":"Это помогает не терять полезные темы." }',
+            content='{ "title_ru":"JSON mode retry - русская карточка", "summary_ru":"После отказа JSON mode бот повторяет запрос и получает нормальные русские метаданные.", "angle_ru":"Показать устойчивость обогащения тем.", "reason_ru":"Это помогает не терять полезные темы.", "ai_value_score":78, "ai_value_reason_ru":"полезная диагностика", "audience_fit_ru":"подходит админу канала" }',
             model=model,
         )
 

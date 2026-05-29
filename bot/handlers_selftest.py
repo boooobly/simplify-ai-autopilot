@@ -643,7 +643,10 @@ async def _run_topic_reenrich_callback_selftest() -> None:
                 "Новый русский заголовок темы\n"
                 "Новая русская сводка темы.\n"
                 "Новый русский ракурс для поста.\n"
-                "Новая русская причина важности."
+                "Новая русская причина важности.\n"
+                "ai_value_score: 82\n"
+                "ai_value_reason_ru: полезная обновленная карточка\n"
+                "audience_fit_ru: подходит аудитории канала"
             ),
             prompt_tokens=11,
             completion_tokens=22,
@@ -666,7 +669,8 @@ async def _run_topic_reenrich_callback_selftest() -> None:
     assert updated["title_ru"] == "Новый русский заголовок темы"
     assert updated["summary_ru"] == "Новая русская сводка темы."
     assert updated["angle_ru"] == "Новый русский ракурс для поста."
-    assert updated["reason_ru"] == "Новая русская причина важности."
+    assert updated["reason_ru"].startswith("Новая русская причина важности")
+    assert "AI-оценка" in updated["reason_ru"]
     assert query.edited_text is not None
     card_lines = query.edited_text.splitlines()
     assert card_lines[3] == "Новый русский заголовок темы"
@@ -737,7 +741,10 @@ async def _run_topic_reenrich_too_english_error_selftest() -> None:
                 "Persistent memory for AI coding agents based on real-world benchmarks\n"
                 "Русская сводка про память.\n"
                 "Русский ракурс для канала.\n"
-                "Русская причина важности."
+                "Русская причина важности.\n"
+                "ai_value_score: 55\n"
+                "ai_value_reason_ru: техническая тема\n"
+                "audience_fit_ru: слабо подходит новичкам"
             ),
             model=kwargs["model"],
         )
@@ -805,7 +812,10 @@ async def _run_topic_model_routing_selftest() -> None:
                 "LLMs-from-scratch - пошаговая сборка ChatGPT-подобной модели на PyTorch\n"
                 "Репозиторий показывает, как с нуля собрать ChatGPT-подобную LLM на PyTorch.\n"
                 "Можно подать как полезный open-source проект для понимания устройства LLM.\n"
-                "Важно как практичный учебный репозиторий."
+                "Важно как практичный учебный репозиторий.\n"
+                "ai_value_score: 73\n"
+                "ai_value_reason_ru: полезно для понимания LLM\n"
+                "audience_fit_ru: подходит любознательной части аудитории"
             ),
             model=kwargs["model"],
         )
@@ -885,7 +895,10 @@ async def _run_weak_topic_metadata_overwrite_selftest() -> None:
                 "agentmemory - память для AI-агентов в кодинге\n"
                 "Репозиторий предлагает persistent memory для AI-агентов и оценивает её на практических бенчмарках.\n"
                 "Можно показать как пример инфраструктуры для более полезных coding agents.\n"
-                "Важно из-за фокуса на памяти агентов и проверке на бенчмарках."
+                "Важно из-за фокуса на памяти агентов и проверке на бенчмарках.\n"
+                "ai_value_score: 70\n"
+                "ai_value_reason_ru: понятный open-source пример про агентов\n"
+                "audience_fit_ru: подойдет технической части аудитории"
             ),
             prompt_tokens=10,
             completion_tokens=20,
@@ -1005,7 +1018,10 @@ async def _run_github_metadata_ai_preferred_selftest() -> None:
                 "Personal_AI_Infrastructure - инфраструктура для персональных AI-агентов\n"
                 "Репозиторий собирает компоненты для агентной AI-инфраструктуры вокруг задач пользователя.\n"
                 "Можно обсудить как такие проекты пытаются превратить AI в личный рабочий слой.\n"
-                "Важно как пример интереса к персональной AI-инфраструктуре."
+                "Важно как пример интереса к персональной AI-инфраструктуре.\n"
+                "ai_value_score: 74\n"
+                "ai_value_reason_ru: тема про персональных AI-агентов\n"
+                "audience_fit_ru: подходит аудитории, если объяснить просто"
             ),
             prompt_tokens=7,
             completion_tokens=14,
@@ -1074,7 +1090,7 @@ async def _run_topic_enrichment_ai_score_updates_selftest() -> None:
     tmp.cleanup()
 
 
-async def _run_topic_enrichment_missing_ai_score_keeps_baseline_selftest() -> None:
+async def _run_topic_enrichment_invalid_ai_score_falls_back_selftest() -> None:
     tmp = TemporaryDirectory()
     db = DraftDatabase(f"{tmp.name}/no-ai-score.db")
     settings = _topic_settings()
@@ -1091,6 +1107,18 @@ async def _run_topic_enrichment_missing_ai_score_keeps_baseline_selftest() -> No
         source_group="github",
     )
     db.upsert_topic_candidate_with_reason(item.title, item.url, item.source, item.published_at, item.category, item.score, item.reason, item.normalized_title, item.source_group, item.title_ru, item.summary_ru, item.angle_ru, item.reason_ru, item.original_description)
+    stored_before = db.find_topic_candidate_by_url(item.url)
+    assert stored_before is not None
+    db.force_update_topic_candidate_display_fields(
+        int(stored_before["id"]),
+        title_ru=item.title,
+        summary_ru="Нужен ручной просмотр: старая слабая карточка.",
+        angle_ru="проверь тему вручную",
+        reason_ru="Старая AI-причина.",
+        ai_value_score=77,
+        ai_value_reason_ru="старая оценка",
+        audience_fit_ru="старое соответствие",
+    )
     original_enrich = handlers._run_enrich_topic_metadata_ru
 
     async def fake_enrich(**kwargs):
@@ -1109,15 +1137,17 @@ async def _run_topic_enrichment_missing_ai_score_keeps_baseline_selftest() -> No
 
     handlers._run_enrich_topic_metadata_ru = fake_enrich
     try:
-        await handlers._enrich_topic_metadata_if_available(item, settings, db)
+        status = await handlers._enrich_topic_metadata_if_available(item, settings, db)
     finally:
         handlers._run_enrich_topic_metadata_ru = original_enrich
 
     stored = db.find_topic_candidate_by_url(item.url)
+    assert status == "invalid_model_output"
     assert stored is not None
     assert stored["score"] == 85
-    assert stored["reason_ru"] == "Тема техническая и требует ручной проверки."
-    assert "AI-оценка" not in stored["reason_ru"]
+    assert stored["ai_value_score"] is None
+    assert stored["title_ru"].startswith("GitHub-репозиторий:")
+    assert "AI-оценка" not in (stored["reason_ru"] or "")
     tmp.cleanup()
 
 
@@ -1528,7 +1558,7 @@ def run() -> None:
     asyncio.run(_run_good_topic_metadata_no_overwrite_selftest())
     asyncio.run(_run_github_metadata_ai_preferred_selftest())
     asyncio.run(_run_topic_enrichment_ai_score_updates_selftest())
-    asyncio.run(_run_topic_enrichment_missing_ai_score_keeps_baseline_selftest())
+    asyncio.run(_run_topic_enrichment_invalid_ai_score_falls_back_selftest())
     asyncio.run(_run_topic_reenrich_ai_score_refresh_selftest())
     _run_topic_card_final_score_concise_selftest()
     asyncio.run(_run_topic_enrichment_failure_fallback_selftest())

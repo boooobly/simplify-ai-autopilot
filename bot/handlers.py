@@ -140,6 +140,9 @@ def _apply_topic_enrichment_fallback(item, db: DraftDatabase, *, force: bool = F
         item.summary_ru = metadata["summary_ru"]
         item.angle_ru = metadata["angle_ru"]
         item.reason_ru = metadata["reason_ru"]
+        setattr(item, "ai_value_score", None)
+        setattr(item, "ai_value_reason_ru", None)
+        setattr(item, "audience_fit_ru", None)
         setattr(item, "_deterministic_fallback_used", True)
     else:
         item.title_ru = item.title_ru or metadata["title_ru"]
@@ -162,6 +165,7 @@ def _apply_topic_enrichment_fallback(item, db: DraftDatabase, *, force: bool = F
                 summary_ru=item.summary_ru,
                 angle_ru=item.angle_ru,
                 reason_ru=item.reason_ru or "",
+                clear_ai_value=True,
             )
         else:
             db.update_topic_candidate_display_fields(
@@ -994,7 +998,16 @@ def _combined_topic_reason_ru(deterministic_reason_ru: str, ai_reason_ru: str = 
 
 def _parse_topic_metadata_result_content(content: str) -> dict[str, str] | None:
     values = _parse_topic_metadata_fields(content)
-    if all(values.get(k) for k in ("title_ru", "summary_ru", "angle_ru", "reason_ru")):
+    required = (
+        "title_ru",
+        "summary_ru",
+        "angle_ru",
+        "reason_ru",
+        "ai_value_score",
+        "ai_value_reason_ru",
+        "audience_fit_ru",
+    )
+    if all(values.get(k) for k in required) and _parse_ai_value_score(values.get("ai_value_score")) is not None:
         return values
     return None
 
@@ -1051,7 +1064,7 @@ async def _reenrich_topic_candidate_display_metadata(
     content_format = (parsed.get("content_format") or "").strip()[:40]
     ai_value_reason_ru = (parsed.get("ai_value_reason_ru") or "").strip()[:180]
     audience_fit_ru = (parsed.get("audience_fit_ru") or "").strip()[:180]
-    deterministic_reason_ru = str(topic.get("reason_ru") or parsed["reason_ru"] or "")
+    deterministic_reason_ru = str(parsed["reason_ru"] or topic.get("reason_ru") or "")
     final_score = hybrid_topic_score(int(topic.get("deterministic_score") or topic.get("score") or 0), ai_score)
     reason_ru = (
         _combined_topic_reason_ru(
@@ -2618,12 +2631,13 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
 def _topic_candidate_keys(item) -> list[str]:
     keys: list[str] = []
     for attr in ("id", "url", "canonical_key", "normalized_title", "title"):
-        value = str(getattr(item, attr, "") or "").strip().casefold()
+        raw_value = item.get(attr, "") if isinstance(item, dict) else getattr(item, attr, "")
+        value = str(raw_value or "").strip().casefold()
         if value:
             keys.append(f"{attr}:{value}")
     if not any(key.startswith("canonical_key:") for key in keys):
-        title = str(getattr(item, "title", "") or "")
-        source_group = str(getattr(item, "source_group", "") or "")
+        title = str((item.get("title", "") if isinstance(item, dict) else getattr(item, "title", "")) or "")
+        source_group = str((item.get("source_group", "") if isinstance(item, dict) else getattr(item, "source_group", "")) or "")
         canonical = canonical_topic_key(title, source_group).strip().casefold()
         if canonical:
             keys.append(f"canonical_key:{canonical}")
