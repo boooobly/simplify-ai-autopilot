@@ -158,11 +158,15 @@ def _looks_like_useful_russian_metadata(
     *,
     original_title: str = "",
 ) -> bool:
-    """Reject metadata only when the title itself is still effectively English."""
+    """Reject topic card metadata that is empty or mostly untranslated."""
     combined = " ".join([title_ru, summary_ru, angle_ru]).strip()
     if not combined or not _contains_cyrillic_text(combined):
         return False
     if original_title and _normalize_topic_text_for_compare(title_ru) == _normalize_topic_text_for_compare(original_title):
+        return False
+    if not _contains_cyrillic_text(summary_ru) or _is_mostly_english_text(summary_ru):
+        return False
+    if angle_ru and not _contains_cyrillic_text(angle_ru):
         return False
     return not _is_mostly_english_text(title_ru)
 
@@ -189,6 +193,7 @@ def _topic_metadata_key_map() -> dict[str, str]:
         "ai_value_score": ["ai_value_score", "value_score", "score", "оценка ценности", "ценность", "ai оценка", "ai-оценка"],
         "ai_value_reason_ru": ["ai_value_reason_ru", "ai_value_reason", "ai_reason", "причина ai", "ai причина", "пояснение ai", "ai-пояснение"],
         "audience_fit_ru": ["audience_fit_ru", "audience_fit", "fit", "соответствие аудитории", "подходит аудитории", "аудитория"],
+        "content_format": ["content_format", "format", "формат", "тип карточки", "тип"],
     }
     return {alias.casefold(): target for target, names in aliases.items() for alias in names}
 
@@ -324,10 +329,11 @@ def enrich_topic_metadata_ru(
     system_prompt = (
         "Ты помогаешь администратору русскоязычного Telegram-канала @simplify_ai быстро понять тему. "
         "Пиши только по-русски, кроме неизменяемых имен. "
-        "Верни ровно семь полей и ничего больше: title_ru, summary_ru, angle_ru, reason_ru, "
-        "ai_value_score, ai_value_reason_ru, audience_fit_ru. "
+        "Верни только strict JSON object без markdown и комментариев. "
+        "Обязательные поля: title_ru, summary_ru, angle_ru, reason_ru, ai_value_score, ai_value_reason_ru, audience_fit_ru. "
+        "Опционально можно добавить content_format. "
         "title_ru должен быть понятным с первого взгляда русским заголовком, а не буквальным переводом. "
-        "summary_ru одной короткой фразой объясняет, что это такое. "
+        "summary_ru в 1-2 коротких предложениях ясно объясняет тему на русском; нельзя просто копировать английский description. "
         "angle_ru предлагает спокойный редакционный угол для @simplify_ai. "
         "reason_ru кратко объясняет важность темы для админа. "
         "ai_value_score — целое число 0-100: насколько тема ценна для @simplify_ai. "
@@ -341,7 +347,7 @@ def enrich_topic_metadata_ru(
         "PyTorch, ChatGPT, LLM, Jupyter Notebook, GitHub, Hugging Face и похожие имена оставляй как есть. "
         "Для GitHub тем сохраняй короткое имя репозитория в начале title_ru, если оно есть. "
         "Не оставляй исходный английский текст целиком после русской приписки. Не выдумывай факты. "
-        "Не пиши пост, не добавляй маркетинговый тон и не добавляй поля сверх формата."
+        "Не пиши пост и не добавляй маркетинговый тон."
     )
     user_prompt = (
         f"Title: {clean_title[:300]}\n"
@@ -349,8 +355,9 @@ def enrich_topic_metadata_ru(
         f"Description: {(description or '')[:500]}\n\n"
         "Пример хорошего GitHub TITLE: LLMs-from-scratch - пошаговая сборка ChatGPT-подобной модели на PyTorch\n"
         "Пример плохого TITLE: LLMs-from-scratch - open-source проект: Implement a ChatGPT-like LLM in PyTorch from scratch, step by step\n\n"
-        "Format:\ntitle_ru: ...\nsummary_ru: ...\nangle_ru: ...\nreason_ru: ...\n"
-        "ai_value_score: 0-100\nai_value_reason_ru: ...\naudience_fit_ru: ..."
+        "Верни JSON ровно такого вида:\n"
+        "{\"title_ru\":\"...\",\"summary_ru\":\"...\",\"angle_ru\":\"...\",\"reason_ru\":\"...\","
+        "\"ai_value_score\":80,\"ai_value_reason_ru\":\"...\",\"audience_fit_ru\":\"...\",\"content_format\":\"news|tool|github|telegram|other\"}"
     )
     try:
         result = _generate_with_chat_completion(
@@ -376,6 +383,7 @@ def enrich_topic_metadata_ru(
     ai_value_score = values.get("ai_value_score", "")[:20]
     ai_value_reason_ru = values.get("ai_value_reason_ru", "")[:180]
     audience_fit_ru = values.get("audience_fit_ru", "")[:180]
+    content_format = values.get("content_format", "")[:40]
     if not _looks_like_useful_russian_metadata(title_ru, summary_ru, angle_ru, original_title=clean_title):
         _log_invalid_topic_metadata(
             model,
@@ -384,16 +392,18 @@ def enrich_topic_metadata_ru(
             result.content,
         )
         return None
-    result.content = "\n".join(
-        [
-            f"title_ru: {title_ru}",
-            f"summary_ru: {summary_ru}",
-            f"angle_ru: {angle_ru}",
-            f"reason_ru: {reason_ru}",
-            f"ai_value_score: {ai_value_score}",
-            f"ai_value_reason_ru: {ai_value_reason_ru}",
-            f"audience_fit_ru: {audience_fit_ru}",
-        ]
+    result.content = json.dumps(
+        {
+            "title_ru": title_ru,
+            "summary_ru": summary_ru,
+            "angle_ru": angle_ru,
+            "reason_ru": reason_ru,
+            "ai_value_score": ai_value_score,
+            "ai_value_reason_ru": ai_value_reason_ru,
+            "audience_fit_ru": audience_fit_ru,
+            "content_format": content_format,
+        },
+        ensure_ascii=False,
     )
     return result
 

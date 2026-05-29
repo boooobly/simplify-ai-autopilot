@@ -1201,9 +1201,129 @@ async def _run_topic_enrichment_failure_fallback_selftest() -> None:
         tmp.cleanup()
 
     assert item.title_ru == "Новость от OpenAI blog: OpenAI launches a useful model update"
-    assert "Источник OpenAI blog сообщает: OpenAI launches a useful model update" in item.summary_ru
+    assert "Источник OpenAI blog пишет про тему" in item.summary_ru
+    assert "Нужна проверка деталей" in item.summary_ru
     assert handlers.TOPIC_ENRICH_FALLBACK_SUMMARY_RU not in item.summary_ru
     assert "практическом выводе" in item.angle_ru
+
+
+def _run_topic_ai_candidate_selection_selftest() -> None:
+    candidates = [
+        SimpleNamespace(id=1, url="https://example.com/a", canonical_key="same", normalized_title="same", title="A", score=60),
+        SimpleNamespace(id=2, url="https://example.com/b", canonical_key="same", normalized_title="same", title="B", score=95),
+        SimpleNamespace(id=3, url="https://example.com/c", canonical_key="other", normalized_title="other", title="C", score=80),
+    ]
+    selected, skipped = handlers.select_topic_ai_enrichment_candidates(candidates, 1)
+    assert [item.url for item in selected] == ["https://example.com/b"]
+    assert skipped == 1
+
+async def _run_ai_topic_card_enrichment_success_selftest() -> None:
+    tmp = TemporaryDirectory()
+    db = DraftDatabase(f"{tmp.name}/success.db")
+    settings = _topic_settings()
+    item = TopicItem(
+        "These new iOS 27 renders hint at Siri’s big redesign",
+        "https://example.com/siri",
+        "The Verge AI",
+        datetime.now(timezone.utc).isoformat(),
+        category="news",
+        score=82,
+        reason="fresh AI news",
+        reason_ru="Сильная новость про AI-интерфейсы.",
+        normalized_title="ios siri redesign",
+        source_group="tech_media",
+        original_description="Apple's long-awaited Siri overhaul gets new renders.",
+    )
+    db.upsert_topic_candidate_with_reason(item.title, item.url, item.source, item.published_at, item.category, item.score, item.reason, item.normalized_title, item.source_group, item.title_ru, item.summary_ru, item.angle_ru, item.reason_ru, item.original_description)
+    original_enrich = handlers._run_enrich_topic_metadata_ru
+
+    async def fake_enrich(**kwargs):
+        return GenerationResult(
+            content=(
+                '{"title_ru":"Новость от The Verge AI: рендеры нового интерфейса Siri в iOS 27",'
+                '"summary_ru":"Apple может готовить крупный редизайн Siri. Ассистент станет больше похож на отдельный AI-чат внутри iPhone, а не просто голосовую команду.",'
+                '"angle_ru":"Коротко объяснить, как Apple пытается догнать ChatGPT и Gemini внутри iPhone.",'
+                '"reason_ru":"Понятная новость про потребительский AI.",'
+                '"ai_value_score":88,"ai_value_reason_ru":"широкая тема про iPhone и AI","audience_fit_ru":"подходит широкой аудитории","content_format":"news"}'
+            ),
+            model=kwargs["model"],
+        )
+
+    handlers._run_enrich_topic_metadata_ru = fake_enrich
+    try:
+        status = await handlers._enrich_topic_metadata_if_available(item, settings, db)
+    finally:
+        handlers._run_enrich_topic_metadata_ru = original_enrich
+    stored = db.find_topic_candidate_by_url(item.url)
+    assert status == "enriched"
+    assert stored is not None
+    assert "Apple может готовить" in stored["summary_ru"]
+    assert "Apple's long-awaited" not in stored["summary_ru"]
+    tmp.cleanup()
+
+
+async def _run_collect_ai_diagnostics_selftest() -> None:
+    tmp = TemporaryDirectory()
+    fresh_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    item = _with_scoring(TopicItem("Clipline", "https://example.com/clipline", "Product Hunt", fresh_date, source_group="tools", original_description="AI Video Cutter for viral Shorts, Reels, TikTok"))
+    item.title = "Clipline AI video cutter"
+    item.normalized_title = "clipline ai video cutter"
+    stats_no_provider, _, inserted_no_provider = await _collect_topics_with_stats(
+        DraftDatabase(f"{tmp.name}/no-provider.db"),
+        items=[item],
+        settings=SimpleNamespace(max_topic_age_days=14, has_ai_provider=False, topic_ai_enrich_limit=8),
+    )
+    text_no_provider = _render_collect_text(stats_no_provider, [item], inserted_no_provider, debug=True)
+    assert stats_no_provider.ai_enrichment_skipped_no_provider == 1
+    assert "не настроен провайдер" in text_no_provider
+    assert "ai_enrichment_skipped_no_provider=1" in text_no_provider
+
+    item2 = _with_scoring(TopicItem("Useful AI product launch", "https://example.com/limit-zero", "Product Hunt", fresh_date, source_group="tools"))
+    stats_limit, _, inserted_limit = await _collect_topics_with_stats(
+        DraftDatabase(f"{tmp.name}/limit-zero.db"),
+        items=[item2],
+        settings=SimpleNamespace(max_topic_age_days=14, has_ai_provider=True, topic_ai_enrich_limit=0),
+    )
+    text_limit = _render_collect_text(stats_limit, [item2], inserted_limit, debug=True)
+    assert stats_limit.ai_enrichment_skipped_limit == 1
+    assert "TOPIC_AI_ENRICH_LIMIT=0" in text_limit
+    assert "ai_enrichment_skipped_limit=1" in text_limit
+    tmp.cleanup()
+
+
+def _run_english_fallback_readable_selftest() -> None:
+    from bot.topic_display import build_deterministic_topic_metadata_ru
+
+    long_description = "Anthropic releases Claude Opus 4.8, which beats GPT-5.5 and Gemini 3.1 Pro in most benchmarks and includes many technical details that should not be dumped directly into the Russian admin card."
+    metadata = build_deterministic_topic_metadata_ru(
+        TopicItem(
+            "Anthropic releases Claude Opus 4.8, which beats GPT-5.5 and Gemini 3.1 Pro in most benchmarks",
+            "https://example.com/claude",
+            "The Decoder",
+            datetime.now(timezone.utc).isoformat(),
+            category="model",
+            score=80,
+            source_group="tech_media",
+            original_description=long_description,
+        )
+    )
+    assert "Нужна проверка деталей" in metadata["summary_ru"]
+    assert "which beats GPT-5.5 and Gemini 3.1 Pro in most benchmarks and includes" not in metadata["summary_ru"]
+    assert "сравнение AI-моделей" in metadata["summary_ru"]
+
+
+def _run_source_fallback_examples_selftest() -> None:
+    from bot.topic_display import build_deterministic_topic_metadata_ru
+
+    product = build_deterministic_topic_metadata_ru(TopicItem("Clipline", "https://example.com/clipline", "Product Hunt", source_group="tools", category="tool", original_description="AI Video Cutter for viral Shorts, Reels, TikTok"))
+    github = build_deterministic_topic_metadata_ru(TopicItem("anthropics / claude-code", "https://github.com/anthropics/claude-code", "GitHub Trending AI", source_group="github", category="dev", original_description="Claude Code is an agentic coding tool that lives in your terminal"))
+    rss = build_deterministic_topic_metadata_ru(TopicItem("These new iOS 27 renders hint at Siri’s big redesign", "https://example.com/siri", "The Verge AI", source_group="tech_media", category="news", original_description="Apple's long-awaited Siri overhaul"))
+    telegram = build_deterministic_topic_metadata_ru(TopicItem("Gemini app update discussion", "https://t.me/example/1", "@ai_news", source_group="telegram", category="news", original_description="Users discuss Gemini app update and new image tools"))
+
+    assert "короткие видео" in product["summary_ru"]
+    assert "AI-агента для программирования" in github["summary_ru"]
+    assert "обновления Apple" in rss["summary_ru"]
+    assert "Нужна проверка деталей" in telegram["summary_ru"]
 
 def run() -> None:
     aliases = {"claude": ("🤖", "5208880957280522189")}
@@ -1292,6 +1412,11 @@ def run() -> None:
     asyncio.run(_run_topic_reenrich_ai_score_refresh_selftest())
     _run_topic_card_final_score_concise_selftest()
     asyncio.run(_run_topic_enrichment_failure_fallback_selftest())
+    _run_topic_ai_candidate_selection_selftest()
+    asyncio.run(_run_ai_topic_card_enrichment_success_selftest())
+    asyncio.run(_run_collect_ai_diagnostics_selftest())
+    _run_english_fallback_readable_selftest()
+    _run_source_fallback_examples_selftest()
     asyncio.run(_run_topic_403_fallback_and_failure_selftest())
     asyncio.run(_run_topic_callback_warning_selftest())
 

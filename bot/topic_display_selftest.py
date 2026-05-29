@@ -50,7 +50,8 @@ def run() -> None:
     assert "Новость от TechCrunch AI: English fallback title" in fallback_card
     assert "О чем:" in fallback_card
     assert MANUAL_REVIEW_NOTE_RU not in fallback_card
-    assert "Источник TechCrunch AI сообщает: English fallback title" in fallback_card
+    assert "Источник TechCrunch AI пишет про тему" in fallback_card
+    assert "Нужна проверка деталей" in fallback_card
     assert "Идея поста:" in fallback_card
     assert "практическом выводе" in fallback_card
     assert "Оригинал: English fallback title" in fallback_card
@@ -66,9 +67,9 @@ def run() -> None:
         "url": "https://www.anthropic.com/news/claude-opus-4-8",
     })
     assert rss_fallback["title_ru"].startswith("Новость от Anthropic news")
-    assert "Источник Anthropic news сообщает" in rss_fallback["summary_ru"]
+    assert "Источник Anthropic news пишет про тему" in rss_fallback["summary_ru"]
     assert "Claude Opus 4.8" in rss_fallback["summary_ru"]
-    assert "пользу для обычных пользователей" in rss_fallback["summary_ru"]
+    assert "Нужна проверка деталей" in rss_fallback["summary_ru"]
     assert "official AI release" in rss_fallback["reason_ru"]
 
     github_metadata = build_deterministic_topic_metadata_ru({
@@ -83,8 +84,8 @@ def run() -> None:
         "url": "https://github.com/owner/useful-ai-tool",
     })
     assert github_metadata["title_ru"] == "GitHub-репозиторий: owner / useful-ai-tool"
-    assert "GitHub-репозиторий owner / useful-ai-tool" in github_metadata["summary_ru"]
-    assert "An AI agent for summarizing browser tabs" in github_metadata["summary_ru"]
+    assert "пишет про репозиторий" in github_metadata["summary_ru"]
+    assert "AI-агента" in github_metadata["summary_ru"]
     assert "540 stars today" in github_metadata["summary_ru"]
     assert "README" in github_metadata["angle_ru"]
 
@@ -112,7 +113,7 @@ def run() -> None:
     })
     assert title_only_metadata["title_ru"] == "Новый AI-инструмент: New AI calendar assistant launches"
     assert "New AI calendar assistant launches" in title_only_metadata["summary_ru"]
-    assert "практическая польза" in title_only_metadata["summary_ru"]
+    assert "Нужна проверка деталей" in title_only_metadata["summary_ru"]
     assert MANUAL_REVIEW_NOTE_RU not in title_only_metadata["summary_ru"]
 
     github_fallback = {
