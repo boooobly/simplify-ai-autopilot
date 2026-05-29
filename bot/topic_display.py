@@ -179,6 +179,47 @@ def _repo_name_from_topic(title: str, url: str) -> str:
     return "GitHub-репозиторий"
 
 
+def _topic_kind_ru(category: str, source_group: str) -> str:
+    if source_group == "github":
+        return "open-source AI-проект"
+    if source_group == "tools" or category in {"tool", "creator", "video"}:
+        return "AI-инструмент"
+    if category == "model":
+        return "обновление AI-модели"
+    if category == "agent":
+        return "AI-агентов"
+    if category == "dev":
+        return "AI-разработку"
+    if category == "research":
+        return "AI-исследование"
+    return "AI-новость"
+
+
+def _english_topic_hint_ru(title: str, description: str, category: str, source_group: str) -> str:
+    haystack = f"{title} {description}".casefold()
+    hints: list[str] = []
+    if any(word in haystack for word in ("shorts", "reels", "tiktok", "video cutter", "viral")):
+        hints.append("короткие видео для Shorts, Reels или TikTok")
+    if any(word in haystack for word in ("siri", "ios", "iphone", "apple")):
+        hints.append("обновления Apple и AI-функции в iPhone")
+    if any(word in haystack for word in ("agentic coding", "coding agent", "code agent", "ai agent", "developer", "terminal")):
+        hints.append("AI-агента для программирования")
+    if any(word in haystack for word in ("benchmark", "beats", "opus", "claude", "gpt", "gemini")):
+        hints.append("сравнение AI-моделей и бенчмарки")
+    if any(word in haystack for word in ("render", "redesign", "interface", "ui")):
+        hints.append("новый интерфейс или редизайн AI-функции")
+    if any(word in haystack for word in ("repo", "repository", "github", "open-source", "open source")):
+        hints.append("open-source проект")
+    if hints:
+        return ", ".join(dict.fromkeys(hints[:2]))
+    return _topic_kind_ru(category, source_group)
+
+
+def _safe_original_title_quote(title: str, fallback: str) -> str:
+    original = _shorten_sentence(title or fallback, 110).strip('"“”')
+    return f'"{original}"' if original else "эту тему"
+
+
 def build_deterministic_topic_metadata_ru(topic: object) -> dict[str, str]:
     """Build topic-specific Russian display metadata without network or AI calls.
 
@@ -189,7 +230,8 @@ def build_deterministic_topic_metadata_ru(topic: object) -> dict[str, str]:
     title = _clean_text(_topic_value(topic, "title"))
     source = _clean_text(_topic_value(topic, "source"))
     source_group = _clean_text(_topic_value(topic, "source_group")) or "other"
-    description = _shorten_sentence(_topic_value(topic, "original_description"), 240)
+    raw_description = _clean_text(_topic_value(topic, "original_description"))
+    description = _shorten_sentence(raw_description, 180)
     category = _clean_text(_topic_value(topic, "category")) or "other"
     score_raw = _topic_value(topic, "score")
     try:
@@ -203,6 +245,10 @@ def build_deterministic_topic_metadata_ru(topic: object) -> dict[str, str]:
     stars_today = _clean_text(_topic_value(topic, "stars_today"))
     category_ru = _CATEGORY_LABELS_RU.get(category, category or "AI-тема")
     source_context = _source_context_ru(source, source_group)
+    source_name = source or domain or "источник"
+    text_is_english = _mostly_english_text(" ".join(part for part in (title, raw_description) if part))
+    english_hint = _english_topic_hint_ru(title, raw_description, category, source_group)
+    original_quote = _safe_original_title_quote(title, description or source_name)
 
     if not any([title, source, description]):
         return {
@@ -218,44 +264,70 @@ def build_deterministic_topic_metadata_ru(topic: object) -> dict[str, str]:
     if source_group == "github" or domain == "github.com":
         repo = _repo_name_from_topic(title, url)
         title_ru = _shorten_sentence(f"GitHub-репозиторий: {repo}", 120)
-        details = []
-        if description:
-            details.append(f"описание: {description}")
-        if stars_today:
-            details.append(f"звезды сегодня: {stars_today}")
-        detail_text = "; ".join(details) if details else "описание и метрики нужно проверить по ссылке"
-        summary_ru = _shorten_sentence(
-            f"GitHub-репозиторий {repo}. Данные из источника: {detail_text}. Подойдет как тема про новый инструмент или open-source проект, если после проверки он реально полезен аудитории.",
-            320,
-        )
+        star_text = f" Есть сигнал GitHub Trending: {stars_today} звезд сегодня." if stars_today else ""
+        if text_is_english:
+            summary_ru = _shorten_sentence(
+                f"Источник {source_name} пишет про репозиторий {original_quote}. Нужна проверка README и деталей, но тема может подойти как новость про {english_hint}.{star_text}",
+                300,
+            )
+        else:
+            detail_text = description or "описание и метрики нужно проверить по ссылке"
+            summary_ru = _shorten_sentence(
+                f"GitHub-репозиторий {repo}: {detail_text}. Подойдет как тема про новый инструмент или open-source проект, если после проверки он реально полезен аудитории.{star_text}",
+                300,
+            )
         angle_ru = "Проверить README, демо и пользу: можно сделать короткий пост о том, какую задачу закрывает репозиторий и кому он пригодится."
     elif source_group == "telegram":
         title_ru = _shorten_sentence(f"Пост из Telegram: {title_short}", 120)
-        summary_ru = _shorten_sentence(
-            f"Пост из {source_context}: {description or title_short}. Можно использовать как сигнал, но перед публикацией лучше проверить первоисточник и факты.",
-            300,
-        )
+        if text_is_english:
+            summary_ru = _shorten_sentence(
+                f"Источник {source_name} пишет про тему: {original_quote}. Нужна проверка деталей, но тема может подойти как новость про {english_hint}.",
+                260,
+            )
+        else:
+            summary_ru = _shorten_sentence(
+                f"Пост из {source_context}: {description or title_short}. Можно использовать как сигнал, но перед публикацией лучше проверить первоисточник и факты.",
+                300,
+            )
         angle_ru = "Взять как повод для поста только после проверки первоисточника: объяснить, что произошло и почему это важно обычному читателю."
     elif source_group == "tools" or "product hunt" in source.casefold():
         title_ru = _shorten_sentence(f"Новый AI-инструмент: {title_short}", 120)
-        summary_ru = _shorten_sentence(
-            f"Новый AI-инструмент из {source_context}: {description or title_short}. Нужно проверить сайт и понять, есть ли практическая польза для аудитории.",
-            300,
-        )
+        if text_is_english:
+            summary_ru = _shorten_sentence(
+                f"Источник {source_name} пишет про инструмент {original_quote}. Нужна проверка деталей, но тема может подойти как новость про {english_hint}.",
+                260,
+            )
+        else:
+            summary_ru = _shorten_sentence(
+                f"Новый AI-инструмент из {source_context}: {description or title_short}. Нужно проверить сайт и понять, есть ли практическая польза для аудитории.",
+                300,
+            )
         angle_ru = "Проверить продукт, цену и реальный сценарий использования; если польза есть — показать простыми словами, какую задачу он решает."
     elif source_group in {"official_ai", "tech_media", "ru_tech"}:
         title_ru = _shorten_sentence(f"Новость от {source or domain or 'источника'}: {title_short}", 120)
-        summary_ru = _shorten_sentence(
-            f"Источник {source or domain or 'новости'} сообщает: {description or title_short}. Стоит проверить детали и сделать короткий пост про пользу для обычных пользователей.",
-            300,
-        )
+        if text_is_english:
+            summary_ru = _shorten_sentence(
+                f"Источник {source_name} пишет про тему: {original_quote}. Нужна проверка деталей, но тема может подойти как новость про {english_hint}.",
+                260,
+            )
+        else:
+            summary_ru = _shorten_sentence(
+                f"Источник {source or domain or 'новости'} сообщает: {description or title_short}. Стоит проверить детали и сделать короткий пост про пользу для обычных пользователей.",
+                300,
+            )
         angle_ru = "Сфокусироваться не на пресс-релизе, а на практическом выводе: что меняется для пользователя, автора или разработчика."
     else:
         title_ru = _shorten_sentence(f"Тема из {source or domain or 'источника'}: {title_short}", 120)
-        summary_ru = _shorten_sentence(
-            f"Источник {source_context} дает тему: {description or title_short}. Перед публикацией нужно проверить детали, но уже видно, о каком сюжете речь.",
-            300,
-        )
+        if text_is_english:
+            summary_ru = _shorten_sentence(
+                f"Источник {source_name} пишет про тему: {original_quote}. Нужна проверка деталей, но тема может подойти как новость про {english_hint}.",
+                260,
+            )
+        else:
+            summary_ru = _shorten_sentence(
+                f"Источник {source_context} дает тему: {description or title_short}. Перед публикацией нужно проверить детали, но уже видно, о каком сюжете речь.",
+                300,
+            )
         angle_ru = "Проверить первоисточник и выбрать простой пользовательский вывод: зачем аудитории знать об этой теме сейчас."
 
     score_part = f"скоринг {score}/100" if score else "скоринг не указан"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 
 import bot.writer as writer
 from bot.writer import GenerationResult, _ensure_custom_emoji_markers, _looks_like_useful_russian_metadata, _parse_topic_metadata_fields, enrich_topic_metadata_ru, fetch_page_content, fetch_page_content_details, generate_post_draft_from_page, generate_post_draft_from_topic_metadata, rewrite_post_draft
@@ -331,13 +332,13 @@ def _assert_topic_metadata_enrichment() -> None:
         writer._generate_with_chat_completion = original
 
     assert result is not None
-    lines = result.content.splitlines()
-    assert lines[0] == "title_ru: LLMs-from-scratch - пошаговая сборка ChatGPT-подобной модели на PyTorch"
+    payload = json.loads(result.content)
+    assert payload["title_ru"] == "LLMs-from-scratch - пошаговая сборка ChatGPT-подобной модели на PyTorch"
     assert "PyTorch" in result.content and "ChatGPT" in result.content and "LLM" in result.content
-    assert "Implement a ChatGPT-like LLM" not in lines[0]
-    assert "ai_value_score:" in result.content
+    assert "Implement a ChatGPT-like LLM" not in payload["title_ru"]
+    assert "ai_value_score" in payload
     assert "Jupyter Notebook" in calls[0][1]
-    assert "ровно семь полей" in calls[0][1]
+    assert "strict JSON" in calls[0][1]
     assert "Не пиши пост" in calls[0][1]
     assert "Пример плохого TITLE" in calls[0][0]
 

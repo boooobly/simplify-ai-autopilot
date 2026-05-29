@@ -258,10 +258,38 @@ class TopicCollectStats:
     ai_enriched: int = 0
     ai_enrich_limit: int = 0
     deterministic_fallback_used: int = 0
-    enrichment_failed: int = 0
-    enrichment_skipped_limit: int = 0
-    enrichment_skipped_no_provider: int = 0
+    ai_enrichment_failed: int = 0
+    ai_enrichment_skipped_no_provider: int = 0
+    ai_enrichment_skipped_limit: int = 0
+    ai_enrichment_skipped_no_candidates: int = 0
+    ai_enrichment_skipped_existing_metadata: int = 0
+    ai_enrichment_provider_error: int = 0
+    ai_enrichment_invalid_model_output: int = 0
     skipped_examples: dict[str, list[str]] | None = None
+
+    @property
+    def enrichment_failed(self) -> int:
+        return self.ai_enrichment_failed
+
+    @enrichment_failed.setter
+    def enrichment_failed(self, value: int) -> None:
+        self.ai_enrichment_failed = value
+
+    @property
+    def enrichment_skipped_limit(self) -> int:
+        return self.ai_enrichment_skipped_limit
+
+    @enrichment_skipped_limit.setter
+    def enrichment_skipped_limit(self, value: int) -> None:
+        self.ai_enrichment_skipped_limit = value
+
+    @property
+    def enrichment_skipped_no_provider(self) -> int:
+        return self.ai_enrichment_skipped_no_provider
+
+    @enrichment_skipped_no_provider.setter
+    def enrichment_skipped_no_provider(self, value: int) -> None:
+        self.ai_enrichment_skipped_no_provider = value
 
 
 
@@ -1003,6 +1031,7 @@ async def _reenrich_topic_candidate_display_metadata(
     summary_ru = parsed["summary_ru"]
     angle_ru = parsed["angle_ru"]
     ai_score = _parse_ai_value_score(parsed.get("ai_value_score"))
+    content_format = (parsed.get("content_format") or "").strip()[:40]
     deterministic_reason_ru = str(topic.get("reason_ru") or parsed["reason_ru"] or "")
     final_score = hybrid_topic_score(int(topic.get("deterministic_score") or topic.get("score") or 0), ai_score)
     reason_ru = (
@@ -1027,6 +1056,7 @@ async def _reenrich_topic_candidate_display_metadata(
         angle_ru=angle_ru,
         reason_ru=reason_ru,
         score=final_score if ai_score is not None else None,
+        content_format=content_format,
     )
     estimated_cost = estimate_ai_cost(provider, result.prompt_tokens, result.completion_tokens, settings)
     db.record_ai_usage(
@@ -1096,20 +1126,21 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
     except Exception as exc:
         logger.warning("Topic metadata AI enrichment failed: provider exception url=%s source=%s error=%s", item.url, item.source, exc)
         _apply_topic_enrichment_fallback(item, db, force=True)
-        return "failed"
+        return "provider_error"
     if not result or not result.content.strip():
         logger.warning("Topic metadata AI enrichment failed: empty AI response url=%s source=%s", item.url, item.source)
         _apply_topic_enrichment_fallback(item, db, force=True)
-        return "failed"
+        return "invalid_model_output"
     parsed = _parse_topic_metadata_result_content(result.content)
     if parsed is None:
         logger.warning("Topic metadata AI enrichment failed: invalid metadata format url=%s source=%s", item.url, item.source)
         _apply_topic_enrichment_fallback(item, db, force=True)
-        return "failed"
+        return "invalid_model_output"
     title_ru = parsed["title_ru"]
     summary_ru = parsed["summary_ru"]
     angle_ru = parsed["angle_ru"]
     ai_score = _parse_ai_value_score(parsed.get("ai_value_score"))
+    content_format = (parsed.get("content_format") or "").strip()[:40]
     deterministic_reason_ru = existing_reason_ru or item.reason_ru or parsed["reason_ru"]
     final_score = hybrid_topic_score(item.score, ai_score)
     reason_ru = (
@@ -1126,13 +1157,13 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
     ):
         logger.warning("Topic metadata AI enrichment failed: failed Russian usefulness validation url=%s source=%s", item.url, item.source)
         _apply_topic_enrichment_fallback(item, db, force=True)
-        return "failed"
+        return "invalid_model_output"
     if not topic:
         topic = db.find_topic_candidate_by_url(item.url)
     if not topic:
         logger.warning("Topic metadata AI enrichment failed: topic row missing after collection url=%s source=%s", item.url, item.source)
         _apply_topic_enrichment_fallback(item, db, force=True)
-        return "failed"
+        return "provider_error"
 
     should_force_update = existing_is_weak or github_existing_matches_item
     if should_force_update:
@@ -1149,6 +1180,7 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
             angle_ru=angle_ru,
             reason_ru=reason_ru,
             score=final_score if ai_score is not None else None,
+            content_format=content_format,
         )
     else:
         item.title_ru = existing_title_ru or title_ru
@@ -1164,6 +1196,7 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
             angle_ru=angle_ru,
             reason_ru=reason_ru,
             score=final_score if ai_score is not None else None,
+            content_format=content_format,
         )
     estimated_cost = estimate_ai_cost(provider, result.prompt_tokens, result.completion_tokens, settings)
     db.record_ai_usage(
@@ -2526,6 +2559,55 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
 
 
 
+
+def _topic_candidate_keys(item) -> list[str]:
+    keys: list[str] = []
+    for attr in ("id", "url", "canonical_key", "normalized_title", "title"):
+        value = str(getattr(item, attr, "") or "").strip().casefold()
+        if value:
+            keys.append(f"{attr}:{value}")
+    return keys or [f"object:{id(item)}"]
+
+
+def select_topic_ai_enrichment_candidates(candidates: list, limit: int) -> tuple[list, int]:
+    """Select the highest-value unique topic-card enrichment candidates.
+
+    Pure helper: no DB/network access. It deduplicates by URL/canonical-ish key and
+    prefers high-scoring fresh/hot topics before the caller invokes the AI provider.
+    """
+    if limit <= 0:
+        return [], len(candidates)
+    seen: set[str] = set()
+    unique: list = []
+    for item in sorted(candidates, key=lambda i: int(getattr(i, "score", 0) or 0), reverse=True):
+        keys = _topic_candidate_keys(item)
+        if any(key in seen for key in keys):
+            continue
+        seen.update(keys)
+        unique.append(item)
+    return unique[:limit], max(0, len(unique) - limit)
+
+
+def _topic_ai_zero_reason_ru(stats: TopicCollectStats) -> str:
+    if stats.ai_enriched > 0:
+        return ""
+    if stats.ai_enrichment_skipped_no_provider:
+        return "AI не запускался: не настроен провайдер (OPENROUTER_API_KEY или OPENAI_API_KEY)."
+    if stats.ai_enrich_limit <= 0 and (stats.new or stats.existing or stats.merged_story):
+        return "AI не запускался: TOPIC_AI_ENRICH_LIMIT=0."
+    if stats.ai_enrichment_skipped_no_candidates:
+        return "AI не запускался: нет подходящих тем для обогащения."
+    if stats.ai_enrichment_skipped_existing_metadata:
+        return "AI не запускался: у подходящих тем уже есть хорошие русские метаданные."
+    if stats.ai_enrichment_provider_error:
+        return "AI не сработал: ошибка провайдера."
+    if stats.ai_enrichment_invalid_model_output:
+        return "AI не сработал: модель вернула некорректный JSON/поля."
+    if stats.ai_enrichment_failed:
+        return "AI не сработал: обогащение завершилось ошибкой, использован fallback."
+    return "AI не запускался: нет подходящих тем для обогащения."
+
+
 async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = None, settings=None) -> tuple[TopicCollectStats, list, list]:
     total_started = time.monotonic()
     source_started = time.monotonic()
@@ -2537,6 +2619,7 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
     stats.skipped_examples = {"low_score": [], "stale": [], "spam": [], "invalid": []}
     inserted = []
     enrichment_candidates = []
+    skipped_existing_metadata = 0
     spam_words = ["casino", "porn", "xxx", "bet", "viagra", "airdrop", "token presale"]
     max_topic_age_days = int(getattr(settings, "max_topic_age_days", 14) or 14)
 
@@ -2613,27 +2696,29 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
                 needs_enrichment = True
             if needs_enrichment and (not stored_topic or str(stored_topic.get("status") or "new") == "new"):
                 enrichment_candidates.append(item)
+            elif not needs_enrichment:
+                skipped_existing_metadata += 1
     stats.store_seconds = time.monotonic() - store_started
+    stats.ai_enrichment_skipped_existing_metadata = skipped_existing_metadata
 
     enrich_limit = int(getattr(settings, "topic_ai_enrich_limit", 8) or 0)
-    translate_limit = int(getattr(settings, "topic_ai_translate_limit", 8) or 0)
-    stats.ai_enrich_limit = max(0, min(30, enrich_limit, translate_limit))
+    stats.ai_enrich_limit = max(0, min(30, enrich_limit))
     ai_started = time.monotonic()
-    if not (settings and getattr(settings, "has_ai_provider", False)):
-        stats.enrichment_skipped_no_provider = len(enrichment_candidates)
+    if not enrichment_candidates:
+        stats.ai_enrichment_skipped_no_candidates = 1
+    elif not (settings and getattr(settings, "has_ai_provider", False)):
+        stats.ai_enrichment_skipped_no_provider = len(enrichment_candidates)
         if enrichment_candidates:
             logger.info("Topic metadata AI enrichment skipped: no AI provider for %s candidates; deterministic fallback is used", len(enrichment_candidates))
     elif stats.ai_enrich_limit <= 0:
-        stats.enrichment_skipped_limit = len(enrichment_candidates)
+        stats.ai_enrichment_skipped_limit = len(enrichment_candidates)
         if enrichment_candidates:
             logger.info("Topic metadata AI enrichment skipped: enrichment limit reached/disabled for %s candidates", len(enrichment_candidates))
     else:
-        enrichment_candidates = sorted(enrichment_candidates, key=lambda i: i.score, reverse=True)
-        selected_candidates = enrichment_candidates[: stats.ai_enrich_limit]
-        skipped_by_limit = enrichment_candidates[stats.ai_enrich_limit :]
-        stats.enrichment_skipped_limit = len(skipped_by_limit)
-        if skipped_by_limit:
-            logger.info("Topic metadata AI enrichment skipped: enrichment limit reached for %s candidates", len(skipped_by_limit))
+        selected_candidates, skipped_by_limit_count = select_topic_ai_enrichment_candidates(enrichment_candidates, stats.ai_enrich_limit)
+        stats.ai_enrichment_skipped_limit = skipped_by_limit_count
+        if skipped_by_limit_count:
+            logger.info("Topic metadata AI enrichment skipped: enrichment limit reached for %s candidates", skipped_by_limit_count)
         for item in selected_candidates:
             try:
                 before = (item.title_ru, item.summary_ru, item.angle_ru, item.reason_ru)
@@ -2642,13 +2727,27 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
                 if status == "enriched" or (status is None and after != before and any(after)):
                     stats.ai_enriched += 1
                 elif status == "failed":
-                    stats.enrichment_failed += 1
+                    stats.ai_enrichment_failed += 1
+                    stats.ai_enrichment_invalid_model_output += 1
                     if after != before:
                         stats.deterministic_fallback_used += 1
+                elif status == "provider_error":
+                    stats.ai_enrichment_failed += 1
+                    stats.ai_enrichment_provider_error += 1
+                    if after != before:
+                        stats.deterministic_fallback_used += 1
+                elif status == "invalid_model_output":
+                    stats.ai_enrichment_failed += 1
+                    stats.ai_enrichment_invalid_model_output += 1
+                    if after != before:
+                        stats.deterministic_fallback_used += 1
+                elif status == "already_good":
+                    stats.ai_enrichment_skipped_existing_metadata += 1
                 elif status == "skipped_no_provider":
-                    stats.enrichment_skipped_no_provider += 1
+                    stats.ai_enrichment_skipped_no_provider += 1
             except Exception as exc:
-                stats.enrichment_failed += 1
+                stats.ai_enrichment_failed += 1
+                stats.ai_enrichment_provider_error += 1
                 logger.warning("Topic enrichment skipped after exception from provider/fallback: %s", exc)
                 continue
     stats.ai_seconds = time.monotonic() - ai_started
@@ -2688,8 +2787,11 @@ def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list, 
         f"Мусор/спам: {stats.spam}",
         f"Некорректные: {stats.invalid}",
         f"Время: {int(round(stats.total_seconds))} сек. Обогащено AI: {stats.ai_enriched} тем.",
-        "",
     ]
+    zero_reason = _topic_ai_zero_reason_ru(stats)
+    if zero_reason:
+        lines.append(zero_reason)
+    lines.append("")
     if debug:
         lines.extend(
             [
@@ -2698,11 +2800,15 @@ def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list, 
                 f"AI-обогащение: {stats.ai_seconds:.1f} сек",
                 f"AI-обогащено: {stats.ai_enriched} / {stats.ai_enrich_limit}",
                 "Диагностика метаданных: "
-                f"enriched_by_ai={stats.ai_enriched}, "
+                f"ai_enriched={stats.ai_enriched}, "
+                f"ai_enrichment_failed={stats.ai_enrichment_failed}, "
+                f"ai_enrichment_skipped_no_provider={stats.ai_enrichment_skipped_no_provider}, "
+                f"ai_enrichment_skipped_limit={stats.ai_enrichment_skipped_limit}, "
+                f"ai_enrichment_skipped_no_candidates={stats.ai_enrichment_skipped_no_candidates}, "
                 f"deterministic_fallback_used={stats.deterministic_fallback_used}, "
-                f"enrichment_failed={stats.enrichment_failed}, "
-                f"enrichment_skipped_limit={stats.enrichment_skipped_limit}, "
-                f"enrichment_skipped_no_provider={stats.enrichment_skipped_no_provider}",
+                f"provider_error={stats.ai_enrichment_provider_error}, "
+                f"invalid_model_output={stats.ai_enrichment_invalid_model_output}, "
+                f"skipped_existing_metadata={stats.ai_enrichment_skipped_existing_metadata}",
                 "",
             ]
         )

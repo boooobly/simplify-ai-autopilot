@@ -1028,6 +1028,7 @@ class DraftDatabase:
         angle_ru: str | None = None,
         reason_ru: str | None = None,
         score: int | None = None,
+        content_format: str | None = None,
     ) -> bool:
         with self._connect() as conn:
             cursor = conn.execute(
@@ -1037,10 +1038,11 @@ class DraftDatabase:
                     summary_ru = COALESCE(NULLIF(?, ''), summary_ru),
                     angle_ru = COALESCE(NULLIF(?, ''), angle_ru),
                     reason_ru = COALESCE(NULLIF(?, ''), reason_ru),
-                    score = COALESCE(?, score)
+                    score = COALESCE(?, score),
+                    content_format = COALESCE(NULLIF(?, ''), content_format)
                 WHERE id = ?
                 """,
-                (title_ru, summary_ru, angle_ru, reason_ru, score, topic_id),
+                (title_ru, summary_ru, angle_ru, reason_ru, score, content_format, topic_id),
             )
             conn.commit()
             return cursor.rowcount > 0
@@ -1053,6 +1055,7 @@ class DraftDatabase:
         angle_ru: str,
         reason_ru: str,
         score: int | None = None,
+        content_format: str | None = None,
     ) -> bool:
         with self._connect() as conn:
             cursor = conn.execute(
@@ -1062,10 +1065,11 @@ class DraftDatabase:
                     summary_ru = ?,
                     angle_ru = ?,
                     reason_ru = ?,
-                    score = COALESCE(?, score)
+                    score = COALESCE(?, score),
+                    content_format = COALESCE(NULLIF(?, ''), content_format)
                 WHERE id = ?
                 """,
-                (title_ru, summary_ru, angle_ru, reason_ru, score, topic_id),
+                (title_ru, summary_ru, angle_ru, reason_ru, score, content_format, topic_id),
             )
             conn.commit()
             return cursor.rowcount > 0
