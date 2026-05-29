@@ -2787,7 +2787,10 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     if data.startswith("topics_"):
         await _handle_topics_callback(update, context, data)
         return
-    if data in {"sources_list", "source_add_rss", "source_add_telegram", "source_confirm_rss", "source_cancel_add"} or data.startswith("source_toggle:") or data.startswith("source_delete:") or data.startswith("source_test:"):
+    if data == "sources_health":
+        await _handle_menu_callback(update, context, data)
+        return
+    if data in {"sources_list", "sources_inventory", "source_add_rss", "source_add_telegram", "source_confirm_rss", "source_cancel_add"} or data.startswith("source_toggle:") or data.startswith("source_delete:") or data.startswith("source_test:"):
         await _handle_sources_callback(update, context, data)
         return
 

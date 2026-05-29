@@ -25,6 +25,10 @@ class _FakeCallbackQuery:
     def __init__(self, data):
         self.data = data
         self.message = None
+        self.answers = []
+
+    async def answer(self, text=None, show_alert=False):
+        self.answers.append((text, show_alert))
 
 
 def test_source_test_telegram_returns_after_schedule(monkeypatch):
@@ -103,3 +107,39 @@ def test_sources_status_duplicate_click_blocked(monkeypatch):
     query = _FakeCallbackQuery("menu_sources_status")
     asyncio.run(handlers._handle_menu_callback(SimpleNamespace(callback_query=query), context, "menu_sources_status"))
     assert any("уже идёт" in text for text in calls)
+
+
+def test_moderation_callback_dispatches_sources_inventory(monkeypatch):
+    calls = []
+
+    async def _fake_sources_handler(update, context, data):
+        calls.append((update, context, data))
+
+    monkeypatch.setattr(handlers, "_handle_sources_callback", _fake_sources_handler)
+
+    query = _FakeCallbackQuery("sources_inventory")
+    query.from_user = SimpleNamespace(id=1)
+    update = SimpleNamespace(callback_query=query)
+    context = SimpleNamespace(bot_data={"settings": SimpleNamespace(admin_id=1), "db": object()}, user_data={})
+
+    asyncio.run(handlers.moderation_callback(update, context))
+
+    assert calls == [(update, context, "sources_inventory")]
+
+
+def test_moderation_callback_dispatches_sources_health(monkeypatch):
+    calls = []
+
+    async def _fake_menu_handler(update, context, data):
+        calls.append((update, context, data))
+
+    monkeypatch.setattr(handlers, "_handle_menu_callback", _fake_menu_handler)
+
+    query = _FakeCallbackQuery("sources_health")
+    query.from_user = SimpleNamespace(id=1)
+    update = SimpleNamespace(callback_query=query)
+    context = SimpleNamespace(bot_data={"settings": SimpleNamespace(admin_id=1), "db": object()}, user_data={})
+
+    asyncio.run(handlers.moderation_callback(update, context))
+
+    assert calls == [(update, context, "sources_health")]
