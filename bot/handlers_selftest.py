@@ -1200,8 +1200,10 @@ async def _run_topic_enrichment_failure_fallback_selftest() -> None:
         handlers._run_enrich_topic_metadata_ru = original_enrich
         tmp.cleanup()
 
-    assert item.title_ru == item.title
-    assert item.summary_ru == handlers.TOPIC_ENRICH_FALLBACK_SUMMARY_RU
+    assert item.title_ru == "Новость от OpenAI blog: OpenAI launches a useful model update"
+    assert "Источник OpenAI blog сообщает: OpenAI launches a useful model update" in item.summary_ru
+    assert handlers.TOPIC_ENRICH_FALLBACK_SUMMARY_RU not in item.summary_ru
+    assert "практическом выводе" in item.angle_ru
 
 def run() -> None:
     aliases = {"claude": ("🤖", "5208880957280522189")}
