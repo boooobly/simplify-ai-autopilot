@@ -58,6 +58,28 @@ from bot.queue_helpers import (
     _busy_slots_for_local_day,
 )
 from bot.telegram_formatting import strip_quote_markers
+from bot.topic_handlers import (
+    collect_command,
+    collect_debug_command,
+    topics_menu_command,
+    _send_topic_cards,
+    topics_command,
+    topics_all_command,
+    topics_tools_command,
+    topics_news_command,
+    topics_fun_command,
+    topics_video_command,
+    topics_guides_command,
+    topics_best_command,
+    topics_hot_command,
+    _topics_fun_command,
+    _topics_filtered_editorial_command,
+    _topics_filtered_command,
+    _handle_topics_callback,
+    handle_topic_moderation_action,
+)
+
+
 from bot.topic_scoring import hybrid_topic_score
 from bot.sources import (
     COMMUNITY_RSS,
@@ -2643,322 +2665,8 @@ def _render_sources_inventory(settings, db: DraftDatabase) -> list[str]:
     return source_handlers.render_sources_inventory(settings, db, _detect_railway_with_local_db_path)
 
 
-async def collect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings = context.bot_data["settings"]
-    db: DraftDatabase = context.bot_data["db"]
-    user_id = update.effective_user.id if update.effective_user else None
-    if not _is_admin(user_id, settings.admin_id):
-        if update.message:
-            await update.message.reply_text("Нет доступа.")
-        return
+sources_status_command = source_handlers.sources_status_command
 
-    progress_message = None
-    if update.message:
-        progress_message = await update.message.reply_text("🔄 Собираю темы... Это может занять до пары минут.")
-
-    stats, items, inserted = await _collect_topics_with_stats(db, settings=settings)
-
-    if update.message:
-        text = _render_collect_text(stats, items, inserted)
-        if progress_message:
-            try:
-                await progress_message.edit_text(text, reply_markup=_collect_result_keyboard())
-                return
-            except Exception as exc:
-                logger.warning("Failed to edit collect progress message: %s", exc)
-        await update.message.reply_text(text, reply_markup=_collect_result_keyboard())
-
-
-async def sources_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings = context.bot_data["settings"]
-    db: DraftDatabase = context.bot_data["db"]
-    user_id = update.effective_user.id if update.effective_user else None
-    if not _is_admin(user_id, settings.admin_id):
-        if update.message:
-            await update.message.reply_text("Нет доступа.")
-        return
-    if update.message:
-        await update.message.reply_text("Проверяю источники...")
-    _items, reports = await _run_collect_topics_with_diagnostics(settings=settings, db=db)
-    if update.message:
-        await update.message.reply_text(_render_sources_status(reports, db), reply_markup=_admin_reply_keyboard())
-
-
-async def collect_debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings = context.bot_data["settings"]
-    db: DraftDatabase = context.bot_data["db"]
-    user_id = update.effective_user.id if update.effective_user else None
-    if not _is_admin(user_id, settings.admin_id):
-        if update.message:
-            await update.message.reply_text("Нет доступа.")
-        return
-    progress_message = None
-    if update.message:
-        progress_message = await update.message.reply_text("🔄 Собираю темы... Это может занять до пары минут.")
-    debug_started = time.monotonic()
-    items, reports = await _run_collect_topics_with_diagnostics(settings=settings, db=db)
-    source_seconds = time.monotonic() - debug_started
-    stats, _all_items, inserted = await _collect_topics_with_stats(db, items=items, settings=settings)
-    stats.source_seconds = source_seconds
-    stats.total_seconds = source_seconds + stats.store_seconds + stats.ai_seconds
-    text = _render_collect_text(stats, items, inserted, debug=True)
-    ok = sum(1 for r in reports if r.status == "ok")
-    empty = sum(1 for r in reports if r.status == "empty")
-    skipped = sum(1 for r in reports if r.status == "skipped")
-    errors = sum(1 for r in reports if r.status == "error")
-    problems = [r for r in reports if r.status in {"error", "empty"}][:12]
-    problem_lines = [f"- {r.name}: {r.error or 'empty'}" if r.status == "error" else f"- {r.name}: empty" for r in problems]
-    skipped_lines = [f"- {r.name}: {r.error or 'пропущено'}" for r in reports if r.status == "skipped"][:8]
-    combined = text.replace("🧠 Темы собраны", "🧠 Темы собраны с диагностикой")
-    combined += f"\n\nСвежесть: пропущено старых тем: {stats.stale} (лимит {getattr(settings, 'max_topic_age_days', 14)} дн.)"
-    combined += f"\n\nИсточники:\nРаботают: {ok}\nПустые: {empty}\nОтключены/пропущены: {skipped}\nОшибки: {errors}"
-    if skipped_lines:
-        combined += "\n\nОтключено/пропущено:\n" + "\n".join(skipped_lines)
-    if problem_lines:
-        combined += "\n\nПроблемы:\n" + "\n".join(problem_lines)
-    if len([r for r in reports if r.status in {'error', 'empty'}]) > 12:
-        combined += "\nПоказаны первые 12 проблем."
-    if update.message:
-        if progress_message:
-            try:
-                await progress_message.edit_text(combined[:3900], reply_markup=_collect_result_keyboard())
-                return
-            except Exception as exc:
-                logger.warning("Failed to edit collect debug progress message: %s", exc)
-        await update.message.reply_text(combined[:3900], reply_markup=_collect_result_keyboard())
-
-
-
-async def _send_topic_cards(context: ContextTypes.DEFAULT_TYPE, settings, topics: list[dict]) -> None:
-    for topic in topics:
-        await context.bot.send_message(
-            chat_id=settings.admin_id,
-            text=_topic_card_text(topic),
-            reply_markup=_topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")),
-            link_preview_options=_disabled_link_preview_options(),
-        )
-
-
-async def topics_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings = context.bot_data["settings"]
-    db: DraftDatabase = context.bot_data["db"]
-    user_id = update.effective_user.id if update.effective_user else None
-    if not _is_admin(user_id, settings.admin_id):
-        if update.message:
-            await update.message.reply_text("Нет доступа.")
-        return
-    hot_topics = _topics_for_kind(db, "hot", limit=5)
-    new_topics = _topics_for_kind(db, "new", limit=5)
-    if not hot_topics and not new_topics:
-        text = _render_topics_hub_text(db) + "\n\nТем пока нет. Запусти /collect или /collect_debug."
-        if update.message:
-            await update.message.reply_text(text, reply_markup=_topics_hub_keyboard())
-        return
-    if update.message:
-        await update.message.reply_text(_render_topics_hub_text(db), reply_markup=_topics_hub_keyboard())
-    if hot_topics:
-        if update.message:
-            await update.message.reply_text(_render_topic_preview_list("🔥 Лучшие горячие", hot_topics), reply_markup=_topics_hub_keyboard())
-    else:
-        if update.message:
-            await update.message.reply_text(
-                "Горячих тем пока нет, но есть свежие темы. Показываю лучшие новые.",
-                reply_markup=_topics_hub_keyboard(),
-            )
-            await update.message.reply_text(_render_topic_preview_list("🆕 Лучшие новые", new_topics), reply_markup=_topics_hub_keyboard())
-
-
-
-async def topics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings = context.bot_data["settings"]
-    db: DraftDatabase = context.bot_data["db"]
-    user_id = update.effective_user.id if update.effective_user else None
-    if not _is_admin(user_id, settings.admin_id):
-        if update.message:
-            await update.message.reply_text("Нет доступа.")
-        return
-
-    limit = _parse_topic_limit(context, default=10)
-    topics = db.list_topic_candidates(limit=limit, status="new", order_by_score=True)
-    if not topics:
-        if update.message:
-            await update.message.reply_text("Пока нет тем. Запусти /collect")
-        return
-
-    for topic in topics:
-        text = _topic_card_text(topic)
-        keyboard = _topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or ""))
-        await context.bot.send_message(
-            chat_id=settings.admin_id,
-            text=text,
-            reply_markup=keyboard,
-            link_preview_options=_disabled_link_preview_options(),
-        )
-    if update.message:
-        next_limit = min(30, max(limit + 10, 20))
-        await update.message.reply_text(f"Показал {len(topics)} тем. Можно открыть больше: /topics {next_limit}")
-
-
-async def topics_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings = context.bot_data["settings"]
-    db: DraftDatabase = context.bot_data["db"]
-    user_id = update.effective_user.id if update.effective_user else None
-    if not _is_admin(user_id, settings.admin_id):
-        if update.message:
-            await update.message.reply_text("Нет доступа.")
-        return
-    topics = db.list_topic_candidates(limit=15, status=None, order_by_score=True)
-    if not topics:
-        if update.message:
-            await update.message.reply_text("Пока нет тем. Запусти /collect")
-        return
-    for topic in topics:
-        status = topic.get("status") or "new"
-        await context.bot.send_message(
-            chat_id=settings.admin_id,
-            text=f"{_topic_card_text(topic)}\nСтатус: {status}",
-            link_preview_options=_disabled_link_preview_options(),
-        )
-
-
-
-
-async def topics_tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _topics_filtered_command(update, context, categories=["tool", "creator", "guide", "dev", "mobile"], command_name="topics_tools")
-
-
-async def topics_news_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _topics_filtered_command(update, context, categories=["news", "model", "agent", "research", "business", "privacy"], command_name="topics_news")
-
-
-async def topics_fun_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _topics_fun_command(update, context)
-
-
-async def topics_video_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _topics_filtered_editorial_command(update, context, lanes=["short_video", "creator", "tool", "meme"], formats=["short_video", "tool_review", "meme"], min_score=62, command_name="topics_video")
-
-
-async def topics_guides_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _topics_filtered_editorial_command(update, context, lanes=["guide"], categories=["guide"], command_name="topics_guides")
-
-
-async def topics_best_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings = context.bot_data["settings"]
-    db: DraftDatabase = context.bot_data["db"]
-    if not _is_admin(update.effective_user.id if update.effective_user else None, settings.admin_id):
-        if update.message:
-            await update.message.reply_text("Нет доступа.")
-        return
-    topics = db.get_balanced_topic_shortlist(limit=_parse_topic_limit(context, default=12), hours=48, min_score=60)
-    if update.message:
-        await update.message.reply_text("⭐ Лучшие темы на сегодня")
-    for topic in topics:
-        await context.bot.send_message(chat_id=settings.admin_id, text=_topic_card_text(topic), reply_markup=_topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")), link_preview_options=_disabled_link_preview_options())
-
-
-async def _topics_fun_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings = context.bot_data["settings"]
-    db: DraftDatabase = context.bot_data["db"]
-    user_id = update.effective_user.id if update.effective_user else None
-    if not _is_admin(user_id, settings.admin_id):
-        if update.message:
-            await update.message.reply_text("Нет доступа.")
-        return
-
-    topics_by_category = db.list_topic_candidates_filtered(limit=20, status="new", categories=["drama", "meme"])
-    topics_by_group = db.list_topic_candidates_filtered(limit=20, status="new", source_groups=["community", "github", "x", "custom"])
-
-    merged: dict[int, dict] = {}
-    for topic in topics_by_category + topics_by_group:
-        topic_id = int(topic["id"])
-        merged[topic_id] = topic
-
-    limit = _parse_topic_limit(context, default=10)
-    topics = sorted(merged.values(), key=lambda t: (int(t.get("score") or 0), str(t.get("created_at") or "")), reverse=True)[:limit]
-    if not topics:
-        if update.message:
-            await update.message.reply_text("По фильтру пока нет тем. Запусти /collect")
-        return
-
-    for topic in topics:
-        await context.bot.send_message(
-            chat_id=settings.admin_id,
-            text=_topic_card_text(topic),
-            reply_markup=_topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")),
-            link_preview_options=_disabled_link_preview_options(),
-        )
-    if update.message:
-        next_limit = min(30, max(limit + 10, 20))
-        await update.message.reply_text(f"Показал {len(topics)} тем. Можно открыть больше: /topics_fun {next_limit}")
-
-
-async def _topics_filtered_editorial_command(update: Update, context: ContextTypes.DEFAULT_TYPE, lanes=None, formats=None, categories=None, min_score: int = 0, command_name: str = "topics") -> None:
-    settings = context.bot_data["settings"]
-    db: DraftDatabase = context.bot_data["db"]
-    if not _is_admin(update.effective_user.id if update.effective_user else None, settings.admin_id):
-        if update.message:
-            await update.message.reply_text("Нет доступа.")
-        return
-    topics = db.list_topic_candidates_by_editorial(limit=_parse_topic_limit(context, default=10), lanes=lanes, formats=formats, categories=categories, min_score=min_score)
-    if not topics:
-        if update.message:
-            await update.message.reply_text("По фильтру пока нет тем. Запусти /collect")
-        return
-    for topic in topics:
-        await context.bot.send_message(chat_id=settings.admin_id, text=_topic_card_text(topic), reply_markup=_topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")), link_preview_options=_disabled_link_preview_options())
-
-
-async def _topics_filtered_command(update: Update, context: ContextTypes.DEFAULT_TYPE, categories=None, source_groups=None, command_name: str = "topics") -> None:
-    settings = context.bot_data["settings"]
-    db: DraftDatabase = context.bot_data["db"]
-    user_id = update.effective_user.id if update.effective_user else None
-    if not _is_admin(user_id, settings.admin_id):
-        if update.message:
-            await update.message.reply_text("Нет доступа.")
-        return
-    limit = _parse_topic_limit(context, default=10)
-    topics = db.list_topic_candidates_filtered(limit=limit, status="new", categories=categories, source_groups=source_groups)
-    if not topics:
-        if update.message:
-            await update.message.reply_text("По фильтру пока нет тем. Запусти /collect")
-        return
-    for topic in topics:
-        await context.bot.send_message(
-            chat_id=settings.admin_id,
-            text=_topic_card_text(topic),
-            reply_markup=_topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")),
-            link_preview_options=_disabled_link_preview_options(),
-        )
-    if update.message:
-        next_limit = min(30, max(limit + 10, 20))
-        await update.message.reply_text(f"Показал {len(topics)} тем. Можно открыть больше: /{command_name} {next_limit}")
-
-
-async def topics_hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings = context.bot_data["settings"]
-    db: DraftDatabase = context.bot_data["db"]
-    user_id = update.effective_user.id if update.effective_user else None
-    if not _is_admin(user_id, settings.admin_id):
-        if update.message:
-            await update.message.reply_text("Нет доступа.")
-        return
-    limit = _parse_topic_limit(context, default=15)
-    topics = db.list_topic_candidates_min_score(limit=limit, status="new", min_score=75)
-    if not topics:
-        fallback_topics = db.list_topic_candidates(limit=limit, status="new", order_by_score=True)
-        if fallback_topics:
-            if update.message:
-                await update.message.reply_text("Горячих тем пока нет, но есть свежие темы. Показываю лучшие новые.", reply_markup=_topics_hub_keyboard())
-            topics = fallback_topics
-        else:
-            if update.message:
-                await update.message.reply_text("Тем пока нет. Запусти /collect или /collect_debug.", reply_markup=_topics_hub_keyboard())
-            return
-    for topic in topics:
-        await context.bot.send_message(chat_id=settings.admin_id, text=_topic_card_text(topic), reply_markup=_topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")), link_preview_options=_disabled_link_preview_options())
-    if update.message:
-        await update.message.reply_text(f"Показал {len(topics)} тем. Можно открыть больше: /topics_hot 30")
 
 async def _usage_command(update: Update, context: ContextTypes.DEFAULT_TYPE, days: int, period_title: str) -> None:
     settings = context.bot_data["settings"]
@@ -3056,39 +2764,6 @@ async def emoji_ids_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 
-async def _handle_topics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
-    settings = context.bot_data["settings"]
-    db: DraftDatabase = context.bot_data["db"]
-    query = update.callback_query
-    if not query:
-        return
-    kind = data.split(":", 1)[0].removeprefix("topics_")
-    titles = {
-        "hot": "🔥 Горячие темы",
-        "new": "🆕 Лучшие новые темы",
-        "tools": "🛠 Инструменты",
-        "news": "📰 Новости",
-        "fun": "😄 Живые темы",
-    }
-    topics = _topics_for_kind(db, kind, limit=10)
-    if kind == "hot" and not topics:
-        topics = _topics_for_kind(db, "new", limit=10)
-        text = "Горячих тем пока нет, но есть свежие темы. Показываю лучшие новые."
-    else:
-        text = _render_topic_preview_list(titles.get(kind, "🧠 Темы"), topics)
-    if not topics:
-        text = "Тем пока нет. Запусти /collect или /collect_debug."
-    await _edit_callback_message(query, text, reply_markup=_topics_hub_keyboard())
-    for topic in topics[:5]:
-        await context.bot.send_message(
-            chat_id=settings.admin_id,
-            text=_topic_card_text(topic),
-            reply_markup=_topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")),
-            link_preview_options=_disabled_link_preview_options(),
-        )
-
-
-
 async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle Publish/Reject/Rewrite button clicks."""
 
@@ -3112,7 +2787,10 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     if data.startswith("topics_"):
         await _handle_topics_callback(update, context, data)
         return
-    if data in {"sources_list", "source_add_rss", "source_add_telegram", "source_confirm_rss", "source_cancel_add"} or data.startswith("source_toggle:") or data.startswith("source_delete:") or data.startswith("source_test:"):
+    if data == "sources_health":
+        await _handle_menu_callback(update, context, data)
+        return
+    if data in {"sources_list", "sources_inventory", "source_add_rss", "source_add_telegram", "source_confirm_rss", "source_cancel_add"} or data.startswith("source_toggle:") or data.startswith("source_delete:") or data.startswith("source_test:"):
         await _handle_sources_callback(update, context, data)
         return
 
@@ -3128,18 +2806,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         ):
             return
 
-        if action == "topic_generate":
-            topic_id = draft_id
-            new_draft_id, error = await _create_draft_from_topic(
-                context=context, settings=settings, db=db, topic_id=topic_id
-            )
-            if new_draft_id is None:
-                await _edit_callback_message(query, error or "Не удалось создать черновик.")
-                return
-            success_text = f"Создан черновик #{new_draft_id} из темы #{topic_id}."
-            if error:
-                success_text = f"{success_text}\n\n⚠️ {error}"
-            await _edit_callback_message(query, success_text)
+        if await handle_topic_moderation_action(update, context, action, draft_id, query):
             return
 
         if action == "queue_today":
@@ -3209,28 +2876,6 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
 
-        if action == "topic_reenrich":
-            topic_id = draft_id
-            await _edit_callback_message(query, f"🔁 Перевожу тему #{topic_id} заново...")
-            topic, error = await _reenrich_topic_candidate_display_metadata(topic_id, settings, db)
-            if error or not topic:
-                await _edit_callback_message(query, error or "Не удалось заново перевести тему.")
-                return
-            await _edit_callback_message(
-                query,
-                _topic_card_text(topic),
-                reply_markup=_topic_actions_keyboard(topic_id, str(topic.get("url") or "")),
-            )
-            return
-
-        if action == "reject_topic":
-            topic = db.get_topic_candidate(draft_id)
-            if not topic:
-                await _edit_callback_message(query, f"Тема #{draft_id} не найдена.")
-                return
-            db.update_topic_status(draft_id, "rejected")
-            await _edit_callback_message(query, f"Тема #{draft_id} отклонена.")
-            return
 
         handled = await handle_draft_moderation_callback(
             update,
