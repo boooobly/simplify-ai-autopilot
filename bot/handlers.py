@@ -2962,7 +2962,7 @@ def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list, 
         f"Мусор/спам: {stats.spam}",
         f"Некорректные: {stats.invalid}",
         f"Время: {int(round(stats.total_seconds))} сек.",
-        f"AI: обогащено {stats.ai_enriched}, попыток {stats.ai_enrichment_attempted}, ошибок {stats.ai_enrichment_failed}.",
+        f"Обогащено AI: {stats.ai_enriched} тем. Попыток: {stats.ai_enrichment_attempted}, ошибок: {stats.ai_enrichment_failed}.",
     ]
     zero_reason = _topic_ai_zero_reason_ru(stats)
     if zero_reason:
