@@ -9,6 +9,13 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from bot.database import DraftDatabase
+from bot.telegram_safety import (
+    safe_edit_message_text,
+    safe_reply_text,
+    safe_send_message,
+    split_telegram_text,
+    truncate_telegram_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +48,11 @@ async def collect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         text = handlers._render_collect_text(stats, items, inserted)
         if progress_message:
             try:
-                await progress_message.edit_text(text, reply_markup=handlers._collect_result_keyboard())
+                await safe_edit_message_text(progress_message, text, reply_markup=handlers._collect_result_keyboard())
                 return
             except Exception as exc:
                 logger.warning("Failed to edit collect progress message: %s", exc)
-        await update.message.reply_text(text, reply_markup=handlers._collect_result_keyboard())
+        await safe_reply_text(update.message, text, reply_markup=handlers._collect_result_keyboard())
 
 
 async def collect_debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -84,13 +91,24 @@ async def collect_debug_command(update: Update, context: ContextTypes.DEFAULT_TY
     if len([r for r in reports if r.status in {'error', 'empty'}]) > 12:
         combined += "\nПоказаны первые 12 проблем."
     if update.message:
+        parts = split_telegram_text(combined)
         if progress_message:
             try:
-                await progress_message.edit_text(combined[:3900], reply_markup=handlers._collect_result_keyboard())
+                await safe_edit_message_text(
+                    progress_message,
+                    parts[0],
+                    reply_markup=handlers._collect_result_keyboard() if len(parts) == 1 else None,
+                )
+                for index, part in enumerate(parts[1:], start=1):
+                    await safe_reply_text(
+                        update.message,
+                        part,
+                        reply_markup=handlers._collect_result_keyboard() if index == len(parts) - 1 else None,
+                    )
                 return
             except Exception as exc:
                 logger.warning("Failed to edit collect debug progress message: %s", exc)
-        await update.message.reply_text(combined[:3900], reply_markup=handlers._collect_result_keyboard())
+        await safe_reply_text(update.message, combined, reply_markup=handlers._collect_result_keyboard())
 
 
 async def topics_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -113,22 +131,31 @@ async def topics_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(handlers._render_topics_hub_text(db), reply_markup=handlers._topics_hub_keyboard())
     if hot_topics:
         if update.message:
-            await update.message.reply_text(handlers._render_topic_preview_list("🔥 Лучшие горячие", hot_topics), reply_markup=handlers._topics_hub_keyboard())
+            await safe_reply_text(
+                update.message,
+                handlers._render_topic_preview_list("🔥 Лучшие горячие", hot_topics),
+                reply_markup=handlers._topics_hub_keyboard(),
+            )
     else:
         if update.message:
             await update.message.reply_text(
                 "Горячих тем пока нет, но есть свежие темы. Показываю лучшие новые.",
                 reply_markup=handlers._topics_hub_keyboard(),
             )
-            await update.message.reply_text(handlers._render_topic_preview_list("🆕 Лучшие новые", new_topics), reply_markup=handlers._topics_hub_keyboard())
+            await safe_reply_text(
+                update.message,
+                handlers._render_topic_preview_list("🆕 Лучшие новые", new_topics),
+                reply_markup=handlers._topics_hub_keyboard(),
+            )
 
 
 async def _send_topic_cards(context: ContextTypes.DEFAULT_TYPE, settings, topics: list[dict]) -> None:
     handlers = _legacy_handlers()
     for topic in topics:
-        await context.bot.send_message(
+        await safe_send_message(
+            context.bot,
             chat_id=settings.admin_id,
-            text=handlers._topic_card_text(topic),
+            text=truncate_telegram_text(handlers._topic_card_text(topic)),
             reply_markup=handlers._topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")),
             link_preview_options=handlers._disabled_link_preview_options(),
         )
@@ -173,9 +200,10 @@ async def topics_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     for topic in topics:
         status = topic.get("status") or "new"
-        await context.bot.send_message(
+        await safe_send_message(
+            context.bot,
             chat_id=settings.admin_id,
-            text=f"{handlers._topic_card_text(topic)}\nСтатус: {status}",
+            text=truncate_telegram_text(f"{handlers._topic_card_text(topic)}\nСтатус: {status}"),
             link_preview_options=handlers._disabled_link_preview_options(),
         )
 
@@ -280,7 +308,13 @@ async def topics_best_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if update.message:
         await update.message.reply_text("⭐ Лучшие темы на сегодня")
     for topic in topics:
-        await context.bot.send_message(chat_id=settings.admin_id, text=handlers._topic_card_text(topic), reply_markup=handlers._topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")), link_preview_options=handlers._disabled_link_preview_options())
+        await safe_send_message(
+            context.bot,
+            chat_id=settings.admin_id,
+            text=truncate_telegram_text(handlers._topic_card_text(topic)),
+            reply_markup=handlers._topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")),
+            link_preview_options=handlers._disabled_link_preview_options(),
+        )
 
 
 async def topics_hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -334,9 +368,10 @@ async def handle_topics_callback(update: Update, context: ContextTypes.DEFAULT_T
         text = "Тем пока нет. Запусти /collect или /collect_debug."
     await handlers._edit_callback_message(query, text, reply_markup=handlers._topics_hub_keyboard())
     for topic in topics[:5]:
-        await context.bot.send_message(
+        await safe_send_message(
+            context.bot,
             chat_id=settings.admin_id,
-            text=handlers._topic_card_text(topic),
+            text=truncate_telegram_text(handlers._topic_card_text(topic)),
             reply_markup=handlers._topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")),
             link_preview_options=handlers._disabled_link_preview_options(),
         )

@@ -58,6 +58,14 @@ from bot.queue_helpers import (
     _busy_slots_for_local_day,
 )
 from bot.telegram_formatting import strip_quote_markers
+from bot.telegram_safety import (
+    TELEGRAM_SAFE_TEXT_LIMIT,
+    safe_edit_or_send_callback_message,
+    safe_reply_text,
+    safe_send_message,
+    telegram_text_len,
+    truncate_telegram_text,
+)
 from bot.topic_handlers import (
     collect_command,
     collect_debug_command,
@@ -272,6 +280,7 @@ class TopicCollectStats:
     ai_enrichment_invalid_model_output: int = 0
     ai_enrichment_invalid_json: int = 0
     ai_enrichment_invalid_fields: int = 0
+    ai_enrichment_output_truncated: int = 0
     ai_enrichment_json_mode_unsupported: int = 0
     ai_enrichment_model: str = ""
     skipped_examples: dict[str, list[str]] | None = None
@@ -1016,6 +1025,8 @@ def _topic_enrichment_failure_status(diagnostics: dict[str, int] | None) -> str:
     diagnostics = diagnostics or {}
     if int(diagnostics.get("ai_provider_errors", 0) or 0):
         return "provider_error"
+    if int(diagnostics.get("ai_output_truncated", 0) or 0):
+        return "output_truncated"
     if int(diagnostics.get("ai_invalid_json", 0) or 0):
         return "invalid_json"
     if int(diagnostics.get("ai_invalid_fields", 0) or 0):
@@ -1406,12 +1417,18 @@ async def _edit_callback_message(
                 reply_markup=reply_markup,
             )
             if query.message:
-                await query.message.reply_text(text, link_preview_options=_disabled_link_preview_options())
+                await safe_reply_text(
+                    query.message,
+                    text,
+                    link_preview_options=_disabled_link_preview_options(),
+                )
             return
-        await query.edit_message_text(
+        await safe_edit_or_send_callback_message(
+            query,
             text,
             reply_markup=reply_markup,
             link_preview_options=_disabled_link_preview_options(),
+            logger=logger,
         )
     except BadRequest as exc:
         if "message is not modified" in str(exc).lower():
@@ -2065,13 +2082,15 @@ async def _send_daily_plan(
     if summary_query is not None:
         await _edit_callback_message(summary_query, summary_text, reply_markup=keyboard)
     else:
-        await context.bot.send_message(
+        await safe_send_message(
+            context.bot,
             chat_id=settings.admin_id, text=summary_text, reply_markup=keyboard
         )
     for slot, topic in zip(slots, topics):
-        await context.bot.send_message(
+        await safe_send_message(
+            context.bot,
             chat_id=settings.admin_id,
-            text=f"🕒 Слот: {slot}\n\n{_topic_card_text(topic)}",
+            text=truncate_telegram_text(f"🕒 Слот: {slot}\n\n{_topic_card_text(topic)}"),
             reply_markup=_topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")),
             link_preview_options=_disabled_link_preview_options(),
         )
@@ -2724,6 +2743,8 @@ def _topic_ai_zero_reason_ru(stats: TopicCollectStats) -> str:
     attempts = stats.ai_enrichment_attempted or stats.ai_enrichment_failed
     if stats.ai_enrichment_provider_error:
         return f"AI не сработал: {attempts} попыток, {stats.ai_enrichment_provider_error} provider errors. Модель: {model}. Проверь MODEL_TOPIC_ENRICH или ключ провайдера."
+    if stats.ai_enrichment_output_truncated:
+        return f"AI не сработал: {attempts} попыток, {stats.ai_enrichment_output_truncated} truncated output. Модель: {model}. Ответ модели упёрся в лимит токенов."
     if stats.ai_enrichment_invalid_json:
         return f"AI не сработал: {attempts} попыток, {stats.ai_enrichment_invalid_json} invalid JSON. Модель: {model}. Проверь MODEL_TOPIC_ENRICH или включи JSON-compatible model."
     if stats.ai_enrichment_invalid_fields:
@@ -2847,6 +2868,7 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
                 status = await _enrich_topic_metadata_if_available(item, settings, db)
                 diagnostics = getattr(item, "_ai_enrichment_diagnostics", {}) or {}
                 stats.ai_enrichment_json_mode_unsupported += int(diagnostics.get("ai_json_mode_unsupported", 0) or 0)
+                stats.ai_enrichment_output_truncated += int(diagnostics.get("ai_output_truncated", 0) or 0)
                 after = (item.title_ru, item.summary_ru, item.angle_ru, item.reason_ru)
                 if status == "enriched" or (status is None and after != before and any(after)):
                     stats.ai_enriched += 1
@@ -2865,6 +2887,11 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
                     stats.ai_enrichment_failed += 1
                     stats.ai_enrichment_invalid_model_output += 1
                     stats.ai_enrichment_invalid_json += 1
+                    if after != before:
+                        stats.deterministic_fallback_used += 1
+                elif status == "output_truncated":
+                    stats.ai_enrichment_failed += 1
+                    stats.ai_enrichment_invalid_model_output += 1
                     if after != before:
                         stats.deterministic_fallback_used += 1
                 elif status in {"invalid_model_output", "invalid_fields"}:
@@ -2904,15 +2931,18 @@ def _topic_get(topic, key: str, default=None):
 def _render_collect_topic_line(topic, *, debug: bool = False) -> list[str]:
     score = int(_topic_get(topic, "score", 0) or 0)
     category = _topic_get(topic, "category")
-    title = topic_display_title(topic)
+    title = truncate_telegram_text(re.sub(r"\s+", " ", topic_display_title(topic)).strip(), limit=100)
+    summary = truncate_telegram_text(re.sub(r"\s+", " ", topic_summary_ru(topic)).strip(), limit=150)
+    angle = truncate_telegram_text(re.sub(r"\s+", " ", topic_angle_ru(topic)).strip(), limit=120)
     marker = f" {_topic_ai_marker(topic)}" if debug else ""
     lines = [
         f"- {score} - {_category_label(category)} - {title}{marker}",
-        f"  О чем: {topic_summary_ru(topic)}",
-        f"  Идея: {topic_angle_ru(topic)}",
+        f"  О чем: {summary}",
     ]
+    if angle:
+        lines.append(f"  Идея: {angle}")
     content_format = str(_topic_get(topic, "content_format", "") or "").strip()
-    if content_format:
+    if debug and content_format:
         lines.append(f"  Формат: {_format_label_ru(content_format)}")
     return lines
 
@@ -2931,7 +2961,8 @@ def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list, 
         f"Низкое качество: {stats.low_quality or stats.low_score}",
         f"Мусор/спам: {stats.spam}",
         f"Некорректные: {stats.invalid}",
-        f"Время: {int(round(stats.total_seconds))} сек. Обогащено AI: {stats.ai_enriched} тем.",
+        f"Время: {int(round(stats.total_seconds))} сек.",
+        f"AI: обогащено {stats.ai_enriched}, попыток {stats.ai_enrichment_attempted}, ошибок {stats.ai_enrichment_failed}.",
     ]
     zero_reason = _topic_ai_zero_reason_ru(stats)
     if zero_reason:
@@ -2949,6 +2980,7 @@ def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list, 
                 f"ai_enriched={stats.ai_enriched}, "
                 f"ai_invalid_json={stats.ai_enrichment_invalid_json}, "
                 f"ai_invalid_fields={stats.ai_enrichment_invalid_fields}, "
+                f"ai_output_truncated={stats.ai_enrichment_output_truncated}, "
                 f"ai_provider_errors={stats.ai_enrichment_provider_error}, "
                 f"ai_json_mode_unsupported={stats.ai_enrichment_json_mode_unsupported}, "
                 f"deterministic_fallback_used={stats.deterministic_fallback_used}, "
@@ -2977,6 +3009,7 @@ def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list, 
     if inserted:
         marked_top = [i for i in inserted if getattr(i, "_collect_preview_top_new", False)]
         top = sorted(marked_top, key=lambda i: getattr(i, "_collect_preview_top_new_order", 999)) if marked_top else sorted(inserted, key=lambda i: i.score, reverse=True)[:5]
+        top = top[: 5 if debug else 3]
         displayed_preview_topics.extend(top)
         lines.append("Лучшие новые:")
         for item in top:
@@ -2990,6 +3023,7 @@ def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list, 
         if marked_lively
         else [i for i in sorted(preview_source_items, key=lambda i: i.score, reverse=True) if i.score >= 50 and (i.source_group in {"community","github","x","tools","custom"} or i.category in {"drama","meme","guide","creator"})][:5]
     )
+    lively = lively[: 5 if debug else 3]
     lines.extend(["", "Живые темы:"])
     if lively:
         displayed_preview_topics.extend(lively)
@@ -3004,7 +3038,11 @@ def _render_collect_text(stats: TopicCollectStats, items: list, inserted: list, 
         lines.extend(["", f"Покрытие preview: [AI] {ai_count}, [fallback] {fallback_count}"])
         if stats.ai_enriched and ai_count == 0:
             lines.append("AI enriched topics are not present in preview list. Check enrichment candidate selection.")
-    return "\n".join(lines)
+    rendered = "\n".join(lines)
+    if not debug and telegram_text_len(rendered) > TELEGRAM_SAFE_TEXT_LIMIT:
+        logger.warning("Compact /collect summary exceeded safe limit: length=%s", telegram_text_len(rendered))
+        return truncate_telegram_text(rendered, limit=TELEGRAM_SAFE_TEXT_LIMIT)
+    return rendered
 
 
 def _render_sources_inventory(settings, db: DraftDatabase) -> list[str]:
@@ -3365,7 +3403,13 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
         for topic in topics:
             text = _topic_card_text(topic)
             keyboard = _topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or ""))
-            await context.bot.send_message(chat_id=settings.admin_id, text=text, reply_markup=keyboard, link_preview_options=_disabled_link_preview_options())
+            await safe_send_message(
+                context.bot,
+                chat_id=settings.admin_id,
+                text=truncate_telegram_text(text),
+                reply_markup=keyboard,
+                link_preview_options=_disabled_link_preview_options(),
+            )
     elif data == "menu_sources":
         await _edit_callback_message(query, "📡 Источники\nВыбери действие:", reply_markup=_sources_hub_keyboard())
     elif data == "sources_health":
