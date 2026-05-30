@@ -42,6 +42,7 @@ async def collect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if update.message:
         progress_message = await update.message.reply_text("🔄 Собираю темы... Это может занять до пары минут.")
 
+    context.bot_data["topic_detail_debug"] = False
     stats, items, inserted = await handlers._collect_topics_with_stats(db, settings=settings)
 
     if update.message:
@@ -67,6 +68,7 @@ async def collect_debug_command(update: Update, context: ContextTypes.DEFAULT_TY
     progress_message = None
     if update.message:
         progress_message = await update.message.reply_text("🔄 Собираю темы... Это может занять до пары минут.")
+    context.bot_data["topic_detail_debug"] = True
     debug_started = time.monotonic()
     items, reports = await handlers._run_collect_topics_with_diagnostics(settings=settings, db=db)
     source_seconds = time.monotonic() - debug_started
@@ -151,7 +153,12 @@ async def topics_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def _send_topic_cards(context: ContextTypes.DEFAULT_TYPE, settings, topics: list[dict]) -> None:
     handlers = _legacy_handlers()
+    db: DraftDatabase | None = context.bot_data.get("db")
     for topic in topics:
+        if db is not None:
+            topic = await handlers._ensure_topic_candidate_display_metadata(
+                int(topic["id"]), settings, db, debug=bool(context.bot_data.get("topic_detail_debug")),
+            ) or topic
         await safe_send_message(
             context.bot,
             chat_id=settings.admin_id,
@@ -200,10 +207,14 @@ async def topics_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     for topic in topics:
         status = topic.get("status") or "new"
+        topic = await handlers._ensure_topic_candidate_display_metadata(
+            int(topic["id"]), settings, db, debug=bool(context.bot_data.get("topic_detail_debug")),
+        ) or topic
         await safe_send_message(
             context.bot,
             chat_id=settings.admin_id,
             text=truncate_telegram_text(f"{handlers._topic_card_text(topic)}\nСтатус: {status}"),
+            reply_markup=handlers._topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")),
             link_preview_options=handlers._disabled_link_preview_options(),
         )
 
@@ -307,14 +318,7 @@ async def topics_best_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     topics = db.get_balanced_topic_shortlist(limit=handlers._parse_topic_limit(context, default=12), hours=48, min_score=60)
     if update.message:
         await update.message.reply_text("⭐ Лучшие темы на сегодня")
-    for topic in topics:
-        await safe_send_message(
-            context.bot,
-            chat_id=settings.admin_id,
-            text=truncate_telegram_text(handlers._topic_card_text(topic)),
-            reply_markup=handlers._topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")),
-            link_preview_options=handlers._disabled_link_preview_options(),
-        )
+    await _send_topic_cards(context, settings, topics)
 
 
 async def topics_hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -367,14 +371,7 @@ async def handle_topics_callback(update: Update, context: ContextTypes.DEFAULT_T
     if not topics:
         text = "Тем пока нет. Запусти /collect или /collect_debug."
     await handlers._edit_callback_message(query, text, reply_markup=handlers._topics_hub_keyboard())
-    for topic in topics[:5]:
-        await safe_send_message(
-            context.bot,
-            chat_id=settings.admin_id,
-            text=truncate_telegram_text(handlers._topic_card_text(topic)),
-            reply_markup=handlers._topic_actions_keyboard(int(topic["id"]), str(topic.get("url") or "")),
-            link_preview_options=handlers._disabled_link_preview_options(),
-        )
+    await _send_topic_cards(context, settings, topics[:5])
 
 
 async def handle_topic_moderation_action(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str, topic_id: int, query) -> bool:
@@ -398,12 +395,15 @@ async def handle_topic_moderation_action(update: Update, context: ContextTypes.D
     if action == "topic_reenrich":
         await handlers._edit_callback_message(query, f"🔁 Перевожу тему #{topic_id} заново...")
         topic, error = await handlers._reenrich_topic_candidate_display_metadata(topic_id, settings, db)
-        if error or not topic:
+        if not topic:
             await handlers._edit_callback_message(query, error or "Не удалось заново перевести тему.")
             return True
+        text = handlers._topic_card_text(topic)
+        if error:
+            text += f"\n\n⚠️ {error}"
         await handlers._edit_callback_message(
             query,
-            handlers._topic_card_text(topic),
+            text,
             reply_markup=handlers._topic_actions_keyboard(topic_id, str(topic.get("url") or "")),
         )
         return True

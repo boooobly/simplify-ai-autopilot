@@ -45,15 +45,15 @@ def run() -> None:
         "url": "https://example.com/fallback",
     }
     fallback_card = _topic_card_text(fallback_topic)
-    assert topic_display_title(fallback_topic) == "Новость от TechCrunch AI: English fallback title"
+    assert topic_display_title(fallback_topic) == "Тема требует ручной проверки"
     assert topic_display_reason(fallback_topic) == "Категория: AI-новость; скоринг 70/100. Сигналы скоринга: новость/релиз."
-    assert "Новость от TechCrunch AI: English fallback title" in fallback_card
+    assert "Тема требует ручной проверки" in fallback_card
     assert "О чем:" in fallback_card
-    assert MANUAL_REVIEW_NOTE_RU not in fallback_card
-    assert "Источник TechCrunch AI пишет про тему" in fallback_card
-    assert "Нужна проверка деталей" in fallback_card
+    assert MANUAL_REVIEW_NOTE_RU in fallback_card
+    assert "Оригинальный заголовок: English fallback title" in fallback_card
+    assert 'Открыть источник или нажать "Понять тему через AI"' in fallback_card
     assert "Идея поста:" in fallback_card
-    assert "практическом выводе" in fallback_card
+    assert 'Открыть источник или нажать "Понять тему через AI"' in fallback_card
     assert "Оригинал: English fallback title" in fallback_card
 
     rss_fallback = build_deterministic_topic_metadata_ru({
@@ -127,8 +127,8 @@ def run() -> None:
         "url": "https://github.com/owner/repo",
     }
     github_card = _topic_card_text(github_fallback)
-    assert MANUAL_REVIEW_NOTE_RU not in github_card
-    assert "GitHub-репозиторий" in github_card
+    assert MANUAL_REVIEW_NOTE_RU in github_card
+    assert "Тема требует ручной проверки" in github_card
     assert "URL: https://github.com/owner/repo" in github_card
 
     compact = topic_compact_preview_ru(topic)
@@ -137,8 +137,8 @@ def run() -> None:
     assert "Коротко объясняет" in compact
 
     compact_missing_ru = topic_compact_preview_ru(fallback_topic)
-    assert compact_missing_ru.startswith("Новость от TechCrunch AI: English fallback title")
-    assert MANUAL_REVIEW_NOTE_RU not in compact_missing_ru
+    assert compact_missing_ru.startswith("Тема требует ручной проверки")
+    assert MANUAL_REVIEW_NOTE_RU in compact_missing_ru
 
     assert is_weak_topic_metadata(
         "agentmemory - #1 Persistent memory for AI coding AI-агенты based on real-world benchmarks",
