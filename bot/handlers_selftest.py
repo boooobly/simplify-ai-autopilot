@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 from bot.database import DraftDatabase
+import bot.writer as writer
 from bot.writer import GenerationResult
 from bot.sources import TopicItem, _with_scoring
 import bot.handlers as handlers
@@ -457,6 +458,65 @@ def _insert_topic(db: DraftDatabase, url: str = "https://www.reddit.com/r/LocalL
     topic = db.find_topic_candidate_by_url(url)
     assert topic is not None
     return int(topic["id"])
+
+
+async def _run_daily_plan_and_regeneration_style_prompt_selftest() -> None:
+    tmp = TemporaryDirectory()
+    db = DraftDatabase(f"{tmp.name}/daily-plan-style.db")
+    settings = _topic_settings()
+    context = SimpleNamespace(bot_data={"settings": settings, "db": db}, bot=_FakeBot(), user_data={})
+    source_url = "https://example.com/daily-plan-style"
+    topic_id = _insert_topic(db, url=source_url)
+
+    original_empty_slots = handlers._empty_slots_for_day
+    original_select_topics = handlers._select_daily_plan_topics
+    original_fetch = handlers._run_fetch_page_content_details
+    original_generate = writer._generate_with_chat_completion
+    system_prompts: list[str] = []
+
+    async def fake_fetch(url):
+        assert url == source_url
+        return SimpleNamespace(title="Daily plan AI tool", text=" ".join(["Полезный текст страницы про AI-инструмент"] * 120), preview_image_url=None)
+
+    def fake_generate(api_key, model, user_prompt, system_prompt, base_url=None, extra_headers=None, max_tokens=900):
+        system_prompts.append(system_prompt)
+        return GenerationResult(
+            content="[[EMOJI:screen_card]] Понятный черновик про AI-инструмент из дневного плана с практическим смыслом.",
+            model=model,
+        )
+
+    handlers._empty_slots_for_day = lambda db, settings, day_offset: ["10:00"]
+    handlers._select_daily_plan_topics = lambda db, limit: [db.get_topic_candidate(topic_id)]
+    handlers._run_fetch_page_content_details = fake_fetch
+    writer._generate_with_chat_completion = fake_generate
+    try:
+        result = await handlers._generate_drafts_from_plan(
+            context=context,
+            settings=settings,
+            db=db,
+            day_offset=0,
+        )
+        pending_items = context.user_data["pending_plan_schedule_items"]
+        assert pending_items == [{"slot": "10:00", "draft_id": 1, "topic_id": topic_id}]
+        assert "Создано: 1" in result
+
+        regenerated, error = await handlers._regenerate_draft_from_source(
+            db=db,
+            settings=settings,
+            draft=db.get_draft(1),
+        )
+    finally:
+        handlers._empty_slots_for_day = original_empty_slots
+        handlers._select_daily_plan_topics = original_select_topics
+        handlers._run_fetch_page_content_details = original_fetch
+        writer._generate_with_chat_completion = original_generate
+        tmp.cleanup()
+
+    style_file_content = writer.STYLE_PATH.read_text(encoding="utf-8").strip()
+    assert regenerated is not None and error is None
+    assert len(system_prompts) == 2
+    assert all(style_file_content in system_prompt for system_prompt in system_prompts)
+    assert system_prompts[0] == system_prompts[1] == writer._build_post_style_prompt()
 
 
 async def _run_topic_metadata_fallback_selftest() -> None:
@@ -1549,6 +1609,7 @@ def run() -> None:
     asyncio.run(_run_collect_stats_selftest())
     asyncio.run(_run_topics_menu_fallback_selftest())
     asyncio.run(_run_topic_metadata_fallback_selftest())
+    asyncio.run(_run_daily_plan_and_regeneration_style_prompt_selftest())
     asyncio.run(_run_topic_reenrich_callback_selftest())
     asyncio.run(_run_topic_reenrich_parse_failure_error_selftest())
     asyncio.run(_run_topic_reenrich_empty_error_selftest())
