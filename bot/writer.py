@@ -44,6 +44,7 @@ class GenerationResult:
     completion_tokens: int = 0
     total_tokens: int = 0
     model: str = ""
+    finish_reason: str = ""
 
 
 def _strip_source_lines(text: str) -> str:
@@ -140,6 +141,7 @@ def _generate_with_chat_completion(
         completion_tokens=completion_tokens,
         total_tokens=total_tokens,
         model=model,
+        finish_reason=str(finish_reason or ""),
     )
 
 
@@ -456,7 +458,7 @@ def enrich_topic_metadata_ru(
                 system_prompt=system_prompt,
                 base_url=base_url,
                 extra_headers=extra_headers,
-                max_tokens=220,
+                max_tokens=1200,
                 response_format={"type": "json_object"},
             )
         except Exception as exc:
@@ -475,11 +477,22 @@ def enrich_topic_metadata_ru(
                 system_prompt=system_prompt,
                 base_url=base_url,
                 extra_headers=extra_headers,
-                max_tokens=220,
+                max_tokens=1200,
             )
     except Exception as exc:
         _increment_topic_metadata_diagnostic(diagnostics, "ai_provider_errors")
         logger.warning("Topic metadata enrichment provider failed: model=%s reason=%s", model, exc)
+        return None
+    finish_reason = str(getattr(result, "finish_reason", "") or "")
+    if finish_reason.casefold() == "length":
+        _increment_topic_metadata_diagnostic(diagnostics, "ai_output_truncated")
+        logger.warning(
+            "Topic metadata enrichment output truncated: model=%s title=%r finish_reason=%s text_length=%s",
+            model,
+            clean_title[:120],
+            finish_reason,
+            len(result.content),
+        )
         return None
     values = _parse_topic_metadata_fields(result.content)
     required_fields = ("title_ru", "summary_ru", "angle_ru", "reason_ru", "ai_value_score", "ai_value_reason_ru", "audience_fit_ru")

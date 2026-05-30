@@ -7,7 +7,7 @@ import os
 import re
 
 from telegram import BotCommand
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from bot.config import load_settings, startup_diagnostics
 from bot.database import DraftDatabase
@@ -56,6 +56,7 @@ from bot.topic_handlers import (
 )
 from bot.publisher import run_scheduled_publishing
 from bot.source_handlers import sources_status_command
+from bot.telegram_safety import safe_send_message
 
 
 def setup_logging() -> None:
@@ -110,6 +111,32 @@ async def _post_init(application: Application) -> None:
             BotCommand("health", "Статус бота"),
         ]
     )
+
+
+async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    error = context.error
+    logging.getLogger(__name__).error(
+        "Unhandled Telegram update error type=%s",
+        type(error).__name__,
+        exc_info=(type(error), error, getattr(error, "__traceback__", None)) if isinstance(error, BaseException) else None,
+    )
+    settings = context.bot_data.get("settings")
+    admin_id = getattr(settings, "admin_id", None)
+    if not admin_id:
+        return
+    try:
+        await safe_send_message(
+            context.bot,
+            chat_id=admin_id,
+            text="Не удалось обработать запрос. Попробуй ещё раз или открой /menu.",
+        )
+    except Exception:
+        logging.getLogger(__name__).exception("Failed to notify admin about Telegram handler error")
+
+
+def _add_global_error_handler(application: Application) -> None:
+    application.add_error_handler(telegram_error_handler)
+
 
 def main() -> None:
     setup_logging()
@@ -168,6 +195,7 @@ def main() -> None:
     application.add_handler(CommandHandler("health", health_command))
     application.add_handler(MessageHandler(~filters.COMMAND, admin_url_message))
     application.add_handler(CallbackQueryHandler(moderation_callback))
+    _add_global_error_handler(application)
 
     if application.job_queue is None:
         raise RuntimeError(
