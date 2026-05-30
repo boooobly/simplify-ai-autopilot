@@ -534,6 +534,52 @@ def enrich_topic_metadata_ru(
     return result
 
 
+
+def enrich_topic_understanding_ru(
+    *, api_key: str, model: str, title: str, source: str, description: str | None = None,
+    base_url: str | None = None, extra_headers: dict[str, str] | None = None,
+) -> GenerationResult | None:
+    """Explain one topic on demand with the smallest display-only JSON contract."""
+    clean_title = title.strip()
+    if not clean_title:
+        return None
+    system_prompt = (
+        "Объясни тему администратору русскоязычного Telegram-канала @simplify_ai. "
+        "Верни только JSON с полями title_ru, summary_ru, angle_ru. "
+        "title_ru: короткий русский заголовок, понятный без английского. "
+        "summary_ru: 1-2 простых русских предложения о том, что произошло. "
+        "angle_ru: как превратить тему в пост для @simplify_ai. "
+        "Не копируй английский заголовок. Названия продуктов, компаний и моделей можно оставить на английском. "
+        "Объясняй жаргон простыми словами. Не выдумывай факты."
+    )
+    user_prompt = f"Title: {clean_title[:300]}\nSource: {source[:120]}\nDescription: {(description or '')[:700]}"
+    try:
+        try:
+            result = _generate_with_chat_completion(
+                api_key=api_key, model=model, user_prompt=user_prompt, system_prompt=system_prompt,
+                base_url=base_url, extra_headers=extra_headers, max_tokens=500,
+                response_format={"type": "json_object"},
+            )
+        except Exception as exc:
+            if not _looks_like_response_format_unsupported(exc):
+                raise
+            result = _generate_with_chat_completion(
+                api_key=api_key, model=model, user_prompt=user_prompt, system_prompt=system_prompt,
+                base_url=base_url, extra_headers=extra_headers, max_tokens=500,
+            )
+    except Exception as exc:
+        logger.warning("On-demand topic understanding failed: model=%s reason=%s", model, exc)
+        return None
+    values = _parse_topic_metadata_fields(result.content)
+    required = ("title_ru", "summary_ru", "angle_ru")
+    if not all(values.get(key) for key in required):
+        return None
+    title_ru, summary_ru, angle_ru = (values[key].strip() for key in required)
+    if not _looks_like_useful_russian_metadata(title_ru, summary_ru, angle_ru, original_title=clean_title):
+        return None
+    result.content = json.dumps({"title_ru": title_ru[:180], "summary_ru": summary_ru[:500], "angle_ru": angle_ru[:350]}, ensure_ascii=False)
+    return result
+
 def translate_topic_title_to_ru(
     *,
     api_key: str,

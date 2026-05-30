@@ -55,12 +55,14 @@ def is_weak_topic_metadata(
     summary_ru: str | None,
     angle_ru: str | None,
     original_title: str | None = None,
+    reason_ru: str | None = None,
 ) -> bool:
     """Return True when admin-facing topic metadata is empty, generic or mostly untranslated."""
     title = _clean_text(title_ru)
     summary = _clean_text(summary_ru)
     angle = _clean_text(angle_ru)
     original = _clean_text(original_title)
+    reason = _clean_text(reason_ru)
 
     if not title:
         return True
@@ -90,11 +92,30 @@ def is_weak_topic_metadata(
         "Репозиторий выглядит как проект про",
         "Источник предлагает новость по AI",
         "Нужен ручной просмотр",
+        "пишет про тему:",
+        "Нужна проверка деталей",
+        "Нужна проверка README",
     ]
     if any(fragment.casefold() in summary.casefold() for fragment in generic_summary_fragments):
         return True
+    if "Источник " in summary and "пишет про" in summary:
+        return True
+    if _mostly_english_text(summary):
+        return True
+    if original and original.casefold() in summary.casefold():
+        russian_without_original = summary.casefold().replace(original.casefold(), "")
+        if len(russian_without_original) < 140:
+            return True
 
+    generic_angle_fragments = (
+        "Сфокусироваться не на пресс-релизе",
+        "Проверить README, демо и пользу",
+    )
+    if any(fragment.casefold() in angle.casefold() for fragment in generic_angle_fragments):
+        return True
     if angle and not _contains_cyrillic(angle) and len(angle) > 20:
+        return True
+    if "Сильная тема: это инструмент или новость с понятной пользой" in reason:
         return True
     return False
 
@@ -357,13 +378,15 @@ def _has_ai_metadata(topic: object) -> bool:
     return 0 <= score <= 100
 
 def topic_display_title(topic: object) -> str:
-    """Return the Russian display title when available, otherwise deterministic wrapper."""
+    """Return a useful Russian title or an honest manual-review label."""
     explicit = _clean_text(_topic_value(topic, "title_ru"))
     original = _clean_text(_topic_value(topic, "title"))
-    if explicit and (_has_ai_metadata(topic) or not is_weak_topic_metadata(explicit, _topic_value(topic, "summary_ru"), _topic_value(topic, "angle_ru"), original_title=original)):
+    if explicit and not is_weak_topic_metadata(
+        explicit, _topic_value(topic, "summary_ru"), _topic_value(topic, "angle_ru"),
+        original_title=original, reason_ru=_topic_value(topic, "reason_ru"),
+    ):
         return explicit
-    metadata = build_deterministic_topic_metadata_ru(topic)
-    return metadata.get("title_ru") or explicit or original or "Без названия"
+    return "Тема требует ручной проверки"
 
 
 def topic_display_reason(topic: object) -> str:
@@ -375,25 +398,34 @@ def topic_display_reason(topic: object) -> str:
     return metadata.get("reason_ru") or explicit or _clean_text(_topic_value(topic, "reason")) or "без пояснения"
 
 
-MANUAL_REVIEW_NOTE_RU = "Нужен ручной просмотр: не удалось перевести тему"
+MANUAL_REVIEW_NOTE_RU = "Не удалось нормально объяснить тему автоматически."
+
+
+def _honest_fallback_summary(topic: object) -> str:
+    original = _shorten_sentence(_topic_value(topic, "title"), 180) or "без названия"
+    return f'{MANUAL_REVIEW_NOTE_RU} Оригинальный заголовок: {original}'
 
 
 def topic_summary_ru(topic: object) -> str:
-    """Return topic-specific Russian summary with deterministic fallback."""
+    """Return useful saved Russian summary or an honest failure message."""
     explicit = _clean_text(_topic_value(topic, "summary_ru"))
-    if explicit and (_has_ai_metadata(topic) or "Нужен ручной просмотр" not in explicit):
+    if explicit and not is_weak_topic_metadata(
+        _topic_value(topic, "title_ru"), explicit, _topic_value(topic, "angle_ru"),
+        original_title=_topic_value(topic, "title"), reason_ru=_topic_value(topic, "reason_ru"),
+    ):
         return explicit
-    metadata = build_deterministic_topic_metadata_ru(topic)
-    return metadata.get("summary_ru") or explicit or MANUAL_REVIEW_NOTE_RU
+    return _honest_fallback_summary(topic)
 
 
 def topic_angle_ru(topic: object) -> str:
-    """Return Russian post-angle suggestion with deterministic fallback."""
+    """Return useful saved post angle or the explicit manual recovery action."""
     explicit = _clean_text(_topic_value(topic, "angle_ru"))
-    if explicit and (_has_ai_metadata(topic) or ("AI-обогащение не дало" not in explicit and "проверь тему вручную" not in explicit)):
+    if explicit and not is_weak_topic_metadata(
+        _topic_value(topic, "title_ru"), _topic_value(topic, "summary_ru"), explicit,
+        original_title=_topic_value(topic, "title"), reason_ru=_topic_value(topic, "reason_ru"),
+    ):
         return explicit
-    metadata = build_deterministic_topic_metadata_ru(topic)
-    return metadata.get("angle_ru") or explicit or "Сначала открой источник и вручную проверь смысл темы: AI-обогащение не дало понятный русский ракурс."
+    return 'Открыть источник или нажать "Понять тему через AI".'
 
 
 def _shorten_text(value: str, max_len: int) -> str:

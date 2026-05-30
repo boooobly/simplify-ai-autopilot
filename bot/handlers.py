@@ -117,6 +117,7 @@ from bot.writer import (
     normalize_url,
     translate_topic_title_to_ru,
     enrich_topic_metadata_ru,
+    enrich_topic_understanding_ru,
     polish_post_draft,
     rewrite_post_draft,
     _looks_like_useful_russian_metadata,
@@ -174,6 +175,7 @@ def _apply_topic_enrichment_fallback(item, db: DraftDatabase, *, force: bool = F
                 angle_ru=item.angle_ru,
                 reason_ru=item.reason_ru or "",
                 clear_ai_value=True,
+                metadata_source="fallback",
             )
         else:
             db.update_topic_candidate_display_fields(
@@ -506,12 +508,21 @@ def _topic_card_text(topic: dict) -> str:
             f"URL: {topic['url']}",
         ]
     )
+    if topic.get("_show_metadata_diagnostics"):
+        lines.extend([
+            "",
+            f"metadata_source: {topic.get('metadata_source') or 'fallback'}",
+            f"metadata_is_weak: {str(bool(topic.get('_metadata_is_weak'))).lower()}",
+            f"ai_enrichment_attempted: {str(bool(topic.get('_ai_enrichment_attempted'))).lower()}",
+        ])
+        if topic.get("_ai_enrichment_error"):
+            lines.append(f"ai_enrichment_error: {topic['_ai_enrichment_error']}")
     return "\n".join(lines)
 
 
 def _topic_actions_keyboard(topic_id: int, source_url: str | None = None) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton("✍️ Создать черновик", callback_data=f"topic_generate:{topic_id}")]]
-    rows.append([InlineKeyboardButton("🔁 Перевести заново", callback_data=f"topic_reenrich:{topic_id}")])
+    rows.append([InlineKeyboardButton("🧠 Понять тему через AI", callback_data=f"topic_reenrich:{topic_id}")])
     if source_url:
         rows.append([InlineKeyboardButton("🔗 Открыть источник", url=source_url)])
     rows.append([InlineKeyboardButton("❌ Отклонить тему", callback_data=f"reject_topic:{topic_id}")])
@@ -938,6 +949,10 @@ async def _run_enrich_topic_metadata_ru(*args, **kwargs):
     return await asyncio.to_thread(enrich_topic_metadata_ru, *args, **kwargs)
 
 
+async def _run_enrich_topic_understanding_ru(*args, **kwargs):
+    return await asyncio.to_thread(enrich_topic_understanding_ru, *args, **kwargs)
+
+
 async def _translate_topic_title_if_available(item, settings, db: DraftDatabase) -> None:
     if item.title_ru or not settings or not getattr(settings, "has_ai_provider", False):
         return
@@ -1034,89 +1049,73 @@ def _topic_enrichment_failure_status(diagnostics: dict[str, int] | None) -> str:
     return "invalid_model_output"
 
 
-async def _reenrich_topic_candidate_display_metadata(
-    topic_id: int,
-    settings,
-    db: DraftDatabase,
-) -> tuple[dict | None, str | None]:
+async def _ensure_topic_candidate_display_metadata(
+    topic_id: int, settings, db: DraftDatabase, *, force: bool = False, debug: bool = False,
+) -> dict | None:
+    """Enrich one opened topic immediately; unlike /collect this has no bulk limit."""
     topic = db.get_topic_candidate(topic_id)
     if not topic:
+        return None
+    weak = is_weak_topic_metadata(
+        topic.get("title_ru"), topic.get("summary_ru"), topic.get("angle_ru"),
+        original_title=topic.get("title"), reason_ru=topic.get("reason_ru"),
+    )
+    attempted = False
+    error = None
+    if force or weak:
+        attempted = True
+        if not settings or not getattr(settings, "has_ai_provider", False):
+            error = "AI-провайдер не настроен."
+        else:
+            api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
+            if not api_key:
+                error = "AI-ключ не настроен."
+            else:
+                model = _topic_enrich_model(settings)
+                try:
+                    result = await _run_enrich_topic_understanding_ru(
+                        api_key=api_key, model=model, title=str(topic.get("title") or ""),
+                        source=str(topic.get("source") or ""), description=topic.get("original_description"),
+                        base_url=base_url, extra_headers=extra_headers,
+                    )
+                except Exception as exc:
+                    logger.warning("On-demand topic enrichment failed: topic_id=%s error=%s", topic_id, exc)
+                    result = None
+                    error = str(exc)
+                parsed = _parse_topic_metadata_fields(result.content) if result and result.content.strip() else {}
+                if all(parsed.get(key) for key in ("title_ru", "summary_ru", "angle_ru")) and not is_weak_topic_metadata(
+                    parsed.get("title_ru"), parsed.get("summary_ru"), parsed.get("angle_ru"), original_title=topic.get("title"),
+                ):
+                    db.force_update_topic_candidate_display_fields(
+                        topic_id, title_ru=parsed["title_ru"], summary_ru=parsed["summary_ru"],
+                        angle_ru=parsed["angle_ru"], reason_ru=str(topic.get("reason_ru") or ""),
+                        metadata_source="ai_on_demand",
+                    )
+                    estimated_cost = estimate_ai_cost(provider, result.prompt_tokens, result.completion_tokens, settings)
+                    db.record_ai_usage(provider=provider, model=result.model or model, operation="topic_enrich_on_demand",
+                        prompt_tokens=result.prompt_tokens, completion_tokens=result.completion_tokens, total_tokens=result.total_tokens,
+                        estimated_cost_usd=estimated_cost, source_url=str(topic.get("url") or ""), draft_id=None)
+                elif not error:
+                    error = "Модель не вернула понятное русское объяснение."
+    topic = db.get_topic_candidate(topic_id) or topic
+    weak = is_weak_topic_metadata(topic.get("title_ru"), topic.get("summary_ru"), topic.get("angle_ru"), original_title=topic.get("title"), reason_ru=topic.get("reason_ru"))
+    if not topic.get("metadata_source"):
+        topic["metadata_source"] = "fallback" if weak else "ai_bulk"
+    topic["_metadata_is_weak"] = weak
+    topic["_ai_enrichment_attempted"] = attempted
+    topic["_ai_enrichment_error"] = error
+    topic["_show_metadata_diagnostics"] = debug
+    return topic
+
+
+async def _reenrich_topic_candidate_display_metadata(
+    topic_id: int, settings, db: DraftDatabase,
+) -> tuple[dict | None, str | None]:
+    topic = await _ensure_topic_candidate_display_metadata(topic_id, settings, db, force=True)
+    if not topic:
         return None, f"Тема #{topic_id} не найдена."
-    if not settings or not getattr(settings, "has_ai_provider", False):
-        return None, "AI-провайдер не настроен."
-    api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
-    if not api_key:
-        return None, "AI-ключ не настроен."
-    model = _topic_enrich_model(settings)
-    try:
-        result = await _run_enrich_topic_metadata_ru(
-            api_key=api_key,
-            model=model,
-            title=str(topic.get("title") or ""),
-            source=str(topic.get("source") or ""),
-            description=topic.get("original_description"),
-            base_url=base_url,
-            extra_headers=extra_headers,
-        )
-    except Exception as exc:
-        logger.warning("Manual topic re-enrichment failed: topic_id=%s error=%s", topic_id, exc)
-        return None, "Не удалось заново перевести тему."
-    if not result:
-        return None, "Модель вернула ответ, но бот не смог разобрать формат."
-    if not result.content.strip():
-        return None, "Модель вернула пустой ответ."
-    parsed = _parse_topic_metadata_result_content(result.content)
-    if parsed is None:
-        return None, "Модель вернула ответ, но бот не смог разобрать формат."
-    title_ru = parsed["title_ru"]
-    summary_ru = parsed["summary_ru"]
-    angle_ru = parsed["angle_ru"]
-    ai_score = _parse_ai_value_score(parsed.get("ai_value_score"))
-    content_format = (parsed.get("content_format") or "").strip()[:40]
-    ai_value_reason_ru = (parsed.get("ai_value_reason_ru") or "").strip()[:180]
-    audience_fit_ru = (parsed.get("audience_fit_ru") or "").strip()[:180]
-    deterministic_reason_ru = str(parsed["reason_ru"] or topic.get("reason_ru") or "")
-    final_score = hybrid_topic_score(int(topic.get("deterministic_score") or topic.get("score") or 0), ai_score)
-    reason_ru = (
-        _combined_topic_reason_ru(
-            deterministic_reason_ru,
-            ai_value_reason_ru,
-            audience_fit_ru,
-        )
-        if ai_score is not None
-        else parsed["reason_ru"]
-    )
-    if not all([title_ru, summary_ru, angle_ru, reason_ru]):
-        return None, "Модель вернула ответ, но бот не смог разобрать формат."
-    if not _looks_like_useful_russian_metadata(
-        title_ru, summary_ru, angle_ru, original_title=str(topic.get("title") or "")
-    ):
-        return None, "Модель вернула слишком английский текст, перевод отклонён."
-    db.force_update_topic_candidate_display_fields(
-        topic_id,
-        title_ru=title_ru,
-        summary_ru=summary_ru,
-        angle_ru=angle_ru,
-        reason_ru=reason_ru,
-        score=final_score if ai_score is not None else None,
-        content_format=content_format,
-        ai_value_score=ai_score,
-        ai_value_reason_ru=ai_value_reason_ru,
-        audience_fit_ru=audience_fit_ru,
-    )
-    estimated_cost = estimate_ai_cost(provider, result.prompt_tokens, result.completion_tokens, settings)
-    db.record_ai_usage(
-        provider=provider,
-        model=result.model or model,
-        operation="topic_reenrich_metadata",
-        prompt_tokens=result.prompt_tokens,
-        completion_tokens=result.completion_tokens,
-        total_tokens=result.total_tokens,
-        estimated_cost_usd=estimated_cost,
-        source_url=str(topic.get("url") or ""),
-        draft_id=None,
-    )
-    return db.get_topic_candidate(topic_id), None
+    error = topic.get("_ai_enrichment_error")
+    return topic, str(error) if error else None
 
 
 async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase) -> str:
@@ -1253,6 +1252,7 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
             ai_value_score=ai_score,
             ai_value_reason_ru=ai_value_reason_ru,
             audience_fit_ru=audience_fit_ru,
+            metadata_source="ai_bulk",
         )
     else:
         item.title_ru = existing_title_ru or title_ru
@@ -1276,6 +1276,7 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
             ai_value_score=ai_score,
             ai_value_reason_ru=ai_value_reason_ru,
             audience_fit_ru=audience_fit_ru,
+            metadata_source="ai_bulk",
         )
     estimated_cost = estimate_ai_cost(provider, result.prompt_tokens, result.completion_tokens, settings)
     db.record_ai_usage(

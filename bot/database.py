@@ -118,6 +118,7 @@ class DraftDatabase:
             self._ensure_column(conn, "topic_candidates", "ai_value_score", "INTEGER")
             self._ensure_column(conn, "topic_candidates", "ai_value_reason_ru", "TEXT")
             self._ensure_column(conn, "topic_candidates", "audience_fit_ru", "TEXT")
+            self._ensure_column(conn, "topic_candidates", "metadata_source", "TEXT")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS managed_sources (
@@ -1036,6 +1037,7 @@ class DraftDatabase:
         ai_value_reason_ru: str | None = None,
         audience_fit_ru: str | None = None,
         clear_ai_value: bool = False,
+        metadata_source: str | None = None,
     ) -> bool:
         with self._connect() as conn:
             cursor = conn.execute(
@@ -1049,7 +1051,8 @@ class DraftDatabase:
                     content_format = COALESCE(NULLIF(?, ''), content_format),
                     ai_value_score = CASE WHEN ? THEN NULL ELSE COALESCE(?, ai_value_score) END,
                     ai_value_reason_ru = CASE WHEN ? THEN NULL ELSE COALESCE(NULLIF(?, ''), ai_value_reason_ru) END,
-                    audience_fit_ru = CASE WHEN ? THEN NULL ELSE COALESCE(NULLIF(?, ''), audience_fit_ru) END
+                    audience_fit_ru = CASE WHEN ? THEN NULL ELSE COALESCE(NULLIF(?, ''), audience_fit_ru) END,
+                    metadata_source = COALESCE(NULLIF(?, ''), metadata_source)
                 WHERE id = ?
                 """,
                 (
@@ -1065,6 +1068,7 @@ class DraftDatabase:
                     ai_value_reason_ru,
                     clear_ai_value,
                     audience_fit_ru,
+                    metadata_source,
                     topic_id,
                 ),
             )
@@ -1084,6 +1088,7 @@ class DraftDatabase:
         ai_value_reason_ru: str | None = None,
         audience_fit_ru: str | None = None,
         clear_ai_value: bool = False,
+        metadata_source: str | None = None,
     ) -> bool:
         with self._connect() as conn:
             cursor = conn.execute(
@@ -1097,7 +1102,8 @@ class DraftDatabase:
                     content_format = COALESCE(NULLIF(?, ''), content_format),
                     ai_value_score = CASE WHEN ? THEN NULL ELSE COALESCE(?, ai_value_score) END,
                     ai_value_reason_ru = CASE WHEN ? THEN NULL ELSE COALESCE(NULLIF(?, ''), ai_value_reason_ru) END,
-                    audience_fit_ru = CASE WHEN ? THEN NULL ELSE COALESCE(NULLIF(?, ''), audience_fit_ru) END
+                    audience_fit_ru = CASE WHEN ? THEN NULL ELSE COALESCE(NULLIF(?, ''), audience_fit_ru) END,
+                    metadata_source = COALESCE(NULLIF(?, ''), metadata_source)
                 WHERE id = ?
                 """,
                 (
@@ -1113,6 +1119,7 @@ class DraftDatabase:
                     ai_value_reason_ru,
                     clear_ai_value,
                     audience_fit_ru,
+                    metadata_source,
                     topic_id,
                 ),
             )

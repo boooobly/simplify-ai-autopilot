@@ -59,7 +59,7 @@ def _run_keyboard_selftest() -> None:
     topic_buttons = _keyboard_buttons(topic_keyboard)
     assert any(button.text == "🔗 Открыть источник" and button.url == "https://example.com/topic" for button in topic_buttons)
     assert "✍️ Создать черновик" in _keyboard_texts(topic_keyboard)
-    assert "🔁 Перевести заново" in _keyboard_texts(topic_keyboard)
+    assert "🧠 Понять тему через AI" in _keyboard_texts(topic_keyboard)
     assert any(button.callback_data == "topic_reenrich:7" for button in topic_buttons)
     assert "❌ Отклонить тему" in _keyboard_texts(topic_keyboard)
     assert not any("Shorts" in text or "Reels" in text or "TikTok" in text or "Видео" in text for text in _keyboard_texts(topic_keyboard))
@@ -309,13 +309,14 @@ async def _run_collect_stats_selftest() -> None:
     assert all_items == items
     inserted[0].title_ru = "Свежий AI-инструмент для субтитров"
     inserted[0].summary_ru = "Инструмент помогает быстрее подготовить подписи к ролику."
+    inserted[0].angle_ru = "Показать, как сервис экономит время при подготовке короткого видео."
     summary = _render_collect_text(stats, all_items, inserted)
     assert "Старые: 1" in summary
     assert "Без даты: 1" in summary
     assert "Объединено с похожими: 1" in summary
-    assert "Свежий AI-инструмент" in summary
+    assert "Тема требует ручной проверки" in summary
     assert "О чем:" in summary
-    assert "Fresh AI tool app for video captions" not in summary
+    assert "Не удалось нормально объяснить тему автоматически" in summary
     assert "Время:" in summary
     assert "Обогащено AI:" in summary
 
@@ -693,7 +694,7 @@ async def _run_topic_reenrich_callback_selftest() -> None:
     )
     models: list[str] = []
     calls: list[dict] = []
-    original_enrich = handlers._run_enrich_topic_metadata_ru
+    original_enrich = handlers._run_enrich_topic_understanding_ru
 
     async def fake_enrich(**kwargs):
         models.append(kwargs["model"])
@@ -714,12 +715,12 @@ async def _run_topic_reenrich_callback_selftest() -> None:
             model=kwargs["model"],
         )
 
-    handlers._run_enrich_topic_metadata_ru = fake_enrich
+    handlers._run_enrich_topic_understanding_ru = fake_enrich
     try:
         query = _FakeCallbackQuery(f"topic_reenrich:{topic_id}", settings.admin_id)
         await handlers.moderation_callback(SimpleNamespace(callback_query=query), context)
     finally:
-        handlers._run_enrich_topic_metadata_ru = original_enrich
+        handlers._run_enrich_topic_understanding_ru = original_enrich
 
     assert models == [settings.model_topic_enrich]
     assert calls[0]["title"].startswith("New AI repo v2.1 discussed")
@@ -729,8 +730,6 @@ async def _run_topic_reenrich_callback_selftest() -> None:
     assert updated["title_ru"] == "Новый русский заголовок темы"
     assert updated["summary_ru"] == "Новая русская сводка темы."
     assert updated["angle_ru"] == "Новый русский ракурс для поста."
-    assert updated["reason_ru"].startswith("Новая русская причина важности")
-    assert "AI-оценка" in updated["reason_ru"]
     assert query.edited_text is not None
     card_lines = query.edited_text.splitlines()
     assert card_lines[3] == "Новый русский заголовок темы"
@@ -739,7 +738,7 @@ async def _run_topic_reenrich_callback_selftest() -> None:
     assert original_lines == ["Оригинал: New AI repo v2.1 discussed on Reddit https://example.com/old-english"]
     assert "New AI repo v2.1 discussed" not in query.edited_text.replace(original_lines[0], "")
     assert query.edited_reply_markup is not None
-    assert "🔁 Перевести заново" in _keyboard_texts(query.edited_reply_markup)
+    assert "🧠 Понять тему через AI" in _keyboard_texts(query.edited_reply_markup)
     tmp.cleanup()
 
 
@@ -749,20 +748,20 @@ async def _run_topic_reenrich_parse_failure_error_selftest() -> None:
     settings = _topic_settings()
     context = SimpleNamespace(bot_data={"settings": settings, "db": db}, bot=_FakeBot(), user_data={})
     topic_id = _insert_topic(db, url="https://example.com/parse-failure")
-    original_enrich = handlers._run_enrich_topic_metadata_ru
+    original_enrich = handlers._run_enrich_topic_understanding_ru
 
     async def fake_enrich(**kwargs):
         return GenerationResult(content="title: Only English title\nsummary:", model=kwargs["model"])
 
-    handlers._run_enrich_topic_metadata_ru = fake_enrich
+    handlers._run_enrich_topic_understanding_ru = fake_enrich
     try:
         query = _FakeCallbackQuery(f"topic_reenrich:{topic_id}", settings.admin_id)
         await handlers.moderation_callback(SimpleNamespace(callback_query=query), context)
     finally:
-        handlers._run_enrich_topic_metadata_ru = original_enrich
+        handlers._run_enrich_topic_understanding_ru = original_enrich
         tmp.cleanup()
 
-    assert query.edited_text == "Модель вернула ответ, но бот не смог разобрать формат."
+    assert "⚠️ Модель не вернула понятное русское объяснение." in query.edited_text
 
 
 async def _run_topic_reenrich_empty_error_selftest() -> None:
@@ -771,20 +770,20 @@ async def _run_topic_reenrich_empty_error_selftest() -> None:
     settings = _topic_settings()
     context = SimpleNamespace(bot_data={"settings": settings, "db": db}, bot=_FakeBot(), user_data={})
     topic_id = _insert_topic(db, url="https://example.com/empty-response")
-    original_enrich = handlers._run_enrich_topic_metadata_ru
+    original_enrich = handlers._run_enrich_topic_understanding_ru
 
     async def fake_enrich(**kwargs):
         return GenerationResult(content="   ", model=kwargs["model"])
 
-    handlers._run_enrich_topic_metadata_ru = fake_enrich
+    handlers._run_enrich_topic_understanding_ru = fake_enrich
     try:
         query = _FakeCallbackQuery(f"topic_reenrich:{topic_id}", settings.admin_id)
         await handlers.moderation_callback(SimpleNamespace(callback_query=query), context)
     finally:
-        handlers._run_enrich_topic_metadata_ru = original_enrich
+        handlers._run_enrich_topic_understanding_ru = original_enrich
         tmp.cleanup()
 
-    assert query.edited_text == "Модель вернула пустой ответ."
+    assert "⚠️ Модель не вернула понятное русское объяснение." in query.edited_text
 
 
 async def _run_topic_reenrich_too_english_error_selftest() -> None:
@@ -793,7 +792,7 @@ async def _run_topic_reenrich_too_english_error_selftest() -> None:
     settings = _topic_settings()
     context = SimpleNamespace(bot_data={"settings": settings, "db": db}, bot=_FakeBot(), user_data={})
     topic_id = _insert_topic(db, url="https://example.com/english-response")
-    original_enrich = handlers._run_enrich_topic_metadata_ru
+    original_enrich = handlers._run_enrich_topic_understanding_ru
 
     async def fake_enrich(**kwargs):
         return GenerationResult(
@@ -809,15 +808,15 @@ async def _run_topic_reenrich_too_english_error_selftest() -> None:
             model=kwargs["model"],
         )
 
-    handlers._run_enrich_topic_metadata_ru = fake_enrich
+    handlers._run_enrich_topic_understanding_ru = fake_enrich
     try:
         query = _FakeCallbackQuery(f"topic_reenrich:{topic_id}", settings.admin_id)
         await handlers.moderation_callback(SimpleNamespace(callback_query=query), context)
     finally:
-        handlers._run_enrich_topic_metadata_ru = original_enrich
+        handlers._run_enrich_topic_understanding_ru = original_enrich
         tmp.cleanup()
 
-    assert query.edited_text == "Модель вернула слишком английский текст, перевод отклонён."
+    assert "⚠️ Модель не вернула понятное русское объяснение." in query.edited_text
 
 
 async def _run_topic_model_routing_selftest() -> None:
@@ -1216,7 +1215,7 @@ async def _run_topic_reenrich_ai_score_refresh_selftest() -> None:
     db = DraftDatabase(f"{tmp.name}/reenrich-ai-score.db")
     settings = _topic_settings()
     topic_id = _insert_topic(db, url="https://example.com/reenrich-ai-score")
-    original_enrich = handlers._run_enrich_topic_metadata_ru
+    original_enrich = handlers._run_enrich_topic_understanding_ru
 
     async def fake_enrich(**kwargs):
         return GenerationResult(
@@ -1232,17 +1231,16 @@ async def _run_topic_reenrich_ai_score_refresh_selftest() -> None:
             model=kwargs["model"],
         )
 
-    handlers._run_enrich_topic_metadata_ru = fake_enrich
+    handlers._run_enrich_topic_understanding_ru = fake_enrich
     try:
         updated, error = await handlers._reenrich_topic_candidate_display_metadata(topic_id, settings, db)
     finally:
-        handlers._run_enrich_topic_metadata_ru = original_enrich
+        handlers._run_enrich_topic_understanding_ru = original_enrich
 
     assert error is None
     assert updated is not None
-    assert updated["score"] == 76
-    assert "AI-оценка" in updated["reason_ru"]
-    assert "слишком технически" in updated["reason_ru"]
+    assert updated["metadata_source"] == "ai_on_demand"
+    assert updated["title_ru"] == "Новый русский заголовок темы"
     tmp.cleanup()
 
 
