@@ -17,7 +17,7 @@ from bot.link_policy import strip_disallowed_cta_links
 from bot.style_guide import HUMANIZER_RULES_FOR_SIMPLIFY_AI, SIMPLIFY_AI_EMOJI_ALIAS_GUIDE, SIMPLIFY_AI_STYLE_GUIDE
 
 logger = logging.getLogger(__name__)
-STYLE_PATH = Path("prompts/post_style.md")
+STYLE_PATH = Path(__file__).resolve().parent.parent / "prompts" / "post_style.md"
 URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
 TRACKING_PARAMS = {
     "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "utm_id",
@@ -66,6 +66,13 @@ def _has_meaningful_body(text: str, source_url: str | None = None) -> bool:
 
 def _load_style_prompt() -> str:
     return STYLE_PATH.read_text(encoding="utf-8").strip()
+
+
+def _build_post_style_prompt() -> str:
+    """Build the shared editorial system prompt used for Telegram post writing."""
+    return "\n\n".join(
+        (_load_style_prompt(), SIMPLIFY_AI_STYLE_GUIDE, SIMPLIFY_AI_EMOJI_ALIAS_GUIDE)
+    )
 
 
 def _build_client(api_key: str, base_url: str | None = None) -> OpenAI:
@@ -724,7 +731,7 @@ def generate_post_draft_from_topic_metadata(
     base_url: str | None = None,
     extra_headers: dict[str, str] | None = None,
 ) -> GenerationResult:
-    style = _load_style_prompt() + "\n\n" + SIMPLIFY_AI_STYLE_GUIDE + "\n\n" + SIMPLIFY_AI_EMOJI_ALIAS_GUIDE
+    style = _build_post_style_prompt()
     metadata_lines = [
         f"Original title: {(topic_title or '').strip()[:500]}",
         f"Russian title: {(topic_title_ru or '').strip()[:500]}",
@@ -780,7 +787,7 @@ def generate_post_draft(
     base_url: str | None = None,
     extra_headers: dict[str, str] | None = None,
 ) -> GenerationResult:
-    style = _load_style_prompt() + "\n\n" + SIMPLIFY_AI_STYLE_GUIDE + "\n\n" + SIMPLIFY_AI_EMOJI_ALIAS_GUIDE
+    style = _build_post_style_prompt()
     source_context = source_url or "не указан"
     user_prompt = (
         "Создай один черновик поста для Telegram-канала @simplify_ai. "
@@ -815,7 +822,7 @@ def polish_post_draft(
     base_url: str | None = None,
     extra_headers: dict[str, str] | None = None,
 ) -> GenerationResult:
-    style = _load_style_prompt() + "\n\n" + SIMPLIFY_AI_STYLE_GUIDE + "\n\n" + SIMPLIFY_AI_EMOJI_ALIAS_GUIDE
+    style = _build_post_style_prompt()
     user_prompt = (
         "Улучши черновик для @simplify_ai. Сохрани простой человеческий тон, как у реального автора Telegram-канала. "
         "Сделай текст яснее и живее, но не делай его стерильным или корпоративным. "
@@ -871,7 +878,7 @@ def rewrite_post_draft(
     """Rewrite an existing Telegram draft in a narrow cleanup mode."""
     mode_instruction = _rewrite_post_draft_instruction(mode)
     cleaned_draft = _strip_source_lines(draft_text)
-    style = _load_style_prompt() + "\n\n" + SIMPLIFY_AI_STYLE_GUIDE + "\n\n" + SIMPLIFY_AI_EMOJI_ALIAS_GUIDE
+    style = _build_post_style_prompt()
     user_prompt = (
         "Перепиши существующий черновик поста для @simplify_ai в указанном режиме. "
         "Это точечный cleanup-pass, а не генерация нового поста. "
@@ -1000,7 +1007,7 @@ def fetch_page_content(source_url: str, timeout_seconds: int = 12) -> tuple[str,
 
 
 def generate_post_draft_from_page(api_key: str, model: str, source_url: str, title: str, page_text: str, max_chars: int = 1400, soft_chars: int = 1100, base_url: str | None = None, extra_headers: dict[str, str] | None = None) -> GenerationResult:
-    style = _load_style_prompt() + "\n\n" + SIMPLIFY_AI_STYLE_GUIDE + "\n\n" + SIMPLIFY_AI_EMOJI_ALIAS_GUIDE
+    style = _build_post_style_prompt()
     user_prompt = (
         "Ниже ссылка и извлечённый текст страницы. Опирайся только на этот текст страницы. "
         "Соблюдай стиль-гайд ниже как основные правила. "

@@ -459,6 +459,40 @@ def _insert_topic(db: DraftDatabase, url: str = "https://www.reddit.com/r/LocalL
     return int(topic["id"])
 
 
+async def _run_daily_plan_draft_routing_selftest() -> None:
+    context = SimpleNamespace(user_data={})
+    original_empty_slots = handlers._empty_slots_for_day
+    original_select_topics = handlers._select_daily_plan_topics
+    original_create = handlers._create_draft_from_topic
+    created_topic_ids: list[int] = []
+
+    async def fake_create(*, context, settings, db, topic_id):
+        created_topic_ids.append(topic_id)
+        return topic_id + 100, None
+
+    handlers._empty_slots_for_day = lambda db, settings, day_offset: ["10:00", "14:00"]
+    handlers._select_daily_plan_topics = lambda db, limit: [{"id": 11}, {"id": 12}]
+    handlers._create_draft_from_topic = fake_create
+    try:
+        result = await handlers._generate_drafts_from_plan(
+            context=context,
+            settings=SimpleNamespace(),
+            db=SimpleNamespace(),
+            day_offset=0,
+        )
+    finally:
+        handlers._empty_slots_for_day = original_empty_slots
+        handlers._select_daily_plan_topics = original_select_topics
+        handlers._create_draft_from_topic = original_create
+
+    assert created_topic_ids == [11, 12]
+    assert context.user_data["pending_plan_schedule_items"] == [
+        {"slot": "10:00", "draft_id": 111, "topic_id": 11},
+        {"slot": "14:00", "draft_id": 112, "topic_id": 12},
+    ]
+    assert "Создано: 2" in result
+
+
 async def _run_topic_metadata_fallback_selftest() -> None:
     tmp = TemporaryDirectory()
     db = DraftDatabase(f"{tmp.name}/topic-fallback.db")
@@ -1549,6 +1583,7 @@ def run() -> None:
     asyncio.run(_run_collect_stats_selftest())
     asyncio.run(_run_topics_menu_fallback_selftest())
     asyncio.run(_run_topic_metadata_fallback_selftest())
+    asyncio.run(_run_daily_plan_draft_routing_selftest())
     asyncio.run(_run_topic_reenrich_callback_selftest())
     asyncio.run(_run_topic_reenrich_parse_failure_error_selftest())
     asyncio.run(_run_topic_reenrich_empty_error_selftest())

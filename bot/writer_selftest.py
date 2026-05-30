@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 import bot.writer as writer
-from bot.writer import GenerationResult, _ensure_custom_emoji_markers, _looks_like_useful_russian_metadata, _parse_topic_metadata_fields, enrich_topic_metadata_ru, fetch_page_content, fetch_page_content_details, generate_post_draft_from_page, generate_post_draft_from_topic_metadata, rewrite_post_draft
+from bot.writer import GenerationResult, _ensure_custom_emoji_markers, _looks_like_useful_russian_metadata, _parse_topic_metadata_fields, enrich_topic_metadata_ru, fetch_page_content, fetch_page_content_details, generate_post_draft, generate_post_draft_from_page, generate_post_draft_from_topic_metadata, rewrite_post_draft
 
 
 class _Response:
@@ -63,6 +63,45 @@ def _assert_preview_extraction() -> None:
         title, text = fetch_page_content("https://example.com/post")
         assert title == "Compat"
         assert len(text) >= 700
+
+
+def _assert_first_draft_style_prompt_injection() -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fake_generate(api_key, model, user_prompt, system_prompt, base_url=None, extra_headers=None, max_tokens=900):
+        calls.append((user_prompt, system_prompt))
+        return GenerationResult(
+            content="[[EMOJI:screen_card]] Простой человеческий черновик на русском языке с понятным практическим смыслом.",
+            model=model,
+        )
+
+    original = writer._generate_with_chat_completion
+    writer._generate_with_chat_completion = fake_generate
+    try:
+        generate_post_draft("key", "model-x")
+        generate_post_draft_from_topic_metadata(
+            api_key="key",
+            model="model-x",
+            topic_title="Useful AI tool",
+            topic_title_ru="Полезный AI-инструмент",
+            topic_summary_ru="Инструмент помогает быстрее подготовить понятный результат.",
+        )
+        generate_post_draft_from_page(
+            "key",
+            "model-x",
+            "https://example.com/useful-ai-tool",
+            "Useful AI tool",
+            _long_text(),
+        )
+    finally:
+        writer._generate_with_chat_completion = original
+
+    style_file_content = writer.STYLE_PATH.read_text(encoding="utf-8").strip()
+    assert len(calls) == 3
+    assert all(style_file_content in system_prompt for _user_prompt, system_prompt in calls)
+    assert calls[0][1] == calls[1][1] == calls[2][1] == writer._build_post_style_prompt()
+    assert "Создай один готовый Telegram-пост" in calls[1][0]
+    assert "Ниже ссылка и извлечённый текст страницы" in calls[2][0]
 
 
 def _assert_rewrite_prompts() -> None:
@@ -518,6 +557,7 @@ def _assert_cta_cleanup_after_generation() -> None:
 
 def main() -> None:
     _assert_preview_extraction()
+    _assert_first_draft_style_prompt_injection()
     _assert_rewrite_prompts()
     _assert_topic_metadata_generation()
     _assert_topic_metadata_enrichment()
