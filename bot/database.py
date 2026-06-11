@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Iterator
 
 from bot.source_normalization import normalize_source_url, normalize_telegram_channel_input
 from bot.topic_scoring import canonical_topic_key, content_format_for_lane, editorial_lane_for_topic, is_similar_topic_key
@@ -41,13 +42,18 @@ class DraftDatabase:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 30000")
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA synchronous = NORMAL")
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_db(self) -> None:
         with self._connect() as conn:
@@ -268,10 +274,11 @@ class DraftDatabase:
             conn.execute("UPDATE managed_sources SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (1 if enabled else 0, source_id))
             conn.commit()
 
-    def delete_managed_source(self, source_id: int) -> None:
+    def delete_managed_source(self, source_id: int) -> bool:
         with self._connect() as conn:
-            conn.execute("DELETE FROM managed_sources WHERE id = ?", (source_id,))
+            cursor = conn.execute("DELETE FROM managed_sources WHERE id = ?", (source_id,))
             conn.commit()
+            return cursor.rowcount == 1
 
     def update_managed_source_status(self, source_id: int, status: str, error: str = "") -> None:
         with self._connect() as conn:
@@ -578,9 +585,9 @@ class DraftDatabase:
             )
             conn.commit()
 
-    def schedule_draft(self, draft_id: int, scheduled_at_utc: str) -> None:
+    def schedule_draft(self, draft_id: int, scheduled_at_utc: str) -> bool:
         with self._connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE drafts
                 SET status = 'scheduled',
@@ -589,10 +596,19 @@ class DraftDatabase:
                     publish_error = NULL,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
+                  AND status IN ('draft', 'approved', 'scheduled')
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM drafts AS occupied
+                      WHERE occupied.id != ?
+                        AND occupied.status = 'scheduled'
+                        AND occupied.scheduled_at = ?
+                  )
                 """,
-                (scheduled_at_utc, draft_id),
+                (scheduled_at_utc, draft_id, draft_id, scheduled_at_utc),
             )
             conn.commit()
+            return cursor.rowcount == 1
 
     def get_due_scheduled_drafts(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -636,18 +652,26 @@ class DraftDatabase:
             )
             conn.commit()
 
-    def mark_draft_publishing(self, draft_id: int) -> bool:
+    def mark_draft_publishing(
+        self,
+        draft_id: int,
+        allowed_statuses: tuple[str, ...] = ("scheduled",),
+    ) -> bool:
+        statuses = tuple(dict.fromkeys(status.strip() for status in allowed_statuses if status.strip()))
+        if not statuses:
+            return False
+        placeholders = ", ".join("?" for _ in statuses)
         with self._connect() as conn:
             cursor = conn.execute(
-                """
+                f"""
                 UPDATE drafts
                 SET status = 'publishing',
                     publishing_started_at = CURRENT_TIMESTAMP,
                     publish_error = NULL,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND status = 'scheduled'
+                WHERE id = ? AND status IN ({placeholders})
                 """,
-                (draft_id,),
+                (draft_id, *statuses),
             )
             conn.commit()
             return cursor.rowcount == 1

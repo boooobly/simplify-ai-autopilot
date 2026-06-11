@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urlparse, urlunparse
+
+
+_TELEGRAM_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{5,}$")
 
 
 def normalize_telegram_channel_input(raw: str) -> str:
@@ -16,12 +20,10 @@ def normalize_telegram_channel_input(raw: str) -> str:
     path = (parsed.path or "").strip("/")
     if host in {"t.me", "telegram.me", "www.t.me", "www.telegram.me"}:
         parts = [part for part in path.split("/") if part]
-    elif not host and "/" not in value:
+    elif "://" not in value and "/" not in value:
         parts = [value]
-    elif not host and value.lower().startswith("t.me/"):
-        parts = [part for part in value[5:].strip("/").split("/") if part]
     else:
-        parts = [part for part in value.strip("/").split("/") if part]
+        return ""
     if not parts:
         return ""
     first = parts[0].lower()
@@ -31,7 +33,8 @@ def normalize_telegram_channel_input(raw: str) -> str:
         if len(parts) < 2:
             return ""
         first = parts[1].lower()
-    return first.lstrip("@").strip()
+    username = first.lstrip("@").strip()
+    return username if _TELEGRAM_USERNAME_RE.fullmatch(username) else ""
 
 
 def normalize_source_url(url: str) -> str:

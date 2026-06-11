@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import re
 import tempfile
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 
@@ -155,19 +156,40 @@ def _parse_daily_post_slots(raw: str, warnings: ConfigWarningCollector | None = 
     default_slots = ["10:00", "14:00", "18:00", "21:00"]
     slot_re = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
     slots: list[str] = []
+    seen: set[str] = set()
     invalid_count = 0
+    duplicate_count = 0
     for part in raw.split(","):
         value = part.strip()
         if not value:
             continue
         if slot_re.match(value):
+            if value in seen:
+                duplicate_count += 1
+                continue
+            seen.add(value)
             slots.append(value)
         else:
             invalid_count += 1
     if invalid_count and warnings is not None:
         fallback = default_slots if not slots else slots
         warnings.add(f"DAILY_POST_SLOTS contains {invalid_count} invalid time slots; using {', '.join(fallback)}.")
+    if duplicate_count and warnings is not None:
+        warnings.add(f"DAILY_POST_SLOTS contains {duplicate_count} duplicate time slots; duplicates were removed.")
     return slots or default_slots
+
+
+def _validate_timezone(
+    timezone_name: str,
+    warnings: ConfigWarningCollector,
+    default: str = "Europe/Moscow",
+) -> str:
+    try:
+        ZoneInfo(timezone_name)
+        return timezone_name
+    except (ZoneInfoNotFoundError, ValueError):
+        warnings.add(f"SCHEDULE_TIMEZONE '{timezone_name}' is invalid; using {default}.")
+        return default
 
 
 ALIAS_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
@@ -325,6 +347,7 @@ def load_settings() -> Settings:
     db_path = os.getenv("DB_PATH", "data/drafts.db").strip() or "data/drafts.db"
     strict_config = _parse_bool_env("STRICT_CONFIG", False)
     config_warnings = ConfigWarningCollector(strict=strict_config)
+    schedule_timezone = _validate_timezone(schedule_timezone, config_warnings)
     if _detect_railway_with_local_db_path(db_path):
         config_warnings.add(RAILWAY_DEFAULT_DB_WARNING)
     _validate_db_path_parent(db_path)

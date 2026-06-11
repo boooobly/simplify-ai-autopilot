@@ -20,6 +20,7 @@ _OPTIONAL_ENV_NAMES = [
     "TELEGRAM_SOURCE_LOOKBACK_HOURS",
     "TELEGRAM_SOURCE_MAX_POSTS_PER_CHANNEL",
     "DAILY_POST_SLOTS",
+    "SCHEDULE_TIMEZONE",
     "TELEGRAM_API_ID",
     "ENABLE_X_SOURCES",
     "X_API_BEARER_TOKEN",
@@ -72,6 +73,35 @@ def test_invalid_daily_post_slots_warns_and_falls_back(monkeypatch):
 
     assert settings.daily_post_slots == ["10:00", "14:00", "18:00", "21:00"]
     assert any("DAILY_POST_SLOTS" in warning for warning in settings.config_warnings)
+
+
+def test_duplicate_daily_post_slots_are_removed(monkeypatch):
+    _clean_config_env(monkeypatch)
+    monkeypatch.setenv("DAILY_POST_SLOTS", "10:00,10:00,14:00")
+
+    settings = load_settings()
+
+    assert settings.daily_post_slots == ["10:00", "14:00"]
+    assert any("duplicate" in warning for warning in settings.config_warnings)
+
+
+def test_invalid_timezone_falls_back_with_warning(monkeypatch):
+    _clean_config_env(monkeypatch)
+    monkeypatch.setenv("SCHEDULE_TIMEZONE", "Mars/Olympus")
+
+    settings = load_settings()
+
+    assert settings.schedule_timezone == "Europe/Moscow"
+    assert any("SCHEDULE_TIMEZONE" in warning for warning in settings.config_warnings)
+
+
+def test_invalid_timezone_raises_in_strict_mode(monkeypatch):
+    _clean_config_env(monkeypatch)
+    monkeypatch.setenv("STRICT_CONFIG", "1")
+    monkeypatch.setenv("SCHEDULE_TIMEZONE", "Mars/Olympus")
+
+    with pytest.raises(ValueError, match="SCHEDULE_TIMEZONE"):
+        load_settings()
 
 
 def test_enabled_x_sources_without_credentials_warns_in_non_strict_mode(monkeypatch):

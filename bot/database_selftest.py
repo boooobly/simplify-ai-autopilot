@@ -18,13 +18,14 @@ EXPECTED_INDEXES = {
 
 def _create_with_status(db: DraftDatabase, status: str) -> int:
     draft_id = db.create_draft(f"test {status}")
+    scheduled_at = f"2030-01-01 00:00:{draft_id % 60:02d}"
     if status == "draft":
         return draft_id
     if status == "scheduled":
-        db.schedule_draft(draft_id, "2030-01-01 00:00:00")
+        assert db.schedule_draft(draft_id, scheduled_at) is True
         return draft_id
     if status == "publishing":
-        db.schedule_draft(draft_id, "2030-01-01 00:00:00")
+        assert db.schedule_draft(draft_id, scheduled_at) is True
         assert db.mark_draft_publishing(draft_id) is True
         return draft_id
     if status == "published":

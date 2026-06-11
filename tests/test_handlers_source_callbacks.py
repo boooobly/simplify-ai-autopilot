@@ -109,6 +109,40 @@ def test_sources_status_duplicate_click_blocked(monkeypatch):
     assert any("уже идёт" in text for text in calls)
 
 
+def test_sources_inventory_sends_every_part_and_returns(monkeypatch):
+    calls: list[str] = []
+
+    async def _fake_edit(_query, text, reply_markup=None):
+        calls.append(text)
+
+    class _FakeBot:
+        async def send_message(self, chat_id, text, reply_markup=None):
+            calls.append(text)
+
+    context = SimpleNamespace(
+        bot_data={"settings": SimpleNamespace(admin_id=1), "db": object()},
+        bot=_FakeBot(),
+        application=SimpleNamespace(bot_data={}),
+        user_data={},
+    )
+    update = SimpleNamespace(callback_query=_FakeCallbackQuery("sources_inventory"))
+
+    asyncio.run(
+        handlers.source_handlers.handle_sources_callback(
+            update=update,
+            context=context,
+            data="sources_inventory",
+            edit_callback_message=_fake_edit,
+            sources_hub_keyboard=lambda: None,
+            source_card_keyboard=lambda *_args: None,
+            run_source_test_background=lambda **_kwargs: None,
+            render_sources_inventory=lambda _settings, _db: ["part 1", "part 2", "part 3"],
+        )
+    )
+
+    assert calls == ["part 1", "part 2", "part 3"]
+
+
 def test_moderation_callback_dispatches_sources_inventory(monkeypatch):
     calls = []
 

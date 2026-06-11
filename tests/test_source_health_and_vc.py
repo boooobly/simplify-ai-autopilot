@@ -1,7 +1,11 @@
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from bot.database import DraftDatabase
-from bot.sources import fetch_vc_ru_ai_topics
+import bot.sources as sources
+from bot.sources import SourceReport, collect_topics_with_diagnostics, fetch_vc_ru_ai_topics
 from bot.source_candidates import CANDIDATE_SOURCES
 from bot.handlers import _render_sources_health
 
@@ -30,6 +34,55 @@ def test_source_health_ok_resets(tmp_path):
     db.record_source_health('rss', 'k', 'A', 'g', 'ok', '')
     row = db.get_source_health('rss', 'k')
     assert int(row['consecutive_errors']) == 0
+
+
+def test_managed_rss_collection_updates_and_resets_health(tmp_path, monkeypatch):
+    db = DraftDatabase(str(tmp_path / "t.db"))
+    feed_url = "https://example.com/feed.xml"
+    source_id = db.create_managed_source("rss", "Managed", feed_url, "custom")
+    db.record_source_health("rss", feed_url, "Managed", "custom", "error", "temporary")
+
+    xml = "<rss><channel><item><title>Useful AI tool update</title><link>https://example.com/post</link></item></channel></rss>"
+
+    class Resp:
+        text = xml
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setenv("ENABLE_REDDIT_SOURCES", "false")
+    monkeypatch.setenv("ENABLE_X_SOURCES", "false")
+    monkeypatch.setenv("CUSTOM_TOPIC_FEEDS", "")
+    for name in ("OFFICIAL_AI_RSS", "TECH_MEDIA_RSS", "RU_TECH_RSS", "TOOLS_RSS"):
+        monkeypatch.setattr(sources, name, [])
+    monkeypatch.setattr(sources.requests, "get", lambda *args, **kwargs: Resp())
+    monkeypatch.setattr(
+        sources,
+        "fetch_vc_ru_ai_topics",
+        lambda: ([], SourceReport("vc.ru AI", "https://vc.ru/ai", "ru_tech", "empty")),
+    )
+    monkeypatch.setattr(sources, "_fetch_github_trending_ai", lambda: [])
+
+    items, reports = collect_topics_with_diagnostics(
+        settings=SimpleNamespace(enable_telegram_channel_sources=False),
+        db=db,
+    )
+
+    assert any(item.url == "https://example.com/post" for item in items)
+    assert any(report.name == "Managed" and report.status == "ok" for report in reports)
+    health = db.get_source_health("rss", feed_url)
+    assert health is not None
+    assert health["last_status"] == "ok"
+    assert int(health["consecutive_errors"]) == 0
+    assert db.get_managed_source(source_id)["last_status"] == "ok"
+
+
+def test_run_async_preserves_runtime_error():
+    async def fail():
+        raise RuntimeError("original coroutine failure")
+
+    with pytest.raises(RuntimeError, match="original coroutine failure"):
+        sources._run_async(fail())
 
 
 def test_candidate_registry_imports():

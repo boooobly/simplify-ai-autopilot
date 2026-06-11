@@ -114,9 +114,9 @@ def _parse_score_datetime(value: str | None) -> datetime | None:
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d"):
         try:
             parsed = datetime.strptime(raw, fmt)
-            if parsed.tzinfo is not None:
-                parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
-            return parsed
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
         except ValueError:
             continue
     return None
@@ -298,7 +298,7 @@ def score_topic(
 
     parsed_dt = _parse_score_datetime(published_at)
     if parsed_dt:
-        age_days = (datetime.utcnow() - parsed_dt).days
+        age_days = (datetime.now(timezone.utc) - parsed_dt).days
         if age_days > 30:
             score -= 18
             reason_parts.append("штраф: старая тема")

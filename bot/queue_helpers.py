@@ -153,7 +153,8 @@ def _find_nearest_available_slot(db: DraftDatabase, settings) -> datetime:
 def _schedule_draft_to_nearest_slot(db: DraftDatabase, settings, draft_id: int) -> str:
     scheduled_local = _find_nearest_available_slot(db, settings)
     scheduled_utc = scheduled_local.astimezone(ZoneInfo("UTC"))
-    db.schedule_draft(draft_id, scheduled_utc.strftime("%Y-%m-%d %H:%M:%S"))
+    if not db.schedule_draft(draft_id, scheduled_utc.strftime("%Y-%m-%d %H:%M:%S")):
+        raise ValueError("Ближайший слот только что заняли. Обнови очередь и попробуй ещё раз.")
     return scheduled_local.strftime("%d.%m %H:%M")
 
 
@@ -221,7 +222,8 @@ def _schedule_draft_to_local_slot(db: DraftDatabase, settings, draft_id: int, da
     if not _is_local_slot_free(db, settings, day_offset, normalized_slot):
         raise ValueError("Этот слот уже занят. Обнови очередь и выбери свободный слот.")
     scheduled_utc = scheduled_local.astimezone(ZoneInfo("UTC"))
-    db.schedule_draft(draft_id, scheduled_utc.strftime("%Y-%m-%d %H:%M:%S"))
+    if not db.schedule_draft(draft_id, scheduled_utc.strftime("%Y-%m-%d %H:%M:%S")):
+        raise ValueError("Этот слот уже занят или статус черновика изменился.")
     return scheduled_local.strftime("%d.%m %H:%M")
 
 
