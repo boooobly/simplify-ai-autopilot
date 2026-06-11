@@ -36,6 +36,8 @@ def test_telegram_normalize():
     assert normalize_telegram_channel_input("https://t.me/+secret") == ""
     assert normalize_telegram_channel_input("https://t.me/joinchat/secret") == ""
     assert normalize_telegram_channel_input("https://t.me/c/123/4") == ""
+    assert normalize_telegram_channel_input("https://example.com/channel") == ""
+    assert normalize_telegram_channel_input("bad channel") == ""
 
 
 def test_managed_sources_db_normalization_duplicate_telegram_and_rss(tmp_path):
@@ -51,6 +53,8 @@ def test_managed_sources_db_normalization_duplicate_telegram_and_rss(tmp_path):
 def test_rss_validation():
     assert is_valid_rss_input_url("https://vc.ru/ai")
     assert not is_valid_rss_input_url("ftp://x")
+    assert not is_valid_rss_input_url("httpx://example.com/feed.xml")
+    assert not is_valid_rss_input_url("https:///feed.xml")
 
 
 def test_discover_direct_rss(monkeypatch):

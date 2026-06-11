@@ -19,7 +19,7 @@ from bot.config import _parse_bool_env, _parse_csv_env, _parse_int_range_env
 from bot.topic_scoring import humanize_topic_reason_ru, normalize_topic_title, score_topic
 from bot.topic_display import is_weak_topic_metadata
 from bot.telegram_sources import fetch_telegram_channel_topics
-from bot.source_normalization import normalize_source_url, normalize_telegram_channel_input
+from bot.source_normalization import normalize_source_url
 
 
 @dataclass
@@ -221,7 +221,8 @@ def fetch_x_topics(token: str, accounts: list[str], max_posts_per_account: int) 
 
 def discover_rss_feed_url(input_url: str, timeout: int = 12) -> tuple[str | None, str]:
     url = (input_url or "").strip()
-    if not url.startswith("http"):
+    parsed_input = urlparse(url)
+    if parsed_input.scheme.lower() not in {"http", "https"} or not parsed_input.netloc:
         return None, "URL должен начинаться с http/https"
     headers = {"User-Agent": "Mozilla/5.0 (compatible; simplify-ai-autopilot/1.0; +https://t.me/simplify_ai)"}
 
@@ -291,7 +292,8 @@ def parse_custom_topic_feeds(env_value: str | None) -> list[tuple[str, str, str]
             group = "custom"
         else:
             continue
-        if url.startswith("http"):
+        parsed_url = urlparse(url)
+        if parsed_url.scheme.lower() in {"http", "https"} and parsed_url.netloc:
             feeds.append((name, group, url))
     return feeds
 
@@ -613,21 +615,14 @@ def _fetch_github_trending_ai() -> list[TopicItem]:
         if not repo_path.startswith("/"):
             continue
         title_ru, summary_ru, angle_ru = build_github_topic_ru_metadata(repo_name, description, language, stars, stars_today)
-        topics.append(_with_scoring(TopicItem(title=f"GitHub Trending: {repo_name}", url=f"https://github.com{repo_path}", source="GitHub Trending AI", published_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), source_group="github", title_ru=title_ru, summary_ru=summary_ru, angle_ru=angle_ru, original_description=description, stars_today=stars_today)))
+        topics.append(_with_scoring(TopicItem(title=f"GitHub Trending: {repo_name}", url=f"https://github.com{repo_path}", source="GitHub Trending AI", published_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), source_group="github", title_ru=title_ru, summary_ru=summary_ru, angle_ru=angle_ru, original_description=description, stars_today=stars_today)))
     return topics[:8]
 
 
 
 
 def _run_async(coro):
-    try:
-        return asyncio.run(coro)
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(coro)
-        finally:
-            loop.close()
+    return asyncio.run(coro)
 
 def collect_topics(settings=None, db=None) -> list[TopicItem]:
     items, _reports = collect_topics_with_diagnostics(settings=settings, db=db)
@@ -701,10 +696,12 @@ def collect_topics_with_diagnostics(settings=None, db=None) -> tuple[list[TopicI
             reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="ok" if parsed else "empty", item_count=len(parsed)))
             if db is not None:
                 db.update_managed_source_status(int(row["id"]), "ok" if parsed else "empty", "")
+            _record("rss", source_name, group, rss_url, "ok" if parsed else "empty")
         except Exception as exc:
             reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="error", error=str(exc)[:160]))
             if db is not None:
                 db.update_managed_source_status(int(row["id"]), "error", str(exc)[:160])
+            _record("rss", source_name, group, rss_url, "error", str(exc))
 
     for source_name, group, rss_url in custom:
         should_skip, reason = _skip_if_needed("rss", source_name, group, rss_url)
@@ -718,6 +715,7 @@ def collect_topics_with_diagnostics(settings=None, db=None) -> tuple[list[TopicI
             parsed = _parse_rss(response.text, source_name, group, max_items=8)
             collected.extend(parsed)
             reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="ok" if parsed else "empty", item_count=len(parsed)))
+            _record("rss", source_name, group, rss_url, "ok" if parsed else "empty")
         except Exception as exc:
             reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="error", error=str(exc)[:160]))
             _record("rss", source_name, group, rss_url, "error", str(exc))

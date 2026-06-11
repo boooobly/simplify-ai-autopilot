@@ -132,19 +132,21 @@ async def handle_draft_moderation_callback(
         return True
 
     if action == "publish":
-        if not deps.can_publish(draft.get("status")):
-            await deps.edit_callback_message(query, deps.status_guard_message("publish", draft.get("status")))
+        original_status = str(draft.get("status") or "")
+        if not deps.can_publish(original_status):
+            await deps.edit_callback_message(query, deps.status_guard_message("publish", original_status))
             return True
-        was_scheduled = draft.get("status") == "scheduled"
-        draft_to_publish = draft
-        if was_scheduled:
-            if not db.mark_draft_publishing(draft_id):
-                await deps.edit_callback_message(query, "Черновик уже не в очереди.")
-                return True
-            draft_to_publish = db.get_draft(draft_id)
-            if not draft_to_publish:
-                await deps.edit_callback_message(query, f"Черновик #{draft_id} не найден.")
-                return True
+        if not db.mark_draft_publishing(
+            draft_id,
+            allowed_statuses=("draft", "approved", "scheduled"),
+        ):
+            await deps.edit_callback_message(query, "Черновик уже публикуется или его статус изменился.")
+            return True
+        draft_to_publish = db.get_draft(draft_id)
+        if not draft_to_publish:
+            db.mark_draft_failed(draft_id, error="DraftMissingAfterPublishClaim")
+            await deps.edit_callback_message(query, f"Черновик #{draft_id} не найден после начала публикации.")
+            return True
         try:
             publish_result = await deps.publish_to_channel(
                 context.bot,
@@ -156,8 +158,7 @@ async def handle_draft_moderation_callback(
                 settings.custom_emoji_aliases,
             )
         except Exception as exc:
-            if was_scheduled:
-                db.mark_draft_failed(draft_id, error=type(exc).__name__)
+            db.mark_draft_failed(draft_id, error=type(exc).__name__)
             raise
         db.mark_draft_published(draft_id, channel_id=settings.channel_id, message_ids=publish_result.message_ids)
         await deps.edit_callback_message(query, f"✅ Черновик #{draft_id} опубликован в канал.")
@@ -182,6 +183,9 @@ async def handle_draft_moderation_callback(
         if not slot:
             await deps.edit_callback_message(query, "Некорректный слот времени.")
             return True
+        if slot not in settings.daily_post_slots:
+            await deps.edit_callback_message(query, "Такого слота нет в настройках расписания.")
+            return True
         draft_for_slot = db.get_draft(draft_id)
         if not draft_for_slot:
             await deps.edit_callback_message(query, f"Черновик #{draft_id} не найден.")
@@ -197,12 +201,17 @@ async def handle_draft_moderation_callback(
         except (TypeError, ValueError):
             await deps.edit_callback_message(query, "Некорректный слот времени.")
             return True
+        if hour not in range(24) or minute not in range(60):
+            await deps.edit_callback_message(query, "Некорректный слот времени.")
+            return True
         scheduled_local = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if scheduled_local <= now_local:
             scheduled_local += timedelta(days=1)
 
         scheduled_utc = scheduled_local.astimezone(ZoneInfo("UTC"))
-        db.schedule_draft(draft_id, scheduled_utc.strftime("%Y-%m-%d %H:%M:%S"))
+        if not db.schedule_draft(draft_id, scheduled_utc.strftime("%Y-%m-%d %H:%M:%S")):
+            await deps.edit_callback_message(query, "Этот слот уже занят или статус черновика изменился.")
+            return True
         await deps.edit_callback_message(
             query,
             f"🗓️ Черновик #{draft_id} запланирован на {scheduled_local.strftime('%Y-%m-%d %H:%M')}.\nОчередь: /queue_today",

@@ -2316,7 +2316,10 @@ async def _schedule_generated_plan(*, context, settings, db, day_offset: int) ->
             error_lines.append(f"{slot} - черновик #{draft_id} уже не черновик")
             continue
         scheduled_at_utc = _scheduled_at_for_slot(day_offset, slot, settings.schedule_timezone)
-        db.schedule_draft(draft_id, scheduled_at_utc)
+        if not db.schedule_draft(draft_id, scheduled_at_utc):
+            error_lines.append(f"{slot} - слот уже занят или статус черновика изменился")
+            empty_slots.discard(slot)
+            continue
         empty_slots.remove(slot)
         scheduled_count += 1
         ok_lines.append(f"{slot} - черновик #{draft_id}")
