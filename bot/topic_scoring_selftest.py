@@ -1,7 +1,10 @@
+from datetime import datetime, timezone
+
 from bot.topic_scoring import canonical_topic_key, hybrid_topic_score, is_similar_topic_key, normalize_topic_title, score_topic
 
 
 def run() -> None:
+    fresh_published_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     useful_tool, useful_category, _ = score_topic(
         "Free AI video editor app for quick captions and shorts",
         "Product Hunt",
@@ -108,7 +111,7 @@ def run() -> None:
         "https://anthropic.com/news/claude-opus-4-8",
         "official_ai",
         description="A major model update with new agent workflows for users.",
-        published_at="2026-05-12 00:00:00",
+        published_at=fresh_published_at,
     )
     assert major_release >= 75
     assert major_category in {"agent", "model", "news"}

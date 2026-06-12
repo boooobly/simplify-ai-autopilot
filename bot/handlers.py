@@ -57,7 +57,7 @@ from bot.queue_helpers import (
     _slot_callback_hhmm,
     _busy_slots_for_local_day,
 )
-from bot.telegram_formatting import strip_quote_markers
+from bot.telegram_formatting import render_post_html, strip_quote_markers
 from bot.telegram_safety import (
     TELEGRAM_SAFE_TEXT_LIMIT,
     safe_edit_or_send_callback_message,
@@ -3149,6 +3149,168 @@ async def emoji_ids_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
     await update.message.reply_text("\n\n".join(lines), reply_markup=_admin_reply_keyboard())
+
+
+def _configured_custom_emoji_ids(settings) -> list[str]:
+    ids = list(settings.custom_emoji_map.values())
+    ids.extend(emoji_id for _, emoji_id in settings.custom_emoji_aliases.values())
+    return list(dict.fromkeys(str(emoji_id) for emoji_id in ids if str(emoji_id).isdigit()))
+
+
+async def _validate_custom_emoji_ids(bot, emoji_ids: list[str]) -> tuple[set[str] | None, set[str] | None, str | None]:
+    if not emoji_ids:
+        return set(), set(), None
+    method = getattr(bot, "get_custom_emoji_stickers", None)
+    if not callable(method):
+        return None, None, "method unavailable"
+
+    try:
+        valid_ids: set[str] = set()
+        for offset in range(0, len(emoji_ids), 200):
+            stickers = await method(custom_emoji_ids=emoji_ids[offset:offset + 200])
+            valid_ids.update(
+                str(sticker.custom_emoji_id)
+                for sticker in stickers
+                if getattr(sticker, "custom_emoji_id", None)
+            )
+    except Exception as exc:
+        logger.warning("custom emoji API validation failed error=%s", type(exc).__name__)
+        return None, None, type(exc).__name__
+
+    return valid_ids, set(emoji_ids) - valid_ids, None
+
+
+def _custom_emoji_test_sources(
+    settings,
+    validation_lines: list[str],
+    valid_ids: set[str] | None,
+) -> list[str]:
+    entries: list[str] = []
+    for fallback, emoji_id in settings.custom_emoji_map.items():
+        if valid_ids is not None and emoji_id not in valid_ids:
+            entries.append(f"map id={emoji_id} INVALID")
+        else:
+            entries.append(f"{fallback} map id={emoji_id}")
+    for alias, (_, emoji_id) in settings.custom_emoji_aliases.items():
+        if valid_ids is not None and emoji_id not in valid_ids:
+            entries.append(f"alias={alias} id={emoji_id} INVALID")
+        else:
+            entries.append(f"[[EMOJI:{alias}]] alias={alias} id={emoji_id}")
+
+    sources: list[str] = []
+    for offset in range(0, len(entries), 25):
+        header = [
+            "Custom emoji diagnostics",
+            f"CUSTOM_EMOJI_MAP: {len(settings.custom_emoji_map)}",
+            f"CUSTOM_EMOJI_ALIASES: {len(settings.custom_emoji_aliases)}",
+        ]
+        if offset == 0:
+            header.extend(validation_lines)
+        else:
+            header.append(f"Preview continued: {offset + 1}-{min(offset + 25, len(entries))}")
+        sources.append("\n".join([*header, "", *entries[offset:offset + 25]]))
+    return sources
+
+
+async def _send_custom_emoji_test_preview(
+    bot,
+    chat_id,
+    sources: list[str],
+    custom_emoji_map: dict[str, str],
+    custom_emoji_aliases: dict[str, tuple[str, str]],
+) -> None:
+    for source in sources:
+        rendered = render_post_html(
+            source,
+            custom_emoji_map=custom_emoji_map,
+            custom_emoji_aliases=custom_emoji_aliases,
+            strict_custom_emoji=True,
+        )
+        await bot.send_message(
+            chat_id=chat_id,
+            text=rendered,
+            parse_mode="HTML",
+            link_preview_options=_disabled_link_preview_options(),
+        )
+
+
+async def emoji_test_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings = context.bot_data["settings"]
+    user_id = update.effective_user.id if update.effective_user else None
+    if not _is_admin(user_id, settings.admin_id):
+        if update.message:
+            await update.message.reply_text("Нет доступа.")
+        return
+    if not update.message:
+        return
+
+    send_to_channel = bool(context.args and context.args[0].strip().lower() == "channel")
+    if context.args and not send_to_channel:
+        await update.message.reply_text("Использование: /emoji_test или /emoji_test channel")
+        return
+
+    if not settings.custom_emoji_map and not settings.custom_emoji_aliases:
+        await update.message.reply_text(
+            "Custom emoji не настроены.\n"
+            "CUSTOM_EMOJI_MAP: 🔥|custom_emoji_id;💭|custom_emoji_id\n"
+            "CUSTOM_EMOJI_ALIASES: fire|🔥|custom_emoji_id;thought|💭|custom_emoji_id"
+        )
+        return
+
+    emoji_ids = _configured_custom_emoji_ids(settings)
+    valid_ids, invalid_ids, validation_error = await _validate_custom_emoji_ids(context.bot, emoji_ids)
+    if validation_error:
+        validation_lines = [f"Bot API validation: unavailable ({validation_error})"]
+    else:
+        validation_lines = [
+            f"Bot API valid ids: {len(valid_ids or set())}",
+            f"Bot API invalid ids: {', '.join(sorted(invalid_ids or set())) or 'none'}",
+        ]
+
+    render_map = {
+        fallback: emoji_id
+        for fallback, emoji_id in settings.custom_emoji_map.items()
+        if valid_ids is None or emoji_id in valid_ids
+    }
+    render_aliases = {
+        alias: emoji_data
+        for alias, emoji_data in settings.custom_emoji_aliases.items()
+        if valid_ids is None or emoji_data[1] in valid_ids
+    }
+    sources = _custom_emoji_test_sources(settings, validation_lines, valid_ids)
+    admin_chat_id = settings.admin_id
+    try:
+        await _send_custom_emoji_test_preview(
+            context.bot,
+            admin_chat_id,
+            sources,
+            render_map,
+            render_aliases,
+        )
+    except Exception as exc:
+        logger.warning("custom emoji admin preview failed error=%s", type(exc).__name__)
+        await update.message.reply_text(
+            "Telegram отклонил HTML preview. Форматирование построено, но custom emoji недоступны "
+            f"для этого чата или бота ({type(exc).__name__})."
+        )
+        return
+
+    if send_to_channel:
+        try:
+            await _send_custom_emoji_test_preview(
+                context.bot,
+                settings.channel_id,
+                sources,
+                render_map,
+                render_aliases,
+            )
+            await update.message.reply_text("Тест custom emoji отправлен в CHANNEL_ID.")
+        except Exception as exc:
+            logger.warning("custom emoji channel preview failed error=%s", type(exc).__name__)
+            await update.message.reply_text(
+                "Telegram отклонил channel preview. Проверь права бота и поддержку custom emoji "
+                f"для канала ({type(exc).__name__})."
+            )
 
 
 

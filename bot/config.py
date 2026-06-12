@@ -193,8 +193,24 @@ def _validate_timezone(
 
 
 ALIAS_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+CUSTOM_EMOJI_FALLBACK_RE = re.compile(
+    "["
+    "\U0001F000-\U0001FAFF"
+    "\u2600-\u27BF"
+    "]\ufe0f?",
+)
 CHANNEL_USERNAME_RE = re.compile(r"^@[A-Za-z0-9_]{5,}$")
 CHANNEL_NUMERIC_ID_RE = re.compile(r"^-?\d+$")
+
+
+def _is_custom_emoji_fallback(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped or not CUSTOM_EMOJI_FALLBACK_RE.search(stripped):
+        return False
+    remainder = CUSTOM_EMOJI_FALLBACK_RE.sub("", stripped)
+    for joiner in ("\u200d", "\ufe0e", "\ufe0f", "\u20e3"):
+        remainder = remainder.replace(joiner, "")
+    return not remainder
 
 
 def _parse_custom_emoji_map(raw: str, warnings: ConfigWarningCollector | None = None) -> dict[str, str]:
@@ -210,7 +226,7 @@ def _parse_custom_emoji_map(raw: str, warnings: ConfigWarningCollector | None = 
         fallback_emoji, custom_emoji_id = item.split("|", 1)
         fallback_emoji = fallback_emoji.strip()
         custom_emoji_id = custom_emoji_id.strip()
-        if not fallback_emoji or not custom_emoji_id.isdigit():
+        if not _is_custom_emoji_fallback(fallback_emoji) or not custom_emoji_id.isdigit():
             skipped += 1
             continue
         result[fallback_emoji] = custom_emoji_id
@@ -234,7 +250,7 @@ def _parse_custom_emoji_aliases(raw: str, warnings: ConfigWarningCollector | Non
         if not ALIAS_RE.match(alias):
             skipped += 1
             continue
-        if not fallback_emoji or not custom_emoji_id.isdigit():
+        if not _is_custom_emoji_fallback(fallback_emoji) or not custom_emoji_id.isdigit():
             skipped += 1
             continue
         result[alias] = (fallback_emoji, custom_emoji_id)

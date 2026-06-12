@@ -58,18 +58,32 @@ def _render_or_plain(
     strict_custom_emoji: bool = True,
 ) -> tuple[str, str | None]:
     try:
-        return render_post_html(
+        rendered = render_post_html(
             text,
             custom_emoji_map=custom_emoji_map,
             custom_emoji_aliases=custom_emoji_aliases,
             strict_custom_emoji=strict_custom_emoji,
-        ), "HTML"
-    except Exception:
-        return strip_quote_markers(
-            text,
-            custom_emoji_aliases=custom_emoji_aliases,
-            strict_custom_emoji=strict_custom_emoji,
-        ), None
+        )
+        if rendered.strip():
+            return rendered, "HTML"
+        logger.warning("Telegram HTML rendering produced empty output; using plain text fallback")
+    except Exception as exc:
+        logger.warning("Telegram HTML rendering failed; using plain text fallback error=%s", type(exc).__name__)
+
+    plain_text = strip_quote_markers(
+        text,
+        custom_emoji_aliases=custom_emoji_aliases,
+        strict_custom_emoji=strict_custom_emoji,
+    )
+    if plain_text.strip():
+        return plain_text, None
+
+    safe_fallback = strip_quote_markers(
+        text,
+        custom_emoji_aliases=custom_emoji_aliases,
+        strict_custom_emoji=False,
+    )
+    return (safe_fallback if safe_fallback.strip() else text.strip()), None
 
 
 def _remove_incomplete_trailing_marker(text: str) -> str:

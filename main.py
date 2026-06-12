@@ -38,6 +38,7 @@ from bot.handlers import (
     restore_draft_command,
     failed_drafts_command,
     emoji_ids_command,
+    emoji_test_command,
     health_command,
 )
 from bot.cleanup_handlers import cleanup_confirm_command, cleanup_preview_command
@@ -106,6 +107,7 @@ async def _post_init(application: Application) -> None:
             BotCommand("usage_today", "Расходы ИИ сегодня"),
             BotCommand("style_guide", "Сводка по стилю"),
             BotCommand("emoji_ids", "ID кастомных emoji"),
+            BotCommand("emoji_test", "Проверить custom emoji"),
             BotCommand("cleanup_preview", "Предпросмотр очистки базы"),
             BotCommand("cleanup_confirm", "Подтвердить очистку базы"),
             BotCommand("health", "Статус бота"),
@@ -190,6 +192,7 @@ def main() -> None:
     application.add_handler(CommandHandler("restore_draft", restore_draft_command))
     application.add_handler(CommandHandler("failed_drafts", failed_drafts_command))
     application.add_handler(CommandHandler("emoji_ids", emoji_ids_command))
+    application.add_handler(CommandHandler("emoji_test", emoji_test_command))
     application.add_handler(CommandHandler("cleanup_preview", cleanup_preview_command))
     application.add_handler(CommandHandler("cleanup_confirm", cleanup_confirm_command))
     application.add_handler(CommandHandler("health", health_command))
