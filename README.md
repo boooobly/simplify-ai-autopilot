@@ -240,4 +240,5 @@ python main.py
 - Fallback должен быть настоящим emoji, а ID должен состоять только из цифр. Некорректные записи пропускаются и попадают в startup warnings без вывода секретов.
 - После изменения env перезапусти бота и выполни `/emoji_test`. Команда показывает количество настроенных записей, проверяет ID через `getCustomEmojiStickers` и отправляет HTML preview в админский чат.
 - `/emoji_test channel` дополнительно отправляет тот же preview в `CHANNEL_ID` и помогает отдельно проверить возможности канала.
+- `/emoji_test debug` отправляет администратору тот же preview и затем показывает literal rendered HTML без parse mode, чтобы до отправки в Telegram проверить наличие `<tg-emoji emoji-id="...">`.
 - Telegram может ограничивать custom emoji для конкретного бота, аккаунта или канала. Если preview работает в личном чате, но не в канале, наиболее вероятна Telegram permission/capability limitation, а не ошибка HTML-форматирования.

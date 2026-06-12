@@ -22,6 +22,22 @@ def test_raw_custom_emoji_map_renders_in_strict_mode():
     assert rendered == '<tg-emoji emoji-id="5368324170671202286">🔥</tg-emoji> Новость'
 
 
+def test_post_style_raw_emojis_render_in_strict_mode():
+    rendered = render_post_html(
+        "🔥 Заголовок\n\n➖ пункт один\n➖ пункт два\n\n💭 финальная мысль",
+        custom_emoji_map={
+            "🔥": "1111111111111111111",
+            "➖": "2222222222222222222",
+            "💭": "3333333333333333333",
+        },
+        strict_custom_emoji=True,
+    )
+
+    assert '<tg-emoji emoji-id="1111111111111111111">🔥</tg-emoji>' in rendered
+    assert rendered.count('<tg-emoji emoji-id="2222222222222222222">➖</tg-emoji>') == 2
+    assert '<tg-emoji emoji-id="3333333333333333333">💭</tg-emoji>' in rendered
+
+
 def test_custom_emoji_alias_renders_in_both_modes():
     for strict in (False, True):
         rendered = render_post_html(
@@ -30,6 +46,27 @@ def test_custom_emoji_alias_renders_in_both_modes():
             strict_custom_emoji=strict,
         )
         assert rendered == '<tg-emoji emoji-id="5368324170671202286">🔥</tg-emoji> Новость'
+
+
+def test_raw_alias_fallback_renders_in_both_modes():
+    for strict in (False, True):
+        rendered = render_post_html(
+            "💭 Новость",
+            custom_emoji_aliases=EMOJI_ALIASES,
+            strict_custom_emoji=strict,
+        )
+        assert rendered == '<tg-emoji emoji-id="1234567890123456789">💭</tg-emoji> Новость'
+
+
+def test_explicit_map_wins_over_conflicting_alias_fallback():
+    rendered = render_post_html(
+        "🔥 Новость",
+        custom_emoji_map={"🔥": "111"},
+        custom_emoji_aliases={"fire": ("🔥", "222")},
+        strict_custom_emoji=True,
+    )
+
+    assert rendered == '<tg-emoji emoji-id="111">🔥</tg-emoji> Новость'
 
 
 def test_unknown_alias_falls_back_safely():

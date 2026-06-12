@@ -3208,24 +3208,40 @@ def _custom_emoji_test_sources(
             header.extend(validation_lines)
         else:
             header.append(f"Preview continued: {offset + 1}-{min(offset + 25, len(entries))}")
-        sources.append("\n".join([*header, "", *entries[offset:offset + 25]]))
+        sample = []
+        if offset == 0:
+            sample = [
+                "Post-style raw emoji sample",
+                "🔥 Заголовок",
+                "",
+                "➖ пункт один",
+                "➖ пункт два",
+                "",
+                "💭 финальная мысль",
+                "",
+            ]
+        sources.append("\n".join([*header, "", *sample, *entries[offset:offset + 25]]))
     return sources
 
 
-async def _send_custom_emoji_test_preview(
-    bot,
-    chat_id,
+def _render_custom_emoji_test_preview(
     sources: list[str],
     custom_emoji_map: dict[str, str],
     custom_emoji_aliases: dict[str, tuple[str, str]],
-) -> None:
-    for source in sources:
-        rendered = render_post_html(
+) -> list[str]:
+    return [
+        render_post_html(
             source,
             custom_emoji_map=custom_emoji_map,
             custom_emoji_aliases=custom_emoji_aliases,
             strict_custom_emoji=True,
         )
+        for source in sources
+    ]
+
+
+async def _send_custom_emoji_test_preview(bot, chat_id, rendered_messages: list[str]) -> None:
+    for rendered in rendered_messages:
         await bot.send_message(
             chat_id=chat_id,
             text=rendered,
@@ -3244,10 +3260,12 @@ async def emoji_test_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not update.message:
         return
 
-    send_to_channel = bool(context.args and context.args[0].strip().lower() == "channel")
-    if context.args and not send_to_channel:
-        await update.message.reply_text("Использование: /emoji_test или /emoji_test channel")
+    mode = context.args[0].strip().lower() if context.args else ""
+    if mode not in {"", "channel", "debug"} or len(context.args) > 1:
+        await update.message.reply_text("Использование: /emoji_test, /emoji_test channel или /emoji_test debug")
         return
+    send_to_channel = mode == "channel"
+    debug_mode = mode == "debug"
 
     if not settings.custom_emoji_map and not settings.custom_emoji_aliases:
         await update.message.reply_text(
@@ -3278,15 +3296,10 @@ async def emoji_test_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if valid_ids is None or emoji_data[1] in valid_ids
     }
     sources = _custom_emoji_test_sources(settings, validation_lines, valid_ids)
+    rendered_messages = _render_custom_emoji_test_preview(sources, render_map, render_aliases)
     admin_chat_id = settings.admin_id
     try:
-        await _send_custom_emoji_test_preview(
-            context.bot,
-            admin_chat_id,
-            sources,
-            render_map,
-            render_aliases,
-        )
+        await _send_custom_emoji_test_preview(context.bot, admin_chat_id, rendered_messages)
     except Exception as exc:
         logger.warning("custom emoji admin preview failed error=%s", type(exc).__name__)
         await update.message.reply_text(
@@ -3295,15 +3308,17 @@ async def emoji_test_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
+    if debug_mode:
+        for index, rendered in enumerate(rendered_messages, start=1):
+            await safe_reply_text(
+                update.message,
+                f"Rendered HTML #{index} (без секретов):\n{rendered}",
+                parse_mode=None,
+            )
+
     if send_to_channel:
         try:
-            await _send_custom_emoji_test_preview(
-                context.bot,
-                settings.channel_id,
-                sources,
-                render_map,
-                render_aliases,
-            )
+            await _send_custom_emoji_test_preview(context.bot, settings.channel_id, rendered_messages)
             await update.message.reply_text("Тест custom emoji отправлен в CHANNEL_ID.")
         except Exception as exc:
             logger.warning("custom emoji channel preview failed error=%s", type(exc).__name__)

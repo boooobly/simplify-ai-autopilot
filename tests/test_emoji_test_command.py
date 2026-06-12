@@ -90,10 +90,37 @@ def test_emoji_test_validates_ids_and_sends_html_to_admin_and_channel():
     assert [message["chat_id"] for message in bot.messages] == [42, "@channel"]
     assert all(message["parse_mode"] == "HTML" for message in bot.messages)
     assert all("<tg-emoji" in message["text"] for message in bot.messages)
+    assert "Post-style raw emoji sample" in bot.messages[0]["text"]
+    assert "Заголовок" in bot.messages[0]["text"]
+    assert "пункт один" in bot.messages[0]["text"]
+    assert "финальная мысль" in bot.messages[0]["text"]
     assert "Bot API invalid ids: 222" in bot.messages[0]["text"]
     assert '<tg-emoji emoji-id="222">' not in bot.messages[0]["text"]
     assert "alias=thought id=222 INVALID" in bot.messages[0]["text"]
     assert update.message.replies[-1][0] == "Тест custom emoji отправлен в CHANNEL_ID."
+
+
+def test_emoji_test_debug_returns_literal_rendered_html_to_admin():
+    settings = SimpleNamespace(
+        admin_id=42,
+        channel_id="@channel",
+        custom_emoji_map={"🔥": "111", "➖": "222", "💭": "333"},
+        custom_emoji_aliases={},
+    )
+    update = _update()
+    bot = FakeBot(valid_ids={"111", "222", "333"})
+
+    asyncio.run(emoji_test_command(update, _context(settings, bot, args=["debug"])))
+
+    assert [message["chat_id"] for message in bot.messages] == [42]
+    assert bot.messages[0]["parse_mode"] == "HTML"
+    assert bot.messages[0]["text"].count("<tg-emoji") >= 3
+    debug_text, debug_kwargs = update.message.replies[-1]
+    assert "Rendered HTML #1" in debug_text
+    assert '<tg-emoji emoji-id="111">🔥</tg-emoji>' in debug_text
+    assert '<tg-emoji emoji-id="222">➖</tg-emoji>' in debug_text
+    assert '<tg-emoji emoji-id="333">💭</tg-emoji>' in debug_text
+    assert debug_kwargs["parse_mode"] is None
 
 
 def test_emoji_test_survives_api_validation_failure():
