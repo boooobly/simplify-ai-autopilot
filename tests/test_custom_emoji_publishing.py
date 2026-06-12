@@ -68,6 +68,20 @@ def test_custom_emoji_map_does_not_replace_inside_existing_tag():
     assert rendered == '<tg-emoji emoji-id="111">🔥</tg-emoji> <tg-emoji emoji-id="222">🔥</tg-emoji>'
 
 
+def test_overlapping_custom_emoji_fallbacks_do_not_create_nested_tags():
+    rendered = render_post_html(
+        "✏️ ✏",
+        custom_emoji_map={"✏️": "222", "✏": "111"},
+        strict_custom_emoji=True,
+    )
+
+    assert rendered == (
+        '<tg-emoji emoji-id="222">✏️</tg-emoji> '
+        '<tg-emoji emoji-id="111">✏</tg-emoji>'
+    )
+    assert rendered.count("<tg-emoji") == 2
+
+
 def test_malformed_custom_emoji_id_is_not_rendered():
     rendered = render_post_html("🔥 Новость", custom_emoji_map={"🔥": "not-an-id"})
 

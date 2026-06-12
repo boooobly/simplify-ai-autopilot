@@ -315,8 +315,13 @@ def _apply_custom_emoji(text: str, custom_emoji_map: dict[str, str] | None) -> s
 
     def _convert_segment(segment: str) -> str:
         result = segment
-        for safe_fallback, tag in replacements:
-            result = result.replace(safe_fallback, tag)
+        placeholders: dict[str, str] = {}
+        for index, (safe_fallback, tag) in enumerate(replacements):
+            placeholder = f"\uE000TGEMOJIMAP{index}\uE000"
+            placeholders[placeholder] = tag
+            result = result.replace(safe_fallback, placeholder)
+        for placeholder, tag in placeholders.items():
+            result = result.replace(placeholder, tag)
         return result
 
     return _replace_outside_tg_emoji_tags(
