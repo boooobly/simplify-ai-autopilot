@@ -193,3 +193,19 @@ def test_db_path_parent_validation_fails_when_parent_is_file(monkeypatch, tmp_pa
 
     with pytest.raises(ValueError, match="DB_PATH parent"):
         load_settings()
+
+
+def test_custom_emoji_configuration_counts_and_warns_about_malformed_entries(monkeypatch):
+    _clean_config_env(monkeypatch)
+    monkeypatch.setenv("CUSTOM_EMOJI_MAP", "🔥|111;not-emoji|222;💭|bad-id")
+    monkeypatch.setenv("CUSTOM_EMOJI_ALIASES", "fire|🔥|111;bad|text|222;broken")
+
+    settings = load_settings()
+    diagnostics = startup_diagnostics(settings)
+
+    assert settings.custom_emoji_map == {"🔥": "111"}
+    assert settings.custom_emoji_aliases == {"fire": ("🔥", "111")}
+    assert "custom emoji map count: 1" in diagnostics
+    assert "custom emoji aliases count: 1" in diagnostics
+    assert any("CUSTOM_EMOJI_MAP has 2 malformed entries" in line for line in diagnostics)
+    assert any("CUSTOM_EMOJI_ALIASES has 2 malformed entries" in line for line in diagnostics)
