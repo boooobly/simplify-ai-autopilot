@@ -230,12 +230,12 @@ def _alias_fallback_variants(alias: str, configured_fallback: str | None = None)
     return tuple(deduped)
 
 
-def _strict_raw_fallback_replacements(custom_emoji_aliases: dict[str, tuple[str, str]] | None) -> dict[str, str]:
+def _raw_custom_emoji_replacements(
+    custom_emoji_map: dict[str, str] | None,
+    custom_emoji_aliases: dict[str, tuple[str, str]] | None,
+) -> dict[str, str]:
     raw_to_tags: dict[str, set[str]] = {}
-    if not custom_emoji_aliases:
-        return {}
-
-    for alias, emoji_data in custom_emoji_aliases.items():
+    for alias, emoji_data in (custom_emoji_aliases or {}).items():
         valid_data = _valid_alias_data(emoji_data)
         if not valid_data:
             continue
@@ -244,7 +244,16 @@ def _strict_raw_fallback_replacements(custom_emoji_aliases: dict[str, tuple[str,
         for raw_fallback in _alias_fallback_variants(alias, fallback):
             raw_to_tags.setdefault(html.escape(raw_fallback), set()).add(tag)
 
-    return {raw_fallback: next(iter(tags)) for raw_fallback, tags in raw_to_tags.items() if len(tags) == 1}
+    replacements = {
+        raw_fallback: next(iter(tags))
+        for raw_fallback, tags in raw_to_tags.items()
+        if len(tags) == 1
+    }
+    for fallback, raw_emoji_id in (custom_emoji_map or {}).items():
+        emoji_id = str(raw_emoji_id)
+        if _is_valid_custom_emoji_fallback(fallback) and emoji_id.isdigit():
+            replacements[html.escape(fallback)] = _custom_emoji_tag(fallback, emoji_id)
+    return replacements
 
 
 def _replace_outside_tg_emoji_tags(text: str, callback) -> str:
@@ -273,12 +282,18 @@ def _replace_outside_html_tags(text: str, callback) -> str:
     return "".join(parts)
 
 
-def _apply_strict_raw_custom_emoji(text: str, custom_emoji_aliases: dict[str, tuple[str, str]] | None) -> str:
-    replacements = _strict_raw_fallback_replacements(custom_emoji_aliases)
+def _apply_raw_custom_emoji(
+    text: str,
+    custom_emoji_map: dict[str, str] | None,
+    custom_emoji_aliases: dict[str, tuple[str, str]] | None,
+    *,
+    strict_custom_emoji: bool,
+) -> str:
+    replacements = _raw_custom_emoji_replacements(custom_emoji_map, custom_emoji_aliases)
+    ordered_replacements = sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True)
     known_fallbacks = {html.escape(fallback) for fallback in KNOWN_RAW_EMOJI_FALLBACKS if fallback}
     known_fallbacks.update(replacements)
     ordered_known = sorted(known_fallbacks, key=len, reverse=True)
-    ordered_replacements = sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True)
 
     def _convert_segment(segment: str) -> str:
         result = segment
@@ -287,10 +302,11 @@ def _apply_strict_raw_custom_emoji(text: str, custom_emoji_aliases: dict[str, tu
             placeholder = f"\uE000TGEMOJI{index}\uE000"
             placeholders[placeholder] = tag
             result = result.replace(raw_fallback, placeholder)
-        for raw_fallback in ordered_known:
-            if raw_fallback not in replacements:
-                result = result.replace(raw_fallback, "")
-        result = OBVIOUS_EMOJI_PATTERN.sub("", result)
+        if strict_custom_emoji:
+            for raw_fallback in ordered_known:
+                if raw_fallback not in replacements:
+                    result = result.replace(raw_fallback, "")
+            result = OBVIOUS_EMOJI_PATTERN.sub("", result)
         for placeholder, tag in placeholders.items():
             result = result.replace(placeholder, tag)
         return result
@@ -302,31 +318,11 @@ def _apply_strict_raw_custom_emoji(text: str, custom_emoji_aliases: dict[str, tu
 
 
 def _apply_custom_emoji(text: str, custom_emoji_map: dict[str, str] | None) -> str:
-    if not custom_emoji_map:
-        return text
-
-    replacements: list[tuple[str, str]] = []
-    for fallback, raw_emoji_id in custom_emoji_map.items():
-        emoji_id = str(raw_emoji_id)
-        if not _is_valid_custom_emoji_fallback(fallback) or not emoji_id.isdigit():
-            continue
-        replacements.append((html.escape(fallback), _custom_emoji_tag(fallback, emoji_id)))
-    replacements.sort(key=lambda item: len(item[0]), reverse=True)
-
-    def _convert_segment(segment: str) -> str:
-        result = segment
-        placeholders: dict[str, str] = {}
-        for index, (safe_fallback, tag) in enumerate(replacements):
-            placeholder = f"\uE000TGEMOJIMAP{index}\uE000"
-            placeholders[placeholder] = tag
-            result = result.replace(safe_fallback, placeholder)
-        for placeholder, tag in placeholders.items():
-            result = result.replace(placeholder, tag)
-        return result
-
-    return _replace_outside_tg_emoji_tags(
+    return _apply_raw_custom_emoji(
         text,
-        lambda segment: _replace_outside_html_tags(segment, _convert_segment),
+        custom_emoji_map,
+        None,
+        strict_custom_emoji=False,
     )
 
 
@@ -352,7 +348,12 @@ def _strip_emoji_aliases_for_preview(
 
     stripped = EMOJI_ALIAS_PATTERN.sub(_replace, text)
     if strict_custom_emoji:
-        stripped = _apply_strict_raw_custom_emoji(html.escape(stripped), custom_emoji_aliases)
+        stripped = _apply_raw_custom_emoji(
+            html.escape(stripped),
+            None,
+            custom_emoji_aliases,
+            strict_custom_emoji=True,
+        )
         stripped = re.sub(r"</?tg-emoji[^>]*>", "", stripped)
         stripped = html.unescape(stripped)
     return stripped
@@ -425,11 +426,12 @@ def render_post_html(
 
     # If there are unmatched markers, strip only quote markers in render path.
     output = _strip_quote_markers_render_only("".join(rendered))
-    # Explicit map entries are trusted in both modes. Apply them before strict
-    # cleanup so configured raw fallbacks are protected as valid tg-emoji tags.
-    output = _apply_custom_emoji(output, custom_emoji_map)
-    if strict_custom_emoji:
-        output = _apply_strict_raw_custom_emoji(output, custom_emoji_aliases)
+    output = _apply_raw_custom_emoji(
+        output,
+        custom_emoji_map,
+        custom_emoji_aliases,
+        strict_custom_emoji=strict_custom_emoji,
+    )
     output = _apply_custom_emoji_aliases(output, custom_emoji_aliases, strict_custom_emoji=strict_custom_emoji)
     if strict_custom_emoji:
         output = "\n".join(line.lstrip() for line in output.splitlines())
