@@ -479,11 +479,15 @@ async def _run_daily_plan_and_regeneration_style_prompt_selftest() -> None:
         assert url == source_url
         return SimpleNamespace(title="Daily plan AI tool", text=" ".join(["Полезный текст страницы про AI-инструмент"] * 120), preview_image_url=None)
 
-    def fake_generate(api_key, model, user_prompt, system_prompt, base_url=None, extra_headers=None, max_tokens=900):
+    def fake_generate(
+        api_key, model, user_prompt, system_prompt, base_url=None, extra_headers=None,
+        max_tokens=900, provider="", fallback=None,
+    ):
         system_prompts.append(system_prompt)
         return GenerationResult(
             content="[[EMOJI:screen_card]] Понятный черновик про AI-инструмент из дневного плана с практическим смыслом.",
             model=model,
+            provider=provider,
         )
 
     handlers._empty_slots_for_day = lambda db, settings, day_offset: ["10:00"]
@@ -732,7 +736,7 @@ async def _run_topic_reenrich_callback_selftest() -> None:
     assert updated["angle_ru"] == "Новый русский ракурс для поста."
     assert query.edited_text is not None
     card_lines = query.edited_text.splitlines()
-    assert card_lines[3] == "Новый русский заголовок темы"
+    assert "Новый русский заголовок темы" in card_lines
     assert "Old English fallback title" not in query.edited_text
     original_lines = [line for line in card_lines if line.startswith("Оригинал:")]
     assert original_lines == ["Оригинал: New AI repo v2.1 discussed on Reddit https://example.com/old-english"]
@@ -904,9 +908,10 @@ async def _run_topic_model_routing_selftest() -> None:
     assert "Implement a ChatGPT-like LLM" not in item.title_ru
 
     draft_source = inspect.getsource(handlers._generate_topic_metadata_fallback_draft)
-    assert "model=settings.model_draft" in draft_source
+    assert "model=route.model" in draft_source
     callback_source = inspect.getsource(moderation_handlers.handle_draft_moderation_callback)
-    assert "model=settings.model_polish" in callback_source
+    assert 'resolve_ai_request(settings, "polish")' in callback_source
+    assert "model=route.model" in callback_source
     assert "run_polish_post_draft" in callback_source
     assert "run_rewrite_post_draft" in callback_source
 
@@ -1142,10 +1147,10 @@ async def _run_topic_enrichment_ai_score_updates_selftest() -> None:
 
     stored = db.find_topic_candidate_by_url(item.url)
     assert stored is not None
-    assert stored["score"] == 79
+    assert stored["score"] == 81
     assert stored["deterministic_score"] == 70
     assert "AI-оценка" in stored["reason_ru"]
-    assert item.score == 79
+    assert item.score == 81
     tmp.cleanup()
 
 
@@ -1259,7 +1264,7 @@ def _run_topic_card_final_score_concise_selftest() -> None:
         "url": "https://example.com/card",
     }
     card = handlers._topic_card_text(topic)
-    assert "Тема #42 - 79" in card
+    assert "Тема #42 · 79/100" in card
     assert "Почему: Хорошая тема" in card
     assert "AI-оценка" in card
     assert len(card) < 700

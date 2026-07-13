@@ -24,13 +24,13 @@ def run() -> None:
     }
     card = _topic_card_text(topic)
     assert "OpenAI выпустила новую модель" in card
-    assert "О чем:" in card
+    assert "О чём:" in card
     assert "Коротко объясняет новую возможность модели." in card
-    assert "Идея поста:" in card
+    assert "Угол:" in card
     assert "Можно показать, что изменится" in card
     assert "Оригинал: OpenAI releases a new model" in card
     assert "Почему: Тема набрала высокий вес" in card
-    assert "URL: https://example.com/openai-model" in card
+    assert "https://example.com/openai-model" in card
     assert "Повторы: еще 3 источника" in card
     assert "Также встречалось: The Verge AI, TechCrunch AI, Reddit r/OpenAI" in card
 
@@ -48,11 +48,11 @@ def run() -> None:
     assert topic_display_title(fallback_topic) == "Тема требует ручной проверки"
     assert topic_display_reason(fallback_topic) == "Категория: AI-новость; скоринг 70/100. Сигналы скоринга: новость/релиз."
     assert "Тема требует ручной проверки" in fallback_card
-    assert "О чем:" in fallback_card
+    assert "О чём:" in fallback_card
     assert MANUAL_REVIEW_NOTE_RU in fallback_card
     assert "Оригинальный заголовок: English fallback title" in fallback_card
     assert 'Открыть источник или нажать "Понять тему через AI"' in fallback_card
-    assert "Идея поста:" in fallback_card
+    assert "Угол:" in fallback_card
     assert 'Открыть источник или нажать "Понять тему через AI"' in fallback_card
     assert "Оригинал: English fallback title" in fallback_card
 
@@ -129,7 +129,7 @@ def run() -> None:
     github_card = _topic_card_text(github_fallback)
     assert MANUAL_REVIEW_NOTE_RU in github_card
     assert "Тема требует ручной проверки" in github_card
-    assert "URL: https://github.com/owner/repo" in github_card
+    assert "https://github.com/owner/repo" in github_card
 
     compact = topic_compact_preview_ru(topic)
     assert compact.startswith("OpenAI выпустила новую модель")

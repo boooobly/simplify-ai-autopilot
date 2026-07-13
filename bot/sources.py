@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import os
 import re
 import warnings
@@ -10,7 +11,8 @@ from urllib.parse import urljoin, urlparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from xml.etree import ElementTree as ET
+
+from defusedxml import ElementTree as ET
 
 import requests
 from bs4 import BeautifulSoup
@@ -20,6 +22,7 @@ from bot.topic_scoring import humanize_topic_reason_ru, normalize_topic_title, s
 from bot.topic_display import is_weak_topic_metadata
 from bot.telegram_sources import fetch_telegram_channel_topics
 from bot.source_normalization import normalize_source_url
+from bot.http_safety import get_public_text
 
 
 @dataclass
@@ -51,15 +54,50 @@ class SourceReport:
     error: str = ""
 
 
-OFFICIAL_AI_RSS = [("OpenAI blog", "https://openai.com/news/rss.xml"), ("Anthropic news", "https://www.anthropic.com/news/rss.xml"), ("Google AI blog", "https://blog.google/technology/ai/rss/"), ("Perplexity blog", "https://www.perplexity.ai/hub/blog/rss.xml"), ("Hugging Face blog", "https://huggingface.co/blog/feed.xml"), ("Microsoft AI blog", "https://blogs.microsoft.com/ai/feed/"), ("NVIDIA blog AI", "https://blogs.nvidia.com/blog/category/ai/feed/")]
-TECH_MEDIA_RSS = [("VentureBeat AI", "https://venturebeat.com/ai/feed/"), ("The Decoder", "https://the-decoder.com/feed/"), ("MarkTechPost", "https://www.marktechpost.com/feed/"), ("The Verge AI", "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml"), ("TechCrunch AI", "https://techcrunch.com/category/artificial-intelligence/feed/"), ("MIT Technology Review AI", "https://www.technologyreview.com/topic/artificial-intelligence/feed/"), ("Ars Technica AI", "https://arstechnica.com/ai/feed/")]
-RU_TECH_RSS = [("Habr AI", "https://habr.com/ru/rss/hubs/ai/all/"), ("Habr ML", "https://habr.com/ru/rss/hub/machine_learning/"), ("Habr Dev", "https://habr.com/ru/rss/all/all/?fl=ru"), ("vc.ru technology", "https://vc.ru/rss/all"), ("Tproger", "https://tproger.ru/feed"), ("3DNews", "https://3dnews.ru/news/rss"), ("iXBT", "https://www.ixbt.com/export/news.rss")]
+OFFICIAL_AI_RSS = [
+    ("OpenAI blog", "https://openai.com/news/rss.xml"),
+    ("Anthropic news", "https://www.anthropic.com/news/rss.xml"),
+    ("Google AI blog", "https://blog.google/technology/ai/rss/"),
+    ("Perplexity blog", "https://www.perplexity.ai/hub/blog/rss.xml"),
+    ("Hugging Face blog", "https://huggingface.co/blog/feed.xml"),
+    ("Microsoft AI blog", "https://blogs.microsoft.com/ai/feed/"),
+    ("NVIDIA Generative AI", "https://blogs.nvidia.com/blog/category/generative-ai/feed/"),
+]
+TECH_MEDIA_RSS = [
+    ("VentureBeat AI", "https://venturebeat.com/category/ai/feed/"),
+    ("The Decoder", "https://the-decoder.com/feed/"),
+    ("MarkTechPost", "https://www.marktechpost.com/feed/"),
+    ("The Verge AI", "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml"),
+    ("TechCrunch AI", "https://techcrunch.com/category/artificial-intelligence/feed/"),
+    ("MIT Technology Review AI", "https://www.technologyreview.com/topic/artificial-intelligence/feed/"),
+    ("Ars Technica AI", "https://arstechnica.com/ai/feed/"),
+]
+RU_TECH_RSS = [
+    ("Habr AI", "https://habr.com/ru/rss/hubs/artificial_intelligence/articles/all/"),
+    ("Habr ML", "https://habr.com/ru/rss/hubs/machine_learning/articles/all/"),
+]
 TOOLS_RSS = [("Product Hunt", "https://www.producthunt.com/feed")]
 COMMUNITY_RSS = [("Reddit r/artificial", "https://www.reddit.com/r/artificial/.rss"), ("Reddit r/LocalLLaMA", "https://www.reddit.com/r/LocalLLaMA/.rss"), ("Reddit r/OpenAI", "https://www.reddit.com/r/OpenAI/.rss"), ("Reddit r/ChatGPT", "https://www.reddit.com/r/ChatGPT/.rss"), ("Reddit r/ClaudeAI", "https://www.reddit.com/r/ClaudeAI/.rss"), ("Reddit r/SideProject", "https://www.reddit.com/r/SideProject/.rss"), ("Reddit r/InternetIsBeautiful", "https://www.reddit.com/r/InternetIsBeautiful/.rss")]
 VC_RU_AI_SOURCE = ("vc.ru AI", "https://vc.ru/ai", "ru_tech")
 BUILTIN_SOURCE_OVERRIDES: dict[str, dict[str, str]] = {
     # key format: f"{source_type}:{normalize_source_url(url)}"
     # action=disable -> never fetch in /collect, but keep visible in inventory.
+    "rss:https://www.anthropic.com/news/rss.xml": {
+        "action": "disable",
+        "reason": "официальная RSS-лента больше не существует (404)",
+    },
+    "rss:https://www.perplexity.ai/hub/blog/rss.xml": {
+        "action": "disable",
+        "reason": "лента блокируется защитой сайта (403)",
+    },
+    "rss:https://blogs.microsoft.com/ai/feed": {
+        "action": "disable",
+        "reason": "лента недоступна для автоматического чтения (403/410)",
+    },
+    "rss:https://www.marktechpost.com/feed": {
+        "action": "disable",
+        "reason": "лента нестабильно блокирует автоматическое чтение (403) и часто даёт узкие dev-темы",
+    },
 }
 
 
@@ -90,15 +128,25 @@ _BOILERPLATE_PATTERNS = [
 ]
 
 
-def reddit_sources_enabled() -> bool:
+def reddit_sources_enabled(settings=None) -> bool:
+    if settings is not None:
+        return bool(getattr(settings, "enable_reddit_sources", False))
     return _parse_bool_env("ENABLE_REDDIT_SOURCES", False)
 
 
-def x_sources_enabled() -> bool:
+def x_sources_enabled(settings=None) -> bool:
+    if settings is not None:
+        return bool(getattr(settings, "enable_x_sources", False))
     return _parse_bool_env("ENABLE_X_SOURCES", False)
 
 
-def x_source_config() -> tuple[str, list[str], int]:
+def x_source_config(settings=None) -> tuple[str, list[str], int]:
+    if settings is not None:
+        return (
+            str(getattr(settings, "x_api_bearer_token", "") or "").strip(),
+            list(getattr(settings, "x_accounts", []) or []),
+            int(getattr(settings, "x_max_posts_per_account", 5) or 5),
+        )
     return (
         os.getenv("X_API_BEARER_TOKEN", "").strip(),
         _parse_csv_env("X_ACCOUNTS"),
@@ -228,8 +276,7 @@ def discover_rss_feed_url(input_url: str, timeout: int = 12) -> tuple[str | None
 
     def _try_feed(candidate_url: str) -> tuple[str | None, str]:
         try:
-            resp = requests.get(candidate_url, timeout=timeout, headers=headers)
-            resp.raise_for_status()
+            resp = get_public_text(candidate_url, request_get=requests.get, timeout=timeout, headers=headers)
             parsed = _parse_rss(resp.text, "Проверка", "custom", max_items=3)
             if parsed:
                 return candidate_url, ""
@@ -242,8 +289,7 @@ def discover_rss_feed_url(input_url: str, timeout: int = 12) -> tuple[str | None
         return feed_url, ""
 
     try:
-        resp = requests.get(url, timeout=timeout, headers=headers)
-        resp.raise_for_status()
+        resp = get_public_text(url, request_get=requests.get, timeout=timeout, headers=headers)
     except Exception as exc:
         return None, f"Не удалось открыть страницу: {str(exc)[:160]}"
 
@@ -422,7 +468,7 @@ def _parse_dt(raw: str) -> str | None:
         return None
     try:
         return _format_parsed_dt(parsedate_to_datetime(value))
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         pass
 
     iso_value = value.replace("Z", "+00:00")
@@ -634,7 +680,7 @@ def collect_topics_with_diagnostics(settings=None, db=None) -> tuple[list[TopicI
     reports: list[SourceReport] = []
     headers = {"User-Agent": "Mozilla/5.0 (compatible; simplify-ai-autopilot/1.0; +https://t.me/simplify_ai)"}
     grouped = [(OFFICIAL_AI_RSS, "official_ai", 8), (TECH_MEDIA_RSS, "tech_media", 8), (RU_TECH_RSS, "ru_tech", 8), (TOOLS_RSS, "tools", 8)]
-    if reddit_sources_enabled():
+    if reddit_sources_enabled(settings):
         grouped.append((COMMUNITY_RSS, "community", 5))
     else:
         reports.append(SourceReport(name="Reddit community RSS", url="https://www.reddit.com/*.rss", source_group="community", status="skipped", error="Reddit sources disabled by config (ENABLE_REDDIT_SOURCES=false)"))
@@ -652,6 +698,7 @@ def collect_topics_with_diagnostics(settings=None, db=None) -> tuple[list[TopicI
         key = normalize_source_url(source_url) if source_type in {"rss", "html"} else source_url.strip().lower()
         db.record_source_health(source_type, key, source_name, source_group, status, error)
 
+    rss_jobs: list[tuple[str, str, str, int, int | None]] = []
     for feeds, group, limit in grouped:
         for source_name, rss_url in feeds:
             override = get_builtin_source_override("rss", rss_url)
@@ -665,16 +712,7 @@ def collect_topics_with_diagnostics(settings=None, db=None) -> tuple[list[TopicI
                 reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="skipped", error=f"Источник временно на паузе: {reason}"))
                 _record("rss", source_name, group, rss_url, "skipped", reason)
                 continue
-            try:
-                response = requests.get(rss_url, timeout=12, headers=headers)
-                response.raise_for_status()
-                parsed = _parse_rss(response.text, source_name, group, max_items=limit)
-                collected.extend(parsed)
-                reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="ok" if parsed else "empty", item_count=len(parsed)))
-                _record("rss", source_name, group, rss_url, "ok" if parsed else "empty")
-            except Exception as exc:
-                reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="error", error=str(exc)[:160]))
-                _record("rss", source_name, group, rss_url, "error", str(exc))
+            rss_jobs.append((source_name, group, rss_url, limit, None))
 
     managed_rows = db.list_managed_sources(include_disabled=False) if db is not None else []
     for row in managed_rows:
@@ -688,20 +726,7 @@ def collect_topics_with_diagnostics(settings=None, db=None) -> tuple[list[TopicI
             reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="skipped", error=f"Источник временно на паузе: {reason}"))
             _record("rss", source_name, group, rss_url, "skipped", reason)
             continue
-        try:
-            response = requests.get(rss_url, timeout=12, headers=headers)
-            response.raise_for_status()
-            parsed = _parse_rss(response.text, source_name, group, max_items=8)
-            collected.extend(parsed)
-            reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="ok" if parsed else "empty", item_count=len(parsed)))
-            if db is not None:
-                db.update_managed_source_status(int(row["id"]), "ok" if parsed else "empty", "")
-            _record("rss", source_name, group, rss_url, "ok" if parsed else "empty")
-        except Exception as exc:
-            reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="error", error=str(exc)[:160]))
-            if db is not None:
-                db.update_managed_source_status(int(row["id"]), "error", str(exc)[:160])
-            _record("rss", source_name, group, rss_url, "error", str(exc))
+        rss_jobs.append((source_name, group, rss_url, 8, int(row["id"])))
 
     for source_name, group, rss_url in custom:
         should_skip, reason = _skip_if_needed("rss", source_name, group, rss_url)
@@ -709,16 +734,29 @@ def collect_topics_with_diagnostics(settings=None, db=None) -> tuple[list[TopicI
             reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="skipped", error=f"Источник временно на паузе: {reason}"))
             _record("rss", source_name, group, rss_url, "skipped", reason)
             continue
+        rss_jobs.append((source_name, group, rss_url, 8, None))
+
+    def _fetch_rss_job(job: tuple[str, str, str, int, int | None]):
+        source_name, group, rss_url, limit, managed_id = job
         try:
-            response = requests.get(rss_url, timeout=12, headers=headers)
-            response.raise_for_status()
-            parsed = _parse_rss(response.text, source_name, group, max_items=8)
-            collected.extend(parsed)
-            reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="ok" if parsed else "empty", item_count=len(parsed)))
-            _record("rss", source_name, group, rss_url, "ok" if parsed else "empty")
+            response = get_public_text(rss_url, request_get=requests.get, timeout=12, headers=headers)
+            parsed = _parse_rss(response.text, source_name, group, max_items=limit)
+            status = "ok" if parsed else "empty"
+            report = SourceReport(name=source_name, url=rss_url, source_group=group, status=status, item_count=len(parsed))
+            return parsed, report, managed_id
         except Exception as exc:
-            reports.append(SourceReport(name=source_name, url=rss_url, source_group=group, status="error", error=str(exc)[:160]))
-            _record("rss", source_name, group, rss_url, "error", str(exc))
+            report = SourceReport(name=source_name, url=rss_url, source_group=group, status="error", error=str(exc)[:160])
+            return [], report, managed_id
+
+    if rss_jobs:
+        with ThreadPoolExecutor(max_workers=min(8, len(rss_jobs)), thread_name_prefix="topic-rss") as executor:
+            rss_results = list(executor.map(_fetch_rss_job, rss_jobs))
+        for parsed, report, managed_id in rss_results:
+            collected.extend(parsed)
+            reports.append(report)
+            if managed_id is not None and db is not None:
+                db.update_managed_source_status(managed_id, report.status, report.error)
+            _record("rss", report.name, report.source_group, report.url, report.status, report.error)
     vc_name, vc_url, vc_group = VC_RU_AI_SOURCE
     vc_override = get_builtin_source_override("html", vc_url)
     if vc_override and vc_override.get("action") == "disable":
@@ -735,8 +773,8 @@ def collect_topics_with_diagnostics(settings=None, db=None) -> tuple[list[TopicI
             collected.extend(vc_items)
             reports.append(vc_report)
             _record("html", vc_name, vc_group, vc_url, vc_report.status, vc_report.error)
-    if x_sources_enabled():
-        x_token, x_accounts, x_max_posts = x_source_config()
+    if x_sources_enabled(settings):
+        x_token, x_accounts, x_max_posts = x_source_config(settings)
         if not x_token or not x_accounts:
             missing = []
             if not x_token:
@@ -775,8 +813,7 @@ def fetch_vc_ru_ai_topics(max_items: int = 20) -> tuple[list[TopicItem], SourceR
     name, url, group = VC_RU_AI_SOURCE
     headers = {"User-Agent": "Mozilla/5.0 (compatible; simplify-ai-autopilot/1.0; +https://t.me/simplify_ai)"}
     try:
-        resp = requests.get(url, timeout=12, headers=headers)
-        resp.raise_for_status()
+        resp = get_public_text(url, request_get=requests.get, timeout=12, headers=headers)
         soup = BeautifulSoup(resp.text, "html.parser")
         topics: list[TopicItem] = []
         seen: set[str] = set()

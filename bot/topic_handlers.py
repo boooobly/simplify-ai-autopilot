@@ -38,22 +38,42 @@ async def collect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await update.message.reply_text("Нет доступа.")
         return
 
+    if context.bot_data.get("topics_collect_running"):
+        if update.message:
+            await update.message.reply_text("Сбор тем уже идёт. Я пришлю результат, когда закончу.")
+        return
+
     progress_message = None
     if update.message:
-        progress_message = await update.message.reply_text("🔄 Собираю темы... Это может занять до пары минут.")
+        progress_message = await update.message.reply_text("🔄 Начал сбор тем. Можно продолжать пользоваться ботом — результат пришлю сюда.")
 
     context.bot_data["topic_detail_debug"] = False
-    stats, items, inserted = await handlers._collect_topics_with_stats(db, settings=settings)
+    context.bot_data["topics_collect_running"] = True
 
-    if update.message:
-        text = handlers._render_collect_text(stats, items, inserted)
-        if progress_message:
-            try:
-                await safe_edit_message_text(progress_message, text, reply_markup=handlers._collect_result_keyboard())
-                return
-            except Exception as exc:
-                logger.warning("Failed to edit collect progress message: %s", exc)
-        await safe_reply_text(update.message, text, reply_markup=handlers._collect_result_keyboard())
+    async def _work() -> None:
+        try:
+            stats, items, inserted = await handlers._collect_topics_with_stats(db, settings=settings)
+            if update.message:
+                text = handlers._render_collect_text(stats, items, inserted)
+                if progress_message:
+                    try:
+                        await safe_edit_message_text(progress_message, text, reply_markup=handlers._collect_result_keyboard())
+                        return
+                    except Exception as exc:
+                        logger.warning("Failed to edit collect progress message: %s", exc)
+                await safe_reply_text(update.message, text, reply_markup=handlers._collect_result_keyboard())
+        except Exception:
+            logger.exception("Background topic collection failed")
+            if update.message:
+                await safe_reply_text(update.message, "Не удалось собрать темы. Открой /sources_status и попробуй ещё раз.")
+        finally:
+            context.bot_data["topics_collect_running"] = False
+
+    application = getattr(context, "application", None)
+    if application is not None:
+        application.create_task(_work())
+        return
+    await _work()
 
 
 async def collect_debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -65,52 +85,73 @@ async def collect_debug_command(update: Update, context: ContextTypes.DEFAULT_TY
         if update.message:
             await update.message.reply_text("Нет доступа.")
         return
+    if context.bot_data.get("topics_collect_running"):
+        if update.message:
+            await update.message.reply_text("Сбор тем уже идёт. Дождись результата перед диагностическим запуском.")
+        return
+
     progress_message = None
     if update.message:
-        progress_message = await update.message.reply_text("🔄 Собираю темы... Это может занять до пары минут.")
+        progress_message = await update.message.reply_text("🔄 Начал диагностический сбор. Можно продолжать пользоваться ботом.")
     context.bot_data["topic_detail_debug"] = True
-    debug_started = time.monotonic()
-    items, reports = await handlers._run_collect_topics_with_diagnostics(settings=settings, db=db)
-    source_seconds = time.monotonic() - debug_started
-    stats, _all_items, inserted = await handlers._collect_topics_with_stats(db, items=items, settings=settings)
-    stats.source_seconds = source_seconds
-    stats.total_seconds = source_seconds + stats.store_seconds + stats.ai_seconds
-    text = handlers._render_collect_text(stats, items, inserted, debug=True)
-    ok = sum(1 for r in reports if r.status == "ok")
-    empty = sum(1 for r in reports if r.status == "empty")
-    skipped = sum(1 for r in reports if r.status == "skipped")
-    errors = sum(1 for r in reports if r.status == "error")
-    problems = [r for r in reports if r.status in {"error", "empty"}][:12]
-    problem_lines = [f"- {r.name}: {r.error or 'empty'}" if r.status == "error" else f"- {r.name}: empty" for r in problems]
-    skipped_lines = [f"- {r.name}: {r.error or 'пропущено'}" for r in reports if r.status == "skipped"][:8]
-    combined = text.replace("🧠 Темы собраны", "🧠 Темы собраны с диагностикой")
-    combined += f"\n\nСвежесть: пропущено старых тем: {stats.stale} (лимит {getattr(settings, 'max_topic_age_days', 14)} дн.)"
-    combined += f"\n\nИсточники:\nРаботают: {ok}\nПустые: {empty}\nОтключены/пропущены: {skipped}\nОшибки: {errors}"
-    if skipped_lines:
-        combined += "\n\nОтключено/пропущено:\n" + "\n".join(skipped_lines)
-    if problem_lines:
-        combined += "\n\nПроблемы:\n" + "\n".join(problem_lines)
-    if len([r for r in reports if r.status in {'error', 'empty'}]) > 12:
-        combined += "\nПоказаны первые 12 проблем."
-    if update.message:
-        parts = split_telegram_text(combined)
-        if progress_message:
-            try:
-                await safe_edit_message_text(
-                    progress_message,
-                    parts[0],
-                    reply_markup=handlers._collect_result_keyboard() if len(parts) == 1 else None,
-                )
-                for index, part in enumerate(parts[1:], start=1):
-                    await safe_reply_text(
-                        update.message,
-                        part,
-                        reply_markup=handlers._collect_result_keyboard() if index == len(parts) - 1 else None,
-                    )
-                return
-            except Exception as exc:
-                logger.warning("Failed to edit collect debug progress message: %s", exc)
-        await safe_reply_text(update.message, combined, reply_markup=handlers._collect_result_keyboard())
+    context.bot_data["topics_collect_running"] = True
+
+    async def _work() -> None:
+        try:
+            debug_started = time.monotonic()
+            items, reports = await handlers._run_collect_topics_with_diagnostics(settings=settings, db=db)
+            source_seconds = time.monotonic() - debug_started
+            stats, _all_items, inserted = await handlers._collect_topics_with_stats(db, items=items, settings=settings)
+            stats.source_seconds = source_seconds
+            stats.total_seconds = source_seconds + stats.store_seconds + stats.ai_seconds
+            text = handlers._render_collect_text(stats, items, inserted, debug=True)
+            ok = sum(1 for r in reports if r.status == "ok")
+            empty = sum(1 for r in reports if r.status == "empty")
+            skipped = sum(1 for r in reports if r.status == "skipped")
+            errors = sum(1 for r in reports if r.status == "error")
+            problems = [r for r in reports if r.status in {"error", "empty"}][:12]
+            problem_lines = [f"- {r.name}: {r.error or 'empty'}" if r.status == "error" else f"- {r.name}: empty" for r in problems]
+            skipped_lines = [f"- {r.name}: {r.error or 'пропущено'}" for r in reports if r.status == "skipped"][:8]
+            combined = text.replace("🧠 Темы собраны", "🧠 Темы собраны с диагностикой")
+            combined += f"\n\nСвежесть: пропущено старых тем: {stats.stale} (лимит {getattr(settings, 'max_topic_age_days', 14)} дн.)"
+            combined += f"\n\nИсточники:\nРаботают: {ok}\nПустые: {empty}\nОтключены/пропущены: {skipped}\nОшибки: {errors}"
+            if skipped_lines:
+                combined += "\n\nОтключено/пропущено:\n" + "\n".join(skipped_lines)
+            if problem_lines:
+                combined += "\n\nПроблемы:\n" + "\n".join(problem_lines)
+            if len([r for r in reports if r.status in {'error', 'empty'}]) > 12:
+                combined += "\nПоказаны первые 12 проблем."
+            if update.message:
+                parts = split_telegram_text(combined)
+                if progress_message:
+                    try:
+                        await safe_edit_message_text(
+                            progress_message,
+                            parts[0],
+                            reply_markup=handlers._collect_result_keyboard() if len(parts) == 1 else None,
+                        )
+                        for index, part in enumerate(parts[1:], start=1):
+                            await safe_reply_text(
+                                update.message,
+                                part,
+                                reply_markup=handlers._collect_result_keyboard() if index == len(parts) - 1 else None,
+                            )
+                        return
+                    except Exception as exc:
+                        logger.warning("Failed to edit collect debug progress message: %s", exc)
+                await safe_reply_text(update.message, combined, reply_markup=handlers._collect_result_keyboard())
+        except Exception:
+            logger.exception("Background diagnostic topic collection failed")
+            if update.message:
+                await safe_reply_text(update.message, "Диагностический сбор завершился ошибкой. Попробуй /sources_status.")
+        finally:
+            context.bot_data["topics_collect_running"] = False
+
+    application = getattr(context, "application", None)
+    if application is not None:
+        application.create_task(_work())
+        return
+    await _work()
 
 
 async def topics_menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -178,7 +219,7 @@ async def topics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text("Нет доступа.")
         return
 
-    limit = handlers._parse_topic_limit(context, default=10)
+    limit = handlers._parse_topic_limit(context, default=5)
     topics = db.list_topic_candidates(limit=limit, status="new", order_by_score=True)
     if not topics:
         if update.message:
@@ -200,7 +241,7 @@ async def topics_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if update.message:
             await update.message.reply_text("Нет доступа.")
         return
-    topics = db.list_topic_candidates(limit=15, status=None, order_by_score=True)
+    topics = db.list_topic_candidates(limit=10, status=None, order_by_score=True)
     if not topics:
         if update.message:
             await update.message.reply_text("Пока нет тем. Запусти /collect")
@@ -237,7 +278,7 @@ async def _topics_fun_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         topic_id = int(topic["id"])
         merged[topic_id] = topic
 
-    limit = handlers._parse_topic_limit(context, default=10)
+    limit = handlers._parse_topic_limit(context, default=5)
     topics = sorted(merged.values(), key=lambda t: (int(t.get("score") or 0), str(t.get("created_at") or "")), reverse=True)[:limit]
     if not topics:
         if update.message:
@@ -258,7 +299,7 @@ async def _topics_filtered_editorial_command(update: Update, context: ContextTyp
         if update.message:
             await update.message.reply_text("Нет доступа.")
         return
-    topics = db.list_topic_candidates_by_editorial(limit=handlers._parse_topic_limit(context, default=10), lanes=lanes, formats=formats, categories=categories, min_score=min_score)
+    topics = db.list_topic_candidates_by_editorial(limit=handlers._parse_topic_limit(context, default=5), lanes=lanes, formats=formats, categories=categories, min_score=min_score)
     if not topics:
         if update.message:
             await update.message.reply_text("По фильтру пока нет тем. Запусти /collect")
@@ -275,7 +316,7 @@ async def _topics_filtered_command(update: Update, context: ContextTypes.DEFAULT
         if update.message:
             await update.message.reply_text("Нет доступа.")
         return
-    limit = handlers._parse_topic_limit(context, default=10)
+    limit = handlers._parse_topic_limit(context, default=5)
     topics = db.list_topic_candidates_filtered(limit=limit, status="new", categories=categories, source_groups=source_groups)
     if not topics:
         if update.message:

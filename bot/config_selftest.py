@@ -97,9 +97,14 @@ def run() -> None:
         os.environ["MODEL_DRAFT"] = "draft-model-x"
         settings = load_settings()
         assert settings.model_topic_enrich == "tencent/hy3-preview"
+        assert settings.openai_model_draft == "gpt-4.1-mini"
+        assert settings.openai_model_topic_enrich == "gpt-4.1-mini"
+        assert settings.openai_model_polish == "gpt-4.1-mini"
         os.environ["MODEL_TOPIC_ENRICH"] = "topic-model-x"
+        os.environ["OPENAI_MODEL_TOPIC_ENRICH"] = "openai-topic-model-x"
         settings = load_settings()
         assert settings.model_topic_enrich == "topic-model-x"
+        assert settings.openai_model_topic_enrich == "openai-topic-model-x"
         os.environ["MODEL_TOPIC_ENRICH"] = "   "
         settings = load_settings()
         assert settings.model_topic_enrich == "tencent/hy3-preview"
@@ -116,7 +121,6 @@ def run() -> None:
         os.environ["OPENAI_API_KEY"] = "oa-secret"
         os.environ["MAX_TOPIC_AGE_DAYS"] = "7"
         os.environ["TOPIC_AI_ENRICH_LIMIT"] = "3"
-        os.environ["TOPIC_AI_TRANSLATE_LIMIT"] = "4"
         os.environ["ENABLE_REDDIT_SOURCES"] = "yes"
         os.environ["ENABLE_X_SOURCES"] = "on"
         os.environ["X_API_BEARER_TOKEN"] = "x-secret"
@@ -127,7 +131,6 @@ def run() -> None:
         assert settings.model_topic_enrich == "topic-diag-model"
         assert settings.max_topic_age_days == 7
         assert settings.topic_ai_enrich_limit == 3
-        assert settings.topic_ai_translate_limit == 4
         assert settings.enable_reddit_sources is True
         assert settings.enable_x_sources is True
         assert settings.x_api_bearer_token == "x-secret"

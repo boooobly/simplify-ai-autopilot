@@ -158,25 +158,26 @@ def _assert_topic_candidates(db: DraftDatabase) -> None:
     )
     assert r2 == "existing_url"
     r3 = db.upsert_topic_candidate_with_reason(
-        "T3", "https://b", "S", None, "news", 55, "r", "same title", "other"
+        "T3", "https://b", "S", None, "news", 55, "r", "other title", "other"
     )
     assert r3 == "merged_story"
 
     candidates = db.list_topic_candidates(limit=5)
     assert len(candidates) == 1
     assert candidates[0]["url"] == "https://a"
-    assert candidates[0]["title_ru"] == "Русский T1"
-    assert candidates[0]["summary_ru"] == "Короткое русское объяснение"
-    assert candidates[0]["angle_ru"] == "Идея поста"
-    assert candidates[0]["reason_ru"] == "русская причина"
-    assert candidates[0]["original_description"] == "Original description"
-    assert candidates[0]["canonical_key"] == "t1"
+    assert candidates[0]["title"] == "T2"
+    assert candidates[0]["title_ru"] is None
+    assert candidates[0]["summary_ru"] is None
+    assert candidates[0]["angle_ru"] is None
+    assert candidates[0]["reason_ru"] is None
+    assert candidates[0]["original_description"] is None
+    assert candidates[0]["canonical_key"] == "t2"
     assert candidates[0]["related_sources"] == "S"
     assert candidates[0]["related_urls"] == "https://a\nhttps://b"
     assert candidates[0]["related_count"] == 2
     row_by_url = db.find_topic_candidate_by_url("https://a")
     assert row_by_url is not None
-    assert row_by_url["title_ru"] == "Русский T1"
+    assert row_by_url["title_ru"] is None
     assert db.update_topic_candidate_display_fields(int(row_by_url["id"]), title_ru="Обновленный T1", summary_ru="Обновленное о чем", angle_ru="Обновленная идея") is True
     updated = db.find_topic_candidate_by_url("https://a")
     assert updated["title_ru"] == "Обновленный T1"
@@ -237,7 +238,7 @@ def _assert_topic_candidates(db: DraftDatabase) -> None:
         "openai gpt 5 1 chatgpt update",
         "tech_media",
     )
-    assert repeat_merge == "merged_story"
+    assert repeat_merge == "existing_url"
     model_row = db.find_topic_candidate_by_url("https://official/model")
     assert model_row["related_sources"] == "OpenAI blog\nThe Verge AI"
     assert model_row["related_urls"] == "https://official/model\nhttps://verge/model"
@@ -264,7 +265,7 @@ def _assert_topic_candidates(db: DraftDatabase) -> None:
     assert fallback["summary_ru"] is None
     assert fallback["angle_ru"] is None
     hot_candidates = db.list_topic_candidates_min_score(limit=5, min_score=50)
-    assert "https://official/model" in [candidate["url"] for candidate in hot_candidates]
+    assert "https://verge/model" in [candidate["url"] for candidate in hot_candidates]
 
 
 

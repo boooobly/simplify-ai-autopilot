@@ -1,6 +1,7 @@
 python-telegram-bot[job-queue]==21.11.1
-python-dotenv==1.0.1
+python-dotenv==1.2.2
 openai==1.79.0
-requests==2.32.3
+requests==2.33.0
 beautifulsoup4==4.12.3
+defusedxml==0.7.1
 telethon==1.36.0

@@ -15,7 +15,7 @@ def test_collect_uses_managed_sources_path(tmp_path, monkeypatch):
     def fake_collect(settings=None, db=None):
         called["db"] = db
         called["settings"] = settings
-        item = _with_scoring(TopicItem(title="Managed topic from rss feed", url="https://example.com/a", source="Managed", source_group="custom"))
+        item = _with_scoring(TopicItem(title="Managed AI tool launch from rss feed", url="https://example.com/a", source="Managed", source_group="custom"))
         return [item]
 
     monkeypatch.setattr(handlers, "collect_topics", fake_collect)

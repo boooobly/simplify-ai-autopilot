@@ -36,6 +36,21 @@ class PublishResult:
     message_ids: list[int]
 
 
+class PartialPublishError(RuntimeError):
+    """Telegram accepted some messages before a later send failed."""
+
+    def __init__(self, message_ids: list[int], cause: Exception) -> None:
+        super().__init__(f"partial publish after {len(message_ids)} message(s): {type(cause).__name__}")
+        self.message_ids = list(message_ids)
+        self.cause = cause
+
+
+def _raise_send_failure(message_ids: list[int], exc: Exception) -> None:
+    if message_ids:
+        raise PartialPublishError(message_ids, exc) from exc
+    raise exc
+
+
 def _message_id(message: Any) -> int | None:
     value = getattr(message, "message_id", None)
     return int(value) if value is not None else None
@@ -150,14 +165,18 @@ async def publish_to_channel(
     if len(media_items) > 1:
         has_animation = any(item["type"] == "animation" for item in media_items)
         if has_animation:
-            sent_messages = _message_ids(await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True)))
-            for item in media_items:
-                if item["type"] == "photo":
-                    sent_messages.extend(_message_ids(await bot.send_photo(chat_id=channel_id, photo=item["file_id"])))
-                elif item["type"] == "video":
-                    sent_messages.extend(_message_ids(await bot.send_video(chat_id=channel_id, video=item["file_id"])))
-                else:
-                    sent_messages.extend(_message_ids(await bot.send_animation(chat_id=channel_id, animation=item["file_id"])))
+            sent_messages: list[int] = []
+            try:
+                sent_messages.extend(_message_ids(await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))))
+                for item in media_items:
+                    if item["type"] == "photo":
+                        sent_messages.extend(_message_ids(await bot.send_photo(chat_id=channel_id, photo=item["file_id"])))
+                    elif item["type"] == "video":
+                        sent_messages.extend(_message_ids(await bot.send_video(chat_id=channel_id, video=item["file_id"])))
+                    else:
+                        sent_messages.extend(_message_ids(await bot.send_animation(chat_id=channel_id, animation=item["file_id"])))
+            except Exception as exc:
+                _raise_send_failure(sent_messages, exc)
             return PublishResult(message_ids=sent_messages)
         safe_caption = _prepare_media_caption(
             content,
@@ -173,9 +192,13 @@ async def publish_to_channel(
             elif item["type"] == "video":
                 group.append(InputMediaVideo(media=item["file_id"], caption=caption if idx == 0 else None, parse_mode=caption_mode if idx == 0 else None))
         if group:
-            sent_messages = _message_ids(await bot.send_media_group(chat_id=channel_id, media=group))
-            if safe_caption.send_full_text_after:
-                sent_messages.extend(_message_ids(await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))))
+            sent_messages = []
+            try:
+                sent_messages.extend(_message_ids(await bot.send_media_group(chat_id=channel_id, media=group)))
+                if safe_caption.send_full_text_after:
+                    sent_messages.extend(_message_ids(await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))))
+            except Exception as exc:
+                _raise_send_failure(sent_messages, exc)
             return PublishResult(message_ids=sent_messages)
 
     if media_items and media_items[0]["type"] == "photo":
@@ -185,14 +208,18 @@ async def publish_to_channel(
             custom_emoji_map=custom_emoji_map,
             custom_emoji_aliases=custom_emoji_aliases,
         )
-        sent_messages = _message_ids(await bot.send_photo(
-            chat_id=channel_id,
-            photo=media_url,
-            caption=safe_caption.text,
-            parse_mode=safe_caption.parse_mode,
-        ))
-        if safe_caption.send_full_text_after:
-            sent_messages.extend(_message_ids(await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))))
+        sent_messages = []
+        try:
+            sent_messages.extend(_message_ids(await bot.send_photo(
+                chat_id=channel_id,
+                photo=media_url,
+                caption=safe_caption.text,
+                parse_mode=safe_caption.parse_mode,
+            )))
+            if safe_caption.send_full_text_after:
+                sent_messages.extend(_message_ids(await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))))
+        except Exception as exc:
+            _raise_send_failure(sent_messages, exc)
         return PublishResult(message_ids=sent_messages)
     if media_items and media_items[0]["type"] == "video":
         media_url = media_items[0]["file_id"]
@@ -201,14 +228,18 @@ async def publish_to_channel(
             custom_emoji_map=custom_emoji_map,
             custom_emoji_aliases=custom_emoji_aliases,
         )
-        sent_messages = _message_ids(await bot.send_video(
-            chat_id=channel_id,
-            video=media_url,
-            caption=safe_caption.text,
-            parse_mode=safe_caption.parse_mode,
-        ))
-        if safe_caption.send_full_text_after:
-            sent_messages.extend(_message_ids(await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))))
+        sent_messages = []
+        try:
+            sent_messages.extend(_message_ids(await bot.send_video(
+                chat_id=channel_id,
+                video=media_url,
+                caption=safe_caption.text,
+                parse_mode=safe_caption.parse_mode,
+            )))
+            if safe_caption.send_full_text_after:
+                sent_messages.extend(_message_ids(await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))))
+        except Exception as exc:
+            _raise_send_failure(sent_messages, exc)
         return PublishResult(message_ids=sent_messages)
     if media_items and media_items[0]["type"] == "animation":
         media_url = media_items[0]["file_id"]
@@ -217,14 +248,18 @@ async def publish_to_channel(
             custom_emoji_map=custom_emoji_map,
             custom_emoji_aliases=custom_emoji_aliases,
         )
-        sent_messages = _message_ids(await bot.send_animation(
-            chat_id=channel_id,
-            animation=media_url,
-            caption=safe_caption.text,
-            parse_mode=safe_caption.parse_mode,
-        ))
-        if safe_caption.send_full_text_after:
-            sent_messages.extend(_message_ids(await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))))
+        sent_messages = []
+        try:
+            sent_messages.extend(_message_ids(await bot.send_animation(
+                chat_id=channel_id,
+                animation=media_url,
+                caption=safe_caption.text,
+                parse_mode=safe_caption.parse_mode,
+            )))
+            if safe_caption.send_full_text_after:
+                sent_messages.extend(_message_ids(await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))))
+        except Exception as exc:
+            _raise_send_failure(sent_messages, exc)
         return PublishResult(message_ids=sent_messages)
 
     return PublishResult(message_ids=_message_ids(await bot.send_message(chat_id=channel_id, text=rendered_text, parse_mode=parse_mode, link_preview_options=LinkPreviewOptions(is_disabled=True))))
@@ -266,6 +301,30 @@ async def run_scheduled_publishing(context: ContextTypes.DEFAULT_TYPE) -> None:
                 settings.custom_emoji_aliases,
             )
         except Exception as exc:
+            partial_message_ids = list(getattr(exc, "message_ids", []) or [])
+            if partial_message_ids:
+                db.mark_draft_published(
+                    draft_id,
+                    channel_id=settings.channel_id,
+                    message_ids=partial_message_ids,
+                    error=f"PartialPublish:{type(getattr(exc, 'cause', exc)).__name__}",
+                )
+                logger.error(
+                    "scheduled_publish partial draft_id=%s message_count=%s retry_blocked=true",
+                    draft_id,
+                    len(partial_message_ids),
+                )
+                try:
+                    await context.bot.send_message(
+                        chat_id=settings.admin_id,
+                        text=(
+                            f"⚠️ Черновик #{draft_id} опубликован частично ({len(partial_message_ids)} сообщений). "
+                            "Автоповтор заблокирован, чтобы не создать дубли. Проверь канал вручную."
+                        ),
+                    )
+                except Exception:
+                    logger.exception("scheduled_publish failed to notify admin about partial publish draft_id=%s", draft_id)
+                continue
             logger.exception("scheduled_publish failure draft_id=%s status_transition=publishing->failed", draft_id)
             db.mark_draft_failed(draft_id, error=type(exc).__name__)
             continue

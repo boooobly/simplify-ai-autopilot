@@ -11,12 +11,12 @@ from bot.handlers import (
     NAV_USAGE,
     _admin_reply_keyboard,
 )
-from telegram import ReplyKeyboardMarkup
+from telegram import InlineKeyboardMarkup
 
 
 def run() -> None:
     keyboard = _admin_reply_keyboard()
-    assert isinstance(keyboard, ReplyKeyboardMarkup)
+    assert isinstance(keyboard, InlineKeyboardMarkup)
 
     labels = [
         NAV_PLAN_DAY,
@@ -34,13 +34,9 @@ def run() -> None:
     assert all(label.strip() for label in labels)
     assert NAV_PLAN_DAY == "🗓 План"
     assert NAV_GENERATE_PLAN == "🧩 Черновики из плана"
-    assert keyboard.resize_keyboard is True
-    assert keyboard.is_persistent is True
-    assert keyboard.input_field_placeholder == "Выбери действие или пришли ссылку"
-
-    rows = keyboard.keyboard
+    rows = keyboard.inline_keyboard
     keyboard_labels = [btn.text for row in rows for btn in row]
-    for label in labels:
+    for label in ["✍️ Создать черновик", "🧠 Темы", "📡 Источники", "🗓️ План на день", "📅 Очередь", "⚙️ Настройки"]:
         assert label in keyboard_labels
 
 

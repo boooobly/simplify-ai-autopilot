@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlsplit, urlparse, urlunparse
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from telegram import KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, ReplyKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, ReplyKeyboardRemove, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
@@ -20,8 +19,8 @@ from bot.config import _detect_railway_with_local_db_path
 from bot import source_handlers
 from bot.database import DraftDatabase
 from bot.cleanup_handlers import (
-    CLEANUP_PREVIEW_COUNTS_KEY,
-    CLEANUP_PREVIEW_GENERATED_AT_KEY,
+    CLEANUP_PREVIEW_COUNTS_KEY as _CLEANUP_PREVIEW_COUNTS_KEY,
+    CLEANUP_PREVIEW_GENERATED_AT_KEY as _CLEANUP_PREVIEW_GENERATED_AT_KEY,
     _cleanup_keyboard,
     _render_cleanup_preview_text,
     _store_cleanup_preview,
@@ -32,30 +31,23 @@ from bot.media_utils import decode_media_items, encode_media_group, media_count
 from bot.publisher import publish_to_channel
 from bot.moderation_handlers import (
     ModerationCallbackDeps,
-    _rewrite_action_config,
+    _rewrite_action_config as _moderation_rewrite_action_config,
     handle_draft_moderation_callback,
 )
-from bot.source_normalization import normalize_source_url, normalize_telegram_channel_input
+from bot.source_normalization import normalize_source_url as _normalize_source_url, normalize_telegram_channel_input
 from bot.queue_helpers import (
     ACTIONABLE_DRAFT_STATUSES,
     _empty_slots_for_day,
-    _find_nearest_available_slot,
     _get_day_range,
     _is_local_slot_free,
     _latest_actionable_drafts,
     _normalize_slot_hhmm,
     _parse_slot_hhmm,
-    _queue_day_slots,
-    _queue_draft_ids_for_day,
     _queue_draft_pick_keyboard,
     _queue_keyboard,
-    _render_queue_day_text,
     _render_queue_text,
     _schedule_draft_to_local_slot,
     _schedule_draft_to_nearest_slot,
-    _short_post_preview,
-    _slot_callback_hhmm,
-    _busy_slots_for_local_day,
 )
 from bot.telegram_formatting import render_post_html, strip_quote_markers
 from bot.telegram_safety import (
@@ -67,22 +59,7 @@ from bot.telegram_safety import (
     truncate_telegram_text,
 )
 from bot.topic_handlers import (
-    collect_command,
-    collect_debug_command,
     topics_menu_command,
-    _send_topic_cards,
-    topics_command,
-    topics_all_command,
-    topics_tools_command,
-    topics_news_command,
-    topics_fun_command,
-    topics_video_command,
-    topics_guides_command,
-    topics_best_command,
-    topics_hot_command,
-    _topics_fun_command,
-    _topics_filtered_editorial_command,
-    _topics_filtered_command,
     _handle_topics_callback,
     handle_topic_moderation_action,
 )
@@ -90,22 +67,14 @@ from bot.topic_handlers import (
 
 from bot.topic_scoring import canonical_topic_key, hybrid_topic_score
 from bot.sources import (
-    COMMUNITY_RSS,
-    OFFICIAL_AI_RSS,
-    RU_TECH_RSS,
-    TECH_MEDIA_RSS,
-    TOOLS_RSS,
     SourceReport,
     collect_topics,
     collect_topics_with_diagnostics,
     discover_rss_feed_url,
-    parse_custom_topic_feeds,
-    reddit_sources_enabled,
-    x_sources_enabled,
-    get_builtin_source_override,
 )
 from bot.topic_display import build_deterministic_topic_metadata_ru, is_weak_topic_metadata, related_sources_summary, topic_angle_ru, topic_compact_preview_ru, topic_display_reason, topic_display_title, topic_original_title_line, topic_summary_ru
 from bot.writer import (
+    CompletionFallback,
     EmptyAIResponseError,
     GenerationResult,
     fetch_page_content,
@@ -120,17 +89,24 @@ from bot.writer import (
     enrich_topic_understanding_ru,
     polish_post_draft,
     rewrite_post_draft,
-    _looks_like_useful_russian_metadata,
     _parse_topic_metadata_fields,
 )
 
 logger = logging.getLogger(__name__)
+_rewrite_action_config = _moderation_rewrite_action_config
+CLEANUP_PREVIEW_COUNTS_KEY = _CLEANUP_PREVIEW_COUNTS_KEY
+CLEANUP_PREVIEW_GENERATED_AT_KEY = _CLEANUP_PREVIEW_GENERATED_AT_KEY
 ALLOWED_MEDIA_TYPES = {"photo", "video", "animation"}
 ALLOWED_DRAFT_STATUSES = {"draft", "approved", "scheduled", "publishing", "published", "rejected", "failed"}
 TELEGRAM_CAPTION_LIMIT = 1024
 SHORT_MEDIA_PREVIEW_LIMIT = 850
 EMPTY_AI_REPLY_TEXT = "Модель вернула пустой ответ. Черновик не создан. Попробуй ещё раз или смени MODEL_DRAFT."
 REDDIT_METADATA_EMPTY_REPLY_TEXT = "Reddit-источник заблокирован, а по сохранённому описанию не удалось собрать нормальный черновик. Лучше отклонить тему или открыть источник вручную."
+
+
+def normalize_source_url(value: str) -> str:
+    """Backward-compatible public wrapper used by source-management callers."""
+    return _normalize_source_url(value)
 
 TOPIC_ENRICH_FALLBACK_SUMMARY_RU = "Нужен ручной просмотр: не удалось нормально обработать тему."
 TOPIC_ENRICH_FALLBACK_ANGLE_RU = "Открой источник и проверь тему вручную перед генерацией поста."
@@ -475,17 +451,15 @@ def _format_label_ru(fmt: str | None) -> str:
 
 def _topic_card_text(topic: dict) -> str:
     score = int(topic.get("score") or 0)
+    lane = str(topic.get("editorial_lane") or "")
+    content_format = str(topic.get("content_format") or "post")
     lines = [
-        f"🧠 Тема #{topic['id']} - {score} - {_category_label(topic.get('category'))}",
-        f"Вес: {_score_label(score)}",
+        f"🧠 Тема #{topic['id']} · {score}/100 · {_category_label(topic.get('category'))}",
         "",
         topic_display_title(topic),
         "",
-        "О чем:",
-        topic_summary_ru(topic),
-        "",
-        "Идея поста:",
-        topic_angle_ru(topic),
+        f"О чём: {topic_summary_ru(topic)}",
+        f"Угол: {topic_angle_ru(topic)}",
     ]
     original_line = topic_original_title_line(topic)
     if original_line:
@@ -493,19 +467,12 @@ def _topic_card_text(topic: dict) -> str:
     related_line = related_sources_summary(topic)
     if related_line:
         lines.extend(["", related_line])
-    lane = str(topic.get("editorial_lane") or "")
-    content_format = str(topic.get("content_format") or "post")
-    score = int(topic.get("score") or 0)
-    lane_reason = str(topic.get("editorial_reason") or topic_display_reason(topic))
     lines.extend(
         [
-            f"Источник: {topic['source']} / {_source_group_label(topic.get('source_group'))}",
-            f"Score: {score}",
-            f"Lane: 📌 {_lane_label_ru(lane)}",
-            f"Format: {'🎬' if content_format == 'short_video' else '🔥' if content_format in {'tool_review','meme'} else '🧠'} {_format_label_ru(content_format)}",
+            f"Источник: {topic['source']} · {_source_group_label(topic.get('source_group'))}",
+            f"Формат: {_lane_label_ru(lane)} · {_format_label_ru(content_format)}",
             f"Почему: {topic_display_reason(topic)}",
-            f"💡 Почему взять: {lane_reason}",
-            f"URL: {topic['url']}",
+            str(topic["url"]),
         ]
     )
     if topic.get("_show_metadata_diagnostics"):
@@ -615,6 +582,8 @@ def _is_admin(user_id: int | None, admin_id: int) -> bool:
 
 
 def _ai_provider_for_status(settings) -> str:
+    if settings.openrouter_api_key and settings.openai_api_key:
+        return "OpenRouter → OpenAI fallback"
     if settings.openrouter_api_key:
         return "OpenRouter"
     if settings.openai_api_key:
@@ -630,12 +599,15 @@ async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     provider = _ai_provider_for_status(settings)
+    draft_route = _resolve_ai_request(settings, "draft")
+    topic_route = _resolve_ai_request(settings, "topic_enrich")
+    polish_route = _resolve_ai_request(settings, "polish")
     lines = [
         "Бот запущен",
         f"Провайдер AI: {provider}",
-        f"Draft model: {settings.model_draft}",
-        f"Topic enrich model: {settings.model_topic_enrich}",
-        f"Polish model: {settings.model_polish}",
+        f"Draft model: {draft_route.model or 'не настроена'}",
+        f"Topic enrich model: {topic_route.model or 'не настроена'}",
+        f"Polish model: {polish_route.model or 'не настроена'}",
         f"Таймзона: {settings.schedule_timezone}",
         f"Слоты: {', '.join(settings.daily_post_slots)}",
         f"DB path: {settings.db_path}",
@@ -711,7 +683,23 @@ def _schedule_keyboard(draft_id: int, slots: list[str]) -> InlineKeyboardMarkup:
 def _select_daily_plan_topics(db: DraftDatabase, limit: int) -> list[dict]:
     if limit <= 0:
         return []
-    candidates = db.list_topic_candidates(limit=max(50, limit * 5), status="new", order_by_score=True)
+    raw_candidates = db.list_topic_candidates(limit=max(80, limit * 8), status="new", order_by_score=True)
+    now = datetime.now(timezone.utc)
+    undated_allowed_groups = {"github", "tools", "community", "x", "telegram"}
+    fast_news_categories = {"news", "model", "agent", "business", "privacy", "drama", "research"}
+    candidates: list[dict] = []
+    for topic in raw_candidates:
+        if int(topic.get("score") or 0) < 60:
+            continue
+        published = _topic_published_datetime(str(topic.get("published_at") or ""))
+        if published is None:
+            if str(topic.get("source_group") or "") not in undated_allowed_groups:
+                continue
+        else:
+            max_age = timedelta(days=3 if str(topic.get("category") or "") in fast_news_categories else 7)
+            if now - published.astimezone(timezone.utc) > max_age:
+                continue
+        candidates.append(topic)
     if not candidates:
         return []
     selected: list[dict] = []
@@ -873,25 +861,97 @@ def _source_card_keyboard(source_id: int, enabled: bool) -> InlineKeyboardMarkup
 
 def _settings_text(settings) -> str:
     ai_provider = _ai_provider_for_status(settings)
+    draft_route = _resolve_ai_request(settings, "draft")
+    topic_route = _resolve_ai_request(settings, "topic_enrich")
+    polish_route = _resolve_ai_request(settings, "polish")
+    fallback_line = ""
+    if draft_route.fallback and topic_route.fallback and polish_route.fallback:
+        fallback_line = (
+            f"OpenAI fallback: {draft_route.fallback.model} / "
+            f"{topic_route.fallback.model} / {polish_route.fallback.model}\n"
+        )
     return (
         "⚙️ Настройки\n\n"
         f"Провайдер ИИ: {ai_provider}\n"
-        f"Модель черновика: {settings.model_draft}\n"
-        f"Модель тем: {settings.model_topic_enrich}\n"
-        f"Модель улучшения: {settings.model_polish}\n"
+        f"Модель черновика: {draft_route.model or 'не настроена'}\n"
+        f"Модель тем: {topic_route.model or 'не настроена'}\n"
+        f"Модель улучшения: {polish_route.model or 'не настроена'}\n"
+        f"{fallback_line}"
         f"Часовой пояс: {settings.schedule_timezone}\n"
         f"Длина поста: до {settings.post_soft_chars} / максимум {settings.post_max_chars} символов\n"
         f"База данных: {settings.db_path}"
     )
 
 
-def _resolve_ai_provider(settings) -> tuple[str, str, str | None, dict[str, str] | None]:
+@dataclass(frozen=True)
+class AIRequestRoute:
+    api_key: str = field(repr=False)
+    provider: str
+    model: str
+    base_url: str | None
+    extra_headers: dict[str, str] | None
+    fallback: CompletionFallback | None = None
+
+
+def _model_for_role(settings, role: str, *, openai: bool = False) -> str:
+    role_to_attr = {
+        "draft": "model_draft",
+        "topic_enrich": "model_topic_enrich",
+        "polish": "model_polish",
+    }
+    try:
+        primary_attr = role_to_attr[role]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported AI model role: {role}") from exc
+    primary_model = str(getattr(settings, primary_attr, "") or "").strip()
+    if not openai:
+        return primary_model
+    fallback_attr = f"openai_{primary_attr}"
+    return str(getattr(settings, fallback_attr, "") or primary_model).strip()
+
+
+def _openrouter_headers(settings) -> dict[str, str]:
+    headers = {"X-Title": settings.openrouter_app_name}
+    if settings.openrouter_site_url:
+        headers["HTTP-Referer"] = settings.openrouter_site_url
+    return headers
+
+
+def _resolve_ai_request(settings, role: str) -> AIRequestRoute:
+    """Resolve a provider-compatible model and an independent secondary route."""
+
     if settings.openrouter_api_key:
-        headers = {"X-Title": settings.openrouter_app_name}
-        if settings.openrouter_site_url:
-            headers["HTTP-Referer"] = settings.openrouter_site_url
-        return settings.openrouter_api_key, "openrouter", "https://openrouter.ai/api/v1", headers
-    return settings.openai_api_key, "openai", None, None
+        fallback = None
+        if settings.openai_api_key:
+            fallback = CompletionFallback(
+                api_key=settings.openai_api_key,
+                model=_model_for_role(settings, role, openai=True),
+                provider="openai",
+            )
+        return AIRequestRoute(
+            api_key=settings.openrouter_api_key,
+            provider="openrouter",
+            model=_model_for_role(settings, role),
+            base_url="https://openrouter.ai/api/v1",
+            extra_headers=_openrouter_headers(settings),
+            fallback=fallback,
+        )
+    if settings.openai_api_key:
+        return AIRequestRoute(
+            api_key=settings.openai_api_key,
+            provider="openai",
+            model=_model_for_role(settings, role, openai=True),
+            base_url=None,
+            extra_headers=None,
+        )
+    return AIRequestRoute(api_key="", provider="", model="", base_url=None, extra_headers=None)
+
+
+def _resolve_ai_provider(settings) -> tuple[str, str, str | None, dict[str, str] | None]:
+    """Backward-compatible provider-only resolver for extension callers."""
+
+    route = _resolve_ai_request(settings, "draft")
+    return route.api_key, route.provider, route.base_url, route.extra_headers
 
 
 async def _run_collect_topics(settings=None, db=None):
@@ -956,15 +1016,17 @@ async def _run_enrich_topic_understanding_ru(*args, **kwargs):
 async def _translate_topic_title_if_available(item, settings, db: DraftDatabase) -> None:
     if item.title_ru or not settings or not getattr(settings, "has_ai_provider", False):
         return
-    api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
-    if not api_key:
+    route = _resolve_ai_request(settings, "topic_enrich")
+    if not route.api_key:
         return
     result = await _run_translate_topic_title_to_ru(
-        api_key=api_key,
-        model=_topic_enrich_model(settings),
+        api_key=route.api_key,
+        model=route.model,
         title=item.title,
-        base_url=base_url,
-        extra_headers=extra_headers,
+        base_url=route.base_url,
+        extra_headers=route.extra_headers,
+        provider=route.provider,
+        fallback=route.fallback,
     )
     if not result or not result.content.strip() or result.content.strip() == item.title.strip():
         return
@@ -973,10 +1035,11 @@ async def _translate_topic_title_if_available(item, settings, db: DraftDatabase)
         return
     item.title_ru = result.content.strip()
     db.update_topic_candidate_display_fields(int(topic["id"]), title_ru=item.title_ru, reason_ru=item.reason_ru)
-    estimated_cost = estimate_ai_cost(provider, result.prompt_tokens, result.completion_tokens, settings)
+    used_provider = result.provider or route.provider
+    estimated_cost = estimate_ai_cost(used_provider, result.prompt_tokens, result.completion_tokens, settings)
     db.record_ai_usage(
-        provider=provider,
-        model=result.model or _topic_enrich_model(settings),
+        provider=used_provider,
+        model=result.model or route.model,
         operation="topic_translate_title",
         prompt_tokens=result.prompt_tokens,
         completion_tokens=result.completion_tokens,
@@ -1067,16 +1130,16 @@ async def _ensure_topic_candidate_display_metadata(
         if not settings or not getattr(settings, "has_ai_provider", False):
             error = "AI-провайдер не настроен."
         else:
-            api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
-            if not api_key:
+            route = _resolve_ai_request(settings, "topic_enrich")
+            if not route.api_key:
                 error = "AI-ключ не настроен."
             else:
-                model = _topic_enrich_model(settings)
                 try:
                     result = await _run_enrich_topic_understanding_ru(
-                        api_key=api_key, model=model, title=str(topic.get("title") or ""),
+                        api_key=route.api_key, model=route.model, title=str(topic.get("title") or ""),
                         source=str(topic.get("source") or ""), description=topic.get("original_description"),
-                        base_url=base_url, extra_headers=extra_headers,
+                        base_url=route.base_url, extra_headers=route.extra_headers,
+                        provider=route.provider, fallback=route.fallback,
                     )
                 except Exception as exc:
                     logger.warning("On-demand topic enrichment failed: topic_id=%s error=%s", topic_id, exc)
@@ -1091,8 +1154,9 @@ async def _ensure_topic_candidate_display_metadata(
                         angle_ru=parsed["angle_ru"], reason_ru=str(topic.get("reason_ru") or ""),
                         metadata_source="ai_on_demand",
                     )
-                    estimated_cost = estimate_ai_cost(provider, result.prompt_tokens, result.completion_tokens, settings)
-                    db.record_ai_usage(provider=provider, model=result.model or model, operation="topic_enrich_on_demand",
+                    used_provider = result.provider or route.provider
+                    estimated_cost = estimate_ai_cost(used_provider, result.prompt_tokens, result.completion_tokens, settings)
+                    db.record_ai_usage(provider=used_provider, model=result.model or route.model, operation="topic_enrich_on_demand",
                         prompt_tokens=result.prompt_tokens, completion_tokens=result.completion_tokens, total_tokens=result.total_tokens,
                         estimated_cost_usd=estimated_cost, source_url=str(topic.get("url") or ""), draft_id=None)
                 elif not error:
@@ -1153,22 +1217,26 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
         item.angle_ru = existing_angle_ru
         item.reason_ru = existing_reason_ru or item.reason_ru
         return "already_good"
-    api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
-    if not api_key:
+    route = _resolve_ai_request(settings, "topic_enrich")
+    if not route.api_key:
         logger.info("Topic metadata AI enrichment skipped: no AI provider api key url=%s source=%s", item.url, item.source)
         _apply_topic_enrichment_fallback(item, db)
         return "skipped_no_provider"
     diagnostics: dict[str, int] = {}
     try:
         result = await _run_enrich_topic_metadata_ru(
-            api_key=api_key,
-            model=_topic_enrich_model(settings),
+            api_key=route.api_key,
+            model=route.model,
             title=item.title,
             source=item.source,
             description=getattr(item, "original_description", None),
-            base_url=base_url,
-            extra_headers=extra_headers,
+            published_at=getattr(item, "published_at", None),
+            source_group=getattr(item, "source_group", None),
+            base_url=route.base_url,
+            extra_headers=route.extra_headers,
             diagnostics=diagnostics,
+            provider=route.provider,
+            fallback=route.fallback,
         )
     except TypeError as exc:
         if "diagnostics" not in str(exc):
@@ -1176,13 +1244,17 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
             _apply_topic_enrichment_fallback(item, db, force=True)
             return "provider_error"
         result = await _run_enrich_topic_metadata_ru(
-            api_key=api_key,
-            model=_topic_enrich_model(settings),
+            api_key=route.api_key,
+            model=route.model,
             title=item.title,
             source=item.source,
             description=getattr(item, "original_description", None),
-            base_url=base_url,
-            extra_headers=extra_headers,
+            published_at=getattr(item, "published_at", None),
+            source_group=getattr(item, "source_group", None),
+            base_url=route.base_url,
+            extra_headers=route.extra_headers,
+            provider=route.provider,
+            fallback=route.fallback,
         )
     except Exception as exc:
         logger.warning("Topic metadata AI enrichment failed: provider exception url=%s source=%s error=%s", item.url, item.source, exc)
@@ -1278,10 +1350,11 @@ async def _enrich_topic_metadata_if_available(item, settings, db: DraftDatabase)
             audience_fit_ru=audience_fit_ru,
             metadata_source="ai_bulk",
         )
-    estimated_cost = estimate_ai_cost(provider, result.prompt_tokens, result.completion_tokens, settings)
+    used_provider = result.provider or route.provider
+    estimated_cost = estimate_ai_cost(used_provider, result.prompt_tokens, result.completion_tokens, settings)
     db.record_ai_usage(
-        provider=provider,
-        model=result.model or _topic_enrich_model(settings),
+        provider=used_provider,
+        model=result.model or route.model,
         operation="topic_enrich_metadata",
         prompt_tokens=result.prompt_tokens,
         completion_tokens=result.completion_tokens,
@@ -1566,15 +1639,13 @@ def _should_use_topic_metadata_fallback(url: str, error: BaseException | None = 
 
 async def _generate_topic_metadata_fallback_draft(
     *,
-    api_key: str,
+    route: AIRequestRoute,
     settings,
     topic: dict[str, object],
-    base_url: str | None = None,
-    extra_headers: dict[str, str] | None = None,
 ) -> GenerationResult:
     return await _run_generate_post_draft_from_topic_metadata(
-        api_key=api_key,
-        model=settings.model_draft,
+        api_key=route.api_key,
+        model=route.model,
         topic_title=str(topic.get("title") or ""),
         topic_title_ru=str(topic.get("title_ru") or ""),
         topic_summary_ru=str(topic.get("summary_ru") or ""),
@@ -1586,47 +1657,51 @@ async def _generate_topic_metadata_fallback_draft(
         source_url=str(topic.get("url") or ""),
         max_chars=settings.post_max_chars,
         soft_chars=settings.post_soft_chars,
-        base_url=base_url,
-        extra_headers=extra_headers,
+        base_url=route.base_url,
+        extra_headers=route.extra_headers,
+        provider=route.provider,
+        fallback=route.fallback,
     )
 
 
 async def _generate_url_draft_with_fallback(
     *,
-    api_key: str,
+    route: AIRequestRoute,
     settings,
     source_url: str,
     title: str,
     page_text: str,
-    base_url: str | None = None,
-    extra_headers: dict[str, str] | None = None,
 ) -> tuple[GenerationResult, bool, str]:
     try:
         result = await _run_generate_post_draft_from_page(
-            api_key,
-            model=settings.model_draft,
+            route.api_key,
+            model=route.model,
             source_url=source_url,
             title=title,
             page_text=page_text,
-            base_url=base_url,
-            extra_headers=extra_headers,
+            base_url=route.base_url,
+            extra_headers=route.extra_headers,
+            provider=route.provider,
+            fallback=route.fallback,
         )
         return result, False, "draft_from_url"
     except EmptyAIResponseError as exc:
         logger.warning("Draft model returned empty content for URL %s: %s", source_url, exc)
-        fallback_model = (settings.model_polish or "").strip()
-        if fallback_model and fallback_model != settings.model_draft:
-            logger.warning("Trying fallback generation with MODEL_POLISH=%s", fallback_model)
+        fallback_route = _resolve_ai_request(settings, "polish")
+        if fallback_route.model and fallback_route.model != route.model:
+            logger.warning("Trying fallback generation with polish model=%s", fallback_route.model)
             result = await _run_generate_post_draft_from_page(
-                api_key,
-                model=fallback_model,
+                fallback_route.api_key,
+                model=fallback_route.model,
                 source_url=source_url,
                 title=title,
                 page_text=page_text,
                 max_chars=settings.post_max_chars,
                 soft_chars=settings.post_soft_chars,
-                base_url=base_url,
-                extra_headers=extra_headers,
+                base_url=fallback_route.base_url,
+                extra_headers=fallback_route.extra_headers,
+                provider=fallback_route.provider,
+                fallback=fallback_route.fallback,
             )
             return result, True, "fallback_draft_from_url"
         raise
@@ -1651,15 +1726,13 @@ async def _regenerate_draft_from_source(
         return None, "Не удалось снова прочитать источник. Возможно, сайт закрыл доступ или страница изменилась."
 
     try:
-        api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
+        route = _resolve_ai_request(settings, "draft")
         generation_result, _used_fallback, operation = await _generate_url_draft_with_fallback(
-            api_key=api_key,
+            route=route,
             settings=settings,
             source_url=source_url,
             title=details.title,
             page_text=details.text,
-            base_url=base_url,
-            extra_headers=extra_headers,
         )
     except EmptyAIResponseError:
         return None, EMPTY_AI_REPLY_TEXT.replace("Черновик не создан", "Черновик не обновлён")
@@ -1671,10 +1744,11 @@ async def _regenerate_draft_from_source(
     if not content:
         return None, "Модель вернула пустой ответ. Черновик не обновлён. Попробуй ещё раз или смени MODEL_DRAFT."
 
-    estimated_cost = estimate_ai_cost(provider, generation_result.prompt_tokens, generation_result.completion_tokens, settings)
+    used_provider = generation_result.provider or route.provider
+    estimated_cost = estimate_ai_cost(used_provider, generation_result.prompt_tokens, generation_result.completion_tokens, settings)
     db.record_ai_usage(
-        provider=provider,
-        model=generation_result.model or settings.model_draft,
+        provider=used_provider,
+        model=generation_result.model or route.model,
         operation=operation,
         prompt_tokens=generation_result.prompt_tokens,
         completion_tokens=generation_result.completion_tokens,
@@ -1804,7 +1878,6 @@ async def _handle_pending_media_attach(update: Update, context: ContextTypes.DEF
         return False
 
     db: DraftDatabase = context.bot_data["db"]
-    settings = context.bot_data["settings"]
     draft = db.get_draft(pending_draft_id)
     if not draft:
         _clear_pending_media(context)
@@ -1848,19 +1921,9 @@ async def _handle_pending_media_attach(update: Update, context: ContextTypes.DEF
     return True
 
 
-def _admin_reply_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton(NAV_PLAN_DAY), KeyboardButton(NAV_GENERATE_PLAN)],
-            [KeyboardButton(NAV_QUEUE), KeyboardButton(NAV_DRAFTS)],
-            [KeyboardButton(NAV_TOPICS), KeyboardButton(NAV_SOURCES)],
-            [KeyboardButton(NAV_USAGE), KeyboardButton(NAV_STYLE)],
-            [KeyboardButton(NAV_SETTINGS), KeyboardButton(NAV_HELP)],
-        ],
-        resize_keyboard=True,
-        is_persistent=True,
-        input_field_placeholder="Выбери действие или пришли ссылку",
-    )
+def _admin_reply_keyboard() -> InlineKeyboardMarkup:
+    """Compatibility alias for the single inline navigation menu."""
+    return _main_menu_keyboard()
 
 
 async def _reply_admin_text(update: Update, text: str, **kwargs) -> None:
@@ -1916,7 +1979,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """Allow /start only for admin user."""
 
     settings = context.bot_data["settings"]
-    db: DraftDatabase = context.bot_data["db"]
     user_id = update.effective_user.id if update.effective_user else None
 
     if not _is_admin(user_id, settings.admin_id):
@@ -1925,15 +1987,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     if update.message:
-        await _reply_admin_text(
-            update,
-            "Привет 👋\nКлавиатура навигации включена.\n\nМожешь нажать кнопку ниже или просто прислать ссылку.",
+        await update.message.reply_text(
+            "Обновляю управление ботом…",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await update.message.reply_text(
+            "Привет 👋\n\nЭто единое меню бота. Выбери действие или просто пришли ссылку на материал.",
+            reply_markup=_main_menu_keyboard(),
         )
 
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = context.bot_data["settings"]
-    db: DraftDatabase = context.bot_data["db"]
     user_id = update.effective_user.id if update.effective_user else None
     if not _is_admin(user_id, settings.admin_id):
         if update.message:
@@ -1941,8 +2006,12 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     if update.message:
         await update.message.reply_text(
-            "Меню навигации открыто.\nВыбери действие кнопкой ниже.",
-            reply_markup=_admin_reply_keyboard(),
+            "Убираю старую клавиатуру…",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await update.message.reply_text(
+            _main_menu_text(),
+            reply_markup=_main_menu_keyboard(),
         )
 
 
@@ -2128,8 +2197,8 @@ async def _create_draft_from_topic(
             return None, f"Тема #{topic_id} уже не новая."
         if not settings.has_ai_provider:
             return None, "ИИ-провайдер не настроен."
-        api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
-        logger.info("topic_generate provider=%s model=%s", provider, settings.model_draft)
+        route = _resolve_ai_request(settings, "draft")
+        logger.info("topic_generate provider=%s model=%s", route.provider, route.model)
         source_url = str(topic.get("url") or "")
         details = None
         used_metadata_fallback = False
@@ -2139,13 +2208,11 @@ async def _create_draft_from_topic(
                 raise RuntimeError("Blocked source URL: using saved topic metadata fallback")
             details = await _run_fetch_page_content_details(source_url)
             generation_result, used_fallback, _operation = await _generate_url_draft_with_fallback(
-                api_key=api_key,
+                route=route,
                 settings=settings,
                 source_url=source_url,
                 title=details.title,
                 page_text=details.text,
-                base_url=base_url,
-                extra_headers=extra_headers,
             )
         except Exception as fetch_or_generation_exc:
             if not _should_use_topic_metadata_fallback(source_url, fetch_or_generation_exc):
@@ -2157,11 +2224,9 @@ async def _create_draft_from_topic(
                 fetch_or_generation_exc,
             )
             generation_result = await _generate_topic_metadata_fallback_draft(
-                api_key=api_key,
+                route=route,
                 settings=settings,
                 topic=topic,
-                base_url=base_url,
-                extra_headers=extra_headers,
             )
             used_fallback = False
             used_metadata_fallback = True
@@ -2176,10 +2241,11 @@ async def _create_draft_from_topic(
             source_url=source_url,
             source_image_url=source_image_url,
         )
-        estimated_cost = estimate_ai_cost(provider, generation_result.prompt_tokens, generation_result.completion_tokens, settings)
+        used_provider = generation_result.provider or route.provider
+        estimated_cost = estimate_ai_cost(used_provider, generation_result.prompt_tokens, generation_result.completion_tokens, settings)
         db.record_ai_usage(
-            provider=provider,
-            model=generation_result.model or settings.model_draft,
+            provider=used_provider,
+            model=generation_result.model or route.model,
             operation=operation,
             prompt_tokens=generation_result.prompt_tokens,
             completion_tokens=generation_result.completion_tokens,
@@ -2190,8 +2256,8 @@ async def _create_draft_from_topic(
         )
         logger.info(
             "AI usage provider=%s model=%s operation=%s prompt=%s completion=%s total=%s cost=%s",
-            provider,
-            generation_result.model or settings.model_draft,
+            used_provider,
+            generation_result.model or route.model,
             operation,
             generation_result.prompt_tokens,
             generation_result.completion_tokens,
@@ -2535,8 +2601,8 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
         return
 
     try:
-        api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
-        logger.info("/generate provider=%s model=%s", provider, settings.model_draft)
+        route = _resolve_ai_request(settings, "draft")
+        logger.info("/generate provider=%s model=%s", route.provider, route.model)
         source_url = None
         source_image_url = None
         if source_url_arg:
@@ -2559,25 +2625,25 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
             details = await _run_fetch_page_content_details(source_url)
             source_image_url = details.preview_image_url
             generation_result, used_fallback, operation = await _generate_url_draft_with_fallback(
-                api_key=api_key,
+                route=route,
                 settings=settings,
                 source_url=source_url,
                 title=details.title,
                 page_text=details.text,
-                base_url=base_url,
-                extra_headers=extra_headers,
             )
         else:
             if message:
                 await message.reply_text("Генерирую черновик...")
             generation_result = await _run_generate_post_draft(
-                api_key,
-                model=settings.model_draft,
+                route.api_key,
+                model=route.model,
                 source_url=None,
                 max_chars=settings.post_max_chars,
                 soft_chars=settings.post_soft_chars,
-                base_url=base_url,
-                extra_headers=extra_headers,
+                base_url=route.base_url,
+                extra_headers=route.extra_headers,
+                provider=route.provider,
+                fallback=route.fallback,
             )
             used_fallback = False
             operation = "draft"
@@ -2602,15 +2668,16 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
             await message.reply_text(EMPTY_AI_REPLY_TEXT)
         return
     draft_id = db.create_draft(content, source_url=source_url, source_image_url=source_image_url)
+    used_provider = generation_result.provider or route.provider
     estimated_cost = estimate_ai_cost(
-        provider,
+        used_provider,
         generation_result.prompt_tokens,
         generation_result.completion_tokens,
         settings,
     )
     db.record_ai_usage(
-        provider=provider,
-        model=generation_result.model or settings.model_draft,
+        provider=used_provider,
+        model=generation_result.model or route.model,
         operation=operation,
         prompt_tokens=generation_result.prompt_tokens,
         completion_tokens=generation_result.completion_tokens,
@@ -2621,8 +2688,8 @@ async def _generate_from_command(context, settings, db: DraftDatabase, source_ur
     )
     logger.info(
         "AI usage provider=%s model=%s operation=%s prompt=%s completion=%s total=%s cost=%s",
-        provider,
-        generation_result.model or settings.model_draft,
+        used_provider,
+        generation_result.model or route.model,
         operation,
         generation_result.prompt_tokens,
         generation_result.completion_tokens,
@@ -2771,8 +2838,8 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
     stats.skipped_examples = {"low_score": [], "stale": [], "spam": [], "invalid": []}
     inserted = []
     accepted_items = []
+    borderline_items = []
     skipped_existing_metadata = 0
-    spam_words = ["casino", "porn", "xxx", "bet", "viagra", "airdrop", "token presale"]
     max_topic_age_days = int(getattr(settings, "max_topic_age_days", 14) or 14)
 
     def _remember_skip(kind: str, item, reason: str) -> None:
@@ -2800,15 +2867,19 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
             continue
         if not getattr(item, "published_at", None):
             stats.missing_date += 1
-        if any(w in item.title.lower() for w in spam_words):
+        if re.search(r"\b(?:casino|porn|xxx|viagra|airdrop)\b|\btoken\s+presale\b", item.title, re.IGNORECASE):
             stats.spam += 1
             _remember_skip("spam", item, "спам-слова в title")
             continue
-        if item.score < 50 and item.source_group != "custom":
+        # Scores below 35 are too weak to justify an AI call. Borderline 35-49
+        # candidates are stored temporarily so AI can correct false negatives;
+        # unrescued new rows are removed after the review pass.
+        if item.score < 35:
             stats.low_score += 1
             stats.low_quality += 1
-            _remember_skip("low_score", item, item.reason or "score < 50")
+            _remember_skip("low_score", item, item.reason or "score < 35")
             continue
+        is_borderline = item.score < 50
         needs_ai_enrichment_initial = is_weak_topic_metadata(item.title_ru, item.summary_ru, item.angle_ru, original_title=item.title)
         if needs_ai_enrichment_initial:
             if _apply_topic_enrichment_fallback(item, db):
@@ -2817,23 +2888,36 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
             item.title, item.url, item.source, item.published_at, item.category, item.score, item.reason, item.normalized_title, item.source_group, item.title_ru, item.summary_ru, item.angle_ru, item.reason_ru, item.original_description
         )
         if result == "inserted":
-            stats.new += 1
-            inserted.append(item)
+            if not is_borderline:
+                stats.new += 1
+                inserted.append(item)
         elif result == "existing_url":
             stats.existing += 1
         elif result == "merged_story":
             stats.merged_story += 1
         else:
             stats.near_duplicate += 1
-        if result in {"inserted", "existing_url", "merged_story"} and item.score >= 50:
-            stored_topic = db.find_topic_candidate_by_url(item.url)
-            if stored_topic:
-                setattr(item, "id", stored_topic.get("id"))
-                setattr(item, "canonical_key", stored_topic.get("canonical_key") or canonical_topic_key(item.title, item.source_group))
-                setattr(item, "ai_value_score", stored_topic.get("ai_value_score"))
-                setattr(item, "ai_value_reason_ru", stored_topic.get("ai_value_reason_ru"))
-                setattr(item, "audience_fit_ru", stored_topic.get("audience_fit_ru"))
-                setattr(item, "content_format", stored_topic.get("content_format"))
+        stored_topic = db.find_topic_candidate_by_url(item.url)
+        if stored_topic:
+            setattr(item, "id", stored_topic.get("id"))
+            setattr(item, "canonical_key", stored_topic.get("canonical_key") or canonical_topic_key(item.title, item.source_group))
+            setattr(item, "ai_value_score", stored_topic.get("ai_value_score"))
+            setattr(item, "ai_value_reason_ru", stored_topic.get("ai_value_reason_ru"))
+            setattr(item, "audience_fit_ru", stored_topic.get("audience_fit_ru"))
+            setattr(item, "content_format", stored_topic.get("content_format"))
+        setattr(item, "_collection_result", result)
+
+        # A lower-quality related URL was attached to a stronger primary story.
+        # Do not render or AI-enrich the secondary item's mismatched metadata.
+        if stored_topic and str(stored_topic.get("url") or "") != item.url:
+            setattr(item, "_related_source_only", True)
+            continue
+
+        if is_borderline:
+            borderline_items.append(item)
+            continue
+
+        if result in {"inserted", "existing_url", "merged_story"}:
             setattr(item, "_accepted_for_preview", True)
             accepted_items.append(item)
             stored_title_ru = str(stored_topic.get("title_ru") or "") if stored_topic else (item.title_ru or "")
@@ -2848,7 +2932,13 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
     stats.ai_enrich_limit = max(0, min(30, enrich_limit))
     stats.ai_enrichment_model = _topic_enrich_model(settings) if settings else ""
     ai_started = time.monotonic()
-    preview_candidates = _collect_preview_candidates(inserted, accepted_items)
+    regular_preview_candidates = _collect_preview_candidates(inserted, accepted_items)
+    borderline_ranked = sorted(borderline_items, key=lambda item: int(getattr(item, "score", 0) or 0), reverse=True)
+    # Reserve at most three calls for possible false-negative rescue; keep the
+    # rest of the budget for metadata on the strongest cards the admin will see.
+    preview_candidates = _dedupe_topic_items_by_identity(
+        [*borderline_ranked[:3], *regular_preview_candidates, *borderline_ranked[3:]]
+    )
     selected_candidates, skipped_by_limit_count = select_topic_ai_enrichment_candidates(preview_candidates, stats.ai_enrich_limit)
     stats.ai_enrichment_selected = [_short_debug_topic_label(item) for item in selected_candidates]
     if not preview_candidates:
@@ -2915,6 +3005,25 @@ async def _collect_topics_with_stats(db: DraftDatabase, items: list | None = Non
                 stats.ai_enrichment_provider_error += 1
                 logger.warning("Topic enrichment skipped after exception from provider/fallback: %s", exc)
                 continue
+
+    # Finalize the temporary review pool only after AI has had a chance to move
+    # the score. Newly inserted candidates that remain weak are deleted so they
+    # can be reconsidered on a later collection instead of polluting /topics.
+    for item in borderline_items:
+        if int(getattr(item, "score", 0) or 0) >= 50:
+            setattr(item, "_accepted_for_preview", True)
+            accepted_items.append(item)
+            if getattr(item, "_collection_result", "") == "inserted":
+                stats.new += 1
+                inserted.append(item)
+        else:
+            stats.low_score += 1
+            stats.low_quality += 1
+            _remember_skip("low_score", item, item.reason or "score < 50 after editorial review")
+            if getattr(item, "_collection_result", "") == "inserted" and getattr(item, "id", None):
+                db.delete_topic_candidate(int(item.id))
+
+    _collect_preview_candidates(inserted, accepted_items)
     stats.ai_seconds = time.monotonic() - ai_started
     stats.total_seconds = time.monotonic() - total_started
     return stats, items, inserted
@@ -3087,7 +3196,6 @@ async def usage_month_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def style_guide_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = context.bot_data["settings"]
-    db: DraftDatabase = context.bot_data["db"]
     user_id = update.effective_user.id if update.effective_user else None
     if not _is_admin(user_id, settings.admin_id):
         return
@@ -3132,7 +3240,6 @@ def _extract_custom_emoji_lines(message) -> list[str]:
 
 async def emoji_ids_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = context.bot_data["settings"]
-    db: DraftDatabase = context.bot_data["db"]
     user_id = update.effective_user.id if update.effective_user else None
     if not _is_admin(user_id, settings.admin_id):
         if update.message:
@@ -3470,7 +3577,7 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 get_pending_media=_get_pending_media,
                 set_pending_media=_set_pending_media,
                 send_moderation_preview=_send_moderation_preview,
-                resolve_ai_provider=_resolve_ai_provider,
+                resolve_ai_request=_resolve_ai_request,
                 run_rewrite_post_draft=_run_rewrite_post_draft,
                 run_polish_post_draft=_run_polish_post_draft,
                 rewrite_test_draft=rewrite_test_draft,
@@ -3503,6 +3610,25 @@ async def moderation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.exception("Failed to edit callback message after error: %s", edit_exc)
             if query.message:
                 await query.message.reply_text("Что-то пошло не так. Посмотри логи.")
+
+
+async def _run_menu_collect_background(query, context, settings, db: DraftDatabase) -> None:
+    try:
+        stats, items, inserted = await _collect_topics_with_stats(db, settings=settings)
+        await _edit_callback_message(
+            query,
+            _render_collect_text(stats, items, inserted),
+            reply_markup=_collect_result_keyboard(),
+        )
+    except Exception:
+        logger.exception("Background topic collection from menu failed")
+        await _edit_callback_message(
+            query,
+            "Не удалось собрать темы. Проверь источники и попробуй ещё раз.",
+            reply_markup=_back_to_menu_keyboard(),
+        )
+    finally:
+        context.application.bot_data["topics_collect_running"] = False
 
 
 async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
@@ -3567,13 +3693,19 @@ async def _handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TY
             hub_text += "\n\n" + "\n".join(_topic_preview_line(t) for t in hot_topics[:5])
         await _edit_callback_message(query, hub_text, reply_markup=_topics_hub_keyboard())
     elif data == "menu_collect":
-        await _edit_callback_message(query, "🔄 Собираю темы... Это может занять до пары минут.")
-        stats, items, inserted = await _collect_topics_with_stats(db, settings=settings)
-        await _edit_callback_message(
-            query,
-            _render_collect_text(stats, items, inserted),
-            reply_markup=_collect_result_keyboard(),
+        if context.application.bot_data.get("topics_collect_running"):
+            await _edit_callback_message(
+                query,
+                "Сбор тем уже идёт. Я обновлю это сообщение, когда закончу.",
+                reply_markup=_back_to_menu_keyboard(),
+            )
+            return
+        context.application.bot_data["topics_collect_running"] = True
+        await _edit_callback_message(query, "🔄 Начал сбор тем. Ботом можно пользоваться дальше — результат появится здесь.")
+        context.application.create_task(
+            _run_menu_collect_background(query=query, context=context, settings=settings, db=db)
         )
+        return
     elif data == "menu_show_topics":
         limit = _parse_topic_limit(context, default=10)
         topics = db.list_topic_candidates(limit=limit, status="new", order_by_score=True)
@@ -3829,16 +3961,14 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     try:
         details = await _run_fetch_page_content_details(source_url)
-        api_key, provider, base_url, extra_headers = _resolve_ai_provider(settings)
-        logger.info("url_generate provider=%s model=%s", provider, settings.model_draft)
+        route = _resolve_ai_request(settings, "draft")
+        logger.info("url_generate provider=%s model=%s", route.provider, route.model)
         generation_result, used_fallback, operation = await _generate_url_draft_with_fallback(
-            api_key=api_key,
+            route=route,
             settings=settings,
             source_url=source_url,
             title=details.title,
             page_text=details.text,
-            base_url=base_url,
-            extra_headers=extra_headers,
         )
     except EmptyAIResponseError:
         await update.message.reply_text(EMPTY_AI_REPLY_TEXT)
@@ -3856,13 +3986,14 @@ async def admin_url_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await update.message.reply_text(EMPTY_AI_REPLY_TEXT)
             return
         draft_id = db.create_draft(content, source_url=source_url, source_image_url=details.preview_image_url)
-        estimated_cost = estimate_ai_cost(provider, generation_result.prompt_tokens, generation_result.completion_tokens, settings)
+        used_provider = generation_result.provider or route.provider
+        estimated_cost = estimate_ai_cost(used_provider, generation_result.prompt_tokens, generation_result.completion_tokens, settings)
         db.record_ai_usage(
-            provider=provider, model=generation_result.model or settings.model_draft, operation=operation,
+            provider=used_provider, model=generation_result.model or route.model, operation=operation,
             prompt_tokens=generation_result.prompt_tokens, completion_tokens=generation_result.completion_tokens,
             total_tokens=generation_result.total_tokens, estimated_cost_usd=estimated_cost, source_url=source_url, draft_id=draft_id
         )
-        logger.info("AI usage provider=%s model=%s operation=%s prompt=%s completion=%s total=%s cost=%s", provider, generation_result.model or settings.model_draft, operation, generation_result.prompt_tokens, generation_result.completion_tokens, generation_result.total_tokens, estimated_cost)
+        logger.info("AI usage provider=%s model=%s operation=%s prompt=%s completion=%s total=%s cost=%s", used_provider, generation_result.model or route.model, operation, generation_result.prompt_tokens, generation_result.completion_tokens, generation_result.total_tokens, estimated_cost)
         await _send_moderation_preview(
             context,
             settings.admin_id,

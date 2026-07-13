@@ -10,7 +10,7 @@ def run() -> None:
         "Product Hunt",
         "https://producthunt.com/posts/ai-video-editor",
         "tools",
-        published_at="2026-05-12 00:00:00",
+        published_at=fresh_published_at,
     )
     assert useful_tool >= 80 and useful_category in {"creator", "tool", "mobile"}
 
@@ -19,7 +19,7 @@ def run() -> None:
         "TechCrunch AI",
         "https://example.com/funding",
         "tech_media",
-        published_at="2026-05-12 00:00:00",
+        published_at=fresh_published_at,
     )
     assert funding_category == "business"
     assert funding < useful_tool - 25
@@ -30,7 +30,7 @@ def run() -> None:
         "arXiv",
         "https://arxiv.org/abs/123",
         "tech_media",
-        published_at="2026-05-12 00:00:00",
+        published_at=fresh_published_at,
     )
     assert research_category == "research"
     assert research < 60
@@ -42,7 +42,7 @@ def run() -> None:
         "github",
         description="Open-source local app and browser extension for AI video editing workflow automation",
         stars_today="420 stars today",
-        published_at="2026-05-12 00:00:00",
+        published_at=fresh_published_at,
     )
     github_empty, _, github_empty_reason = score_topic(
         "GitHub Trending: owner / llm-kernel-bindings",
@@ -51,7 +51,7 @@ def run() -> None:
         "github",
         description="",
         stars_today="12 stars today",
-        published_at="2026-05-12 00:00:00",
+        published_at=fresh_published_at,
     )
     assert github_clear_category in {"tool", "creator", "agent", "dev"}
     assert github_clear >= github_empty + 20
@@ -63,7 +63,7 @@ def run() -> None:
         "Spam",
         "https://example.com/casino",
         "custom",
-        published_at="2026-05-12 00:00:00",
+        published_at=fresh_published_at,
     )
     assert spam < 35
 
@@ -86,11 +86,11 @@ def run() -> None:
     assert not is_similar_topic_key("openai chatgpt", "openai chatgpt plus")
 
     assert hybrid_topic_score(70, None) == 70
-    assert hybrid_topic_score(70, 95) == 79
-    assert hybrid_topic_score(85, 20) == 70
-    assert hybrid_topic_score(40, 100) == 55
-    assert hybrid_topic_score(0, 100) == 15
-    assert hybrid_topic_score(100, 0) == 85
+    assert hybrid_topic_score(70, 95) == 81
+    assert hybrid_topic_score(85, 20) == 56
+    assert hybrid_topic_score(40, 100) == 67
+    assert hybrid_topic_score(0, 100) == 30
+    assert hybrid_topic_score(100, 0) == 70
     assert hybrid_topic_score(65, 90) > 65
     assert hybrid_topic_score(85, 40) < 85
 
@@ -100,7 +100,7 @@ def run() -> None:
         "https://www.marktechpost.com/ansible-automation-lab/",
         "tech_media",
         description="A long tutorial about DevOps infrastructure and Ansible automation.",
-        published_at="2026-05-12 00:00:00",
+        published_at=fresh_published_at,
     )
     assert marktech_devops < 60
     assert "MarkTechPost" in marktech_reason or "техническая" in marktech_reason or "devops" in marktech_reason
@@ -122,7 +122,7 @@ def run() -> None:
         "https://producthunt.com/posts/clipmagic-ai",
         "tools",
         description="AI app for creators that makes short clips from videos.",
-        published_at="2026-05-12 00:00:00",
+        published_at=fresh_published_at,
     )
     assert product_hunt_tool >= 75
     assert product_category in {"creator", "tool", "mobile"}

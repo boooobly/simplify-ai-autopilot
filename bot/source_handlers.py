@@ -29,13 +29,13 @@ def is_valid_rss_input_url(raw: str) -> bool:
     return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
 
 
-def built_in_rss_sources() -> list[dict]:
+def built_in_rss_sources(settings=None) -> list[dict]:
     groups = [
         ("official_ai", OFFICIAL_AI_RSS, True),
         ("tech_media", TECH_MEDIA_RSS, True),
         ("ru_tech", RU_TECH_RSS, True),
         ("tools", TOOLS_RSS, True),
-        ("community", COMMUNITY_RSS, reddit_sources_enabled()),
+        ("community", COMMUNITY_RSS, reddit_sources_enabled(settings)),
     ]
     rows: list[dict] = []
     for group, items, enabled in groups:
@@ -89,9 +89,9 @@ def env_configured_sources(settings) -> list[dict]:
                     "location": "env",
                 }
             )
-    if x_sources_enabled():
-        for account in os.getenv("X_ACCOUNTS", "").split(","):
-            username = account.strip().lstrip("@")
+    if x_sources_enabled(settings):
+        for account in list(getattr(settings, "x_accounts", []) or []):
+            username = str(account).strip().lstrip("@")
             if username:
                 rows.append(
                     {
@@ -135,7 +135,7 @@ def find_duplicate_source(source_type: str, value: str, settings, db: DraftDatab
         normalized = (value or "").strip().lower()
     if not normalized:
         return None
-    inventory = [*built_in_rss_sources(), *env_configured_sources(settings), *db_managed_sources(db)]
+    inventory = [*built_in_rss_sources(settings), *env_configured_sources(settings), *db_managed_sources(db)]
     for item in inventory:
         if item["source_type"] == source_type and item.get("normalized_value") == normalized:
             return item
@@ -308,7 +308,7 @@ def _pack_inventory_blocks(blocks: list[tuple[str, list[dict]]], limit: int = 35
 
 
 def render_sources_inventory(settings, db, detect_railway) -> list[str]:
-    builtin = built_in_rss_sources()
+    builtin = built_in_rss_sources(settings)
     env_rows = env_configured_sources(settings)
     managed = db_managed_sources(db)
     messages = [

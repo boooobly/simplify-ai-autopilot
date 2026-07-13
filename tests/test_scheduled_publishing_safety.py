@@ -8,7 +8,7 @@ import pytest
 
 import bot.publisher as publisher
 from bot.database import DraftDatabase
-from bot.publisher import PublishResult, run_scheduled_publishing
+from bot.publisher import PartialPublishError, PublishResult, run_scheduled_publishing
 
 
 @pytest.fixture()
@@ -24,6 +24,7 @@ def _schedule_due(db: DraftDatabase, content: str = "due draft") -> int:
 
 def _context(db: DraftDatabase) -> SimpleNamespace:
     settings = SimpleNamespace(
+        admin_id=1,
         channel_id="-100123",
         custom_emoji_map={},
         custom_emoji_aliases={},
@@ -138,3 +139,25 @@ def test_successful_scheduled_publish_records_sent_metadata_and_is_not_reselecte
     assert draft["published_at"] is not None
     assert draft["published_channel_id"] == "-100123"
     assert draft["published_message_ids"] == "701,702"
+
+
+def test_partial_scheduled_publish_is_recorded_and_never_retried(
+    db: DraftDatabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    draft_id = _schedule_due(db)
+    calls = []
+
+    async def partial_publish(*args, **kwargs):
+        calls.append("attempt")
+        raise PartialPublishError([801, 802], RuntimeError("third send failed"))
+
+    monkeypatch.setattr(publisher, "publish_to_channel", partial_publish)
+
+    asyncio.run(run_scheduled_publishing(_context(db)))
+    asyncio.run(run_scheduled_publishing(_context(db)))
+
+    draft = db.get_draft(draft_id)
+    assert calls == ["attempt"]
+    assert draft["status"] == "published"
+    assert draft["published_message_ids"] == "801,802"
+    assert draft["publish_error"] == "PartialPublish:RuntimeError"
