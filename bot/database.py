@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
 from bot.source_normalization import normalize_source_url, normalize_telegram_channel_input
-from bot.topic_scoring import canonical_topic_key, content_format_for_lane, editorial_lane_for_topic, is_similar_topic_key
+from bot.topic_scoring import canonical_topic_key, content_format_for_lane, editorial_lane_for_topic, hybrid_topic_score, is_similar_topic_key
 
 
 def _split_related_values(value: str | None) -> list[str]:
@@ -457,7 +457,8 @@ class DraftDatabase:
         ]
         with self._connect() as conn:
             for key, table, (where_sql, params) in queries:
-                row = conn.execute(f"SELECT COUNT(*) AS count FROM {table} WHERE {where_sql}", params).fetchone()
+                # table and where_sql come only from the fixed cleanup rule list above.
+                row = conn.execute(f"SELECT COUNT(*) AS count FROM {table} WHERE {where_sql}", params).fetchone()  # nosec B608
                 counts[key] = int(row["count"] if row else 0)
         counts["total"] = sum(value for key, value in counts.items() if key != "total")
         return counts
@@ -483,7 +484,8 @@ class DraftDatabase:
         ]
         with self._connect() as conn:
             for key, table, (where_sql, params) in deletions:
-                cursor = conn.execute(f"DELETE FROM {table} WHERE {where_sql}", params)
+                # table and where_sql come only from the fixed cleanup rule list above.
+                cursor = conn.execute(f"DELETE FROM {table} WHERE {where_sql}", params)  # nosec B608
                 counts[key] = int(cursor.rowcount if cursor.rowcount is not None else 0)
             conn.commit()
         counts["total"] = sum(value for key, value in counts.items() if key != "total")
@@ -658,20 +660,26 @@ class DraftDatabase:
         allowed_statuses: tuple[str, ...] = ("scheduled",),
     ) -> bool:
         statuses = tuple(dict.fromkeys(status.strip() for status in allowed_statuses if status.strip()))
-        if not statuses:
+        supported_statuses = {"draft", "approved", "scheduled"}
+        if not statuses or any(status not in supported_statuses for status in statuses):
             return False
-        placeholders = ", ".join("?" for _ in statuses)
+        allow_draft = int("draft" in statuses)
+        allow_approved = int("approved" in statuses)
+        allow_scheduled = int("scheduled" in statuses)
         with self._connect() as conn:
             cursor = conn.execute(
-                f"""
+                """
                 UPDATE drafts
                 SET status = 'publishing',
                     publishing_started_at = CURRENT_TIMESTAMP,
                     publish_error = NULL,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND status IN ({placeholders})
+                WHERE id = ?
+                  AND ((? = 1 AND status = 'draft')
+                    OR (? = 1 AND status = 'approved')
+                    OR (? = 1 AND status = 'scheduled'))
                 """,
-                (draft_id, *statuses),
+                (draft_id, allow_draft, allow_approved, allow_scheduled),
             )
             conn.commit()
             return cursor.rowcount == 1
@@ -682,8 +690,10 @@ class DraftDatabase:
         *,
         channel_id: str | None = None,
         message_ids: list[int] | None = None,
+        error: str | None = None,
     ) -> None:
         serialized_message_ids = ",".join(str(message_id) for message_id in (message_ids or [])) or None
+        stored_error = (error or "").strip()[:1000] or None
         with self._connect() as conn:
             conn.execute(
                 """
@@ -694,11 +704,11 @@ class DraftDatabase:
                     published_at = COALESCE(published_at, CURRENT_TIMESTAMP),
                     published_channel_id = COALESCE(?, published_channel_id),
                     published_message_ids = COALESCE(?, published_message_ids),
-                    publish_error = NULL,
+                    publish_error = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """,
-                (channel_id, serialized_message_ids, draft_id),
+                (channel_id, serialized_message_ids, stored_error, draft_id),
             )
             conn.commit()
 
@@ -808,6 +818,7 @@ class DraftDatabase:
         title: str,
         url: str,
         source: str,
+        published_at: str | None,
         category: str,
         score: int,
         reason: str,
@@ -827,70 +838,137 @@ class DraftDatabase:
         existing_urls = _join_related_values(existing["related_urls"], existing["url"], url)
         related_count = max(1, len(_split_related_values(existing_urls)))
         existing_score = int(existing["score"] or 0)
-        if score > existing_score:
+        existing_deterministic_score = int(existing["deterministic_score"] or existing_score)
+        same_primary_url = str(existing["url"] or "") == url
+        preserve_existing_ai = bool(
+            same_primary_url
+            and existing["ai_value_score"] is not None
+            and existing["title_ru"]
+            and existing["summary_ru"]
+            and existing["angle_ru"]
+        )
+        replace_primary = same_primary_url or score > existing_deterministic_score
+        clear_ai_metadata = replace_primary and not preserve_existing_ai
+        if replace_primary:
+            title_to_store = title
+            url_to_store = url
+            source_to_store = source
+            published_at_to_store = published_at
             category_to_store = category
-            score_to_store = score
+            score_to_store = (
+                hybrid_topic_score(score, int(existing["ai_value_score"]))
+                if preserve_existing_ai
+                else score
+            )
+            deterministic_score_to_store = score
             reason_to_store = reason
-            title_ru_to_store = title_ru
-            summary_ru_to_store = summary_ru
-            angle_ru_to_store = angle_ru
-            reason_ru_to_store = reason_ru
+            title_ru_to_store = existing["title_ru"] if preserve_existing_ai else title_ru
+            summary_ru_to_store = existing["summary_ru"] if preserve_existing_ai else summary_ru
+            angle_ru_to_store = existing["angle_ru"] if preserve_existing_ai else angle_ru
+            reason_ru_to_store = existing["reason_ru"] if preserve_existing_ai else reason_ru
             original_description_to_store = original_description
+            normalized_title_to_store = normalized_title
+            canonical_key_to_store = canonical_key
+            source_group_to_store = source_group
+            lane_to_store = lane
+            lane_reason_to_store = lane_reason
+            content_format_to_store = content_format
         else:
+            title_to_store = existing["title"]
+            url_to_store = existing["url"]
+            source_to_store = existing["source"]
+            published_at_to_store = existing["published_at"]
             category_to_store = existing["category"]
             score_to_store = existing_score
+            deterministic_score_to_store = existing_deterministic_score
             reason_to_store = existing["reason"]
-            title_ru_to_store = None
-            summary_ru_to_store = None
-            angle_ru_to_store = None
-            reason_ru_to_store = None
-            original_description_to_store = None
+            title_ru_to_store = existing["title_ru"]
+            summary_ru_to_store = existing["summary_ru"]
+            angle_ru_to_store = existing["angle_ru"]
+            reason_ru_to_store = existing["reason_ru"]
+            original_description_to_store = existing["original_description"]
+            normalized_title_to_store = existing["normalized_title"]
+            canonical_key_to_store = existing["canonical_key"]
+            source_group_to_store = existing["source_group"]
+            lane_to_store = existing["editorial_lane"]
+            lane_reason_to_store = existing["editorial_reason"]
+            content_format_to_store = existing["content_format"]
         conn.execute(
             """
             UPDATE topic_candidates
             SET last_seen_at = CURRENT_TIMESTAMP,
+                title = ?,
+                url = ?,
+                source = ?,
+                published_at = ?,
                 category = ?,
                 score = ?,
                 reason = ?,
                 deterministic_score = ?,
-                title_ru = COALESCE(NULLIF(?, ''), title_ru),
-                summary_ru = COALESCE(NULLIF(?, ''), summary_ru),
-                angle_ru = COALESCE(NULLIF(?, ''), angle_ru),
-                reason_ru = COALESCE(NULLIF(?, ''), reason_ru),
-                original_description = COALESCE(NULLIF(?, ''), original_description),
-                normalized_title = COALESCE(NULLIF(normalized_title, ''), ?),
-                canonical_key = COALESCE(NULLIF(canonical_key, ''), ?),
-                source_group = COALESCE(source_group, ?),
+                title_ru = ?,
+                summary_ru = ?,
+                angle_ru = ?,
+                reason_ru = ?,
+                original_description = ?,
+                normalized_title = ?,
+                canonical_key = ?,
+                source_group = ?,
                 related_sources = ?,
                 related_urls = ?,
                 related_count = ?,
-                editorial_lane = COALESCE(NULLIF(editorial_lane, ''), ?),
-                editorial_reason = COALESCE(NULLIF(editorial_reason, ''), ?),
-                content_format = COALESCE(NULLIF(content_format, ''), ?)
+                editorial_lane = ?,
+                editorial_reason = ?,
+                content_format = ?,
+                ai_value_score = CASE WHEN ? THEN NULL ELSE ai_value_score END,
+                ai_value_reason_ru = CASE WHEN ? THEN NULL ELSE ai_value_reason_ru END,
+                audience_fit_ru = CASE WHEN ? THEN NULL ELSE audience_fit_ru END,
+                metadata_source = CASE WHEN ? THEN 'deterministic' ELSE metadata_source END
             WHERE id = ?
             """,
             (
+                title_to_store,
+                url_to_store,
+                source_to_store,
+                published_at_to_store,
                 category_to_store,
                 score_to_store,
                 reason_to_store,
-                int(score_to_store or 0),
+                deterministic_score_to_store,
                 title_ru_to_store,
                 summary_ru_to_store,
                 angle_ru_to_store,
                 reason_ru_to_store,
                 original_description_to_store,
-                normalized_title,
-                canonical_key,
-                source_group,
+                normalized_title_to_store,
+                canonical_key_to_store,
+                source_group_to_store,
                 existing_sources,
                 existing_urls,
                 related_count,
-                lane,
-                lane_reason,
-                content_format,
+                lane_to_store,
+                lane_reason_to_store,
+                content_format_to_store,
+                clear_ai_metadata,
+                clear_ai_metadata,
+                clear_ai_metadata,
+                clear_ai_metadata,
                 int(existing["id"]),
             ),
         )
+
+    @staticmethod
+    def _find_topic_candidate_by_url_conn(conn: sqlite3.Connection, url: str) -> sqlite3.Row | None:
+        return conn.execute(
+            """
+            SELECT * FROM topic_candidates
+            WHERE url = ?
+               OR instr(char(10) || COALESCE(related_urls, '') || char(10),
+                        char(10) || ? || char(10)) > 0
+            ORDER BY CASE WHEN url = ? THEN 0 ELSE 1 END
+            LIMIT 1
+            """,
+            (url, url, url),
+        ).fetchone()
 
     def _find_similar_topic_candidate(self, conn: sqlite3.Connection, canonical_key: str) -> sqlite3.Row | None:
         if not canonical_key:
@@ -945,10 +1023,7 @@ class DraftDatabase:
         lane, lane_reason = editorial_lane_for_topic(title, source, url, source_group, original_description, category, score)
         content_format = content_format_for_lane(lane, score)
         with self._connect() as conn:
-            existing = conn.execute(
-                "SELECT * FROM topic_candidates WHERE url = ?",
-                (url,),
-            ).fetchone()
+            existing = self._find_topic_candidate_by_url_conn(conn, url)
             if existing:
                 self._merge_topic_candidate_row(
                     conn,
@@ -956,6 +1031,7 @@ class DraftDatabase:
                     title=title,
                     url=url,
                     source=source,
+                    published_at=published_at,
                     category=category,
                     score=score,
                     reason=reason,
@@ -993,6 +1069,7 @@ class DraftDatabase:
                     title=title,
                     url=url,
                     source=source,
+                    published_at=published_at,
                     category=category,
                     score=score,
                     reason=reason,
@@ -1189,23 +1266,26 @@ class DraftDatabase:
         self, limit: int = 10, status: str | None = "new", order_by_score: bool = True
     ) -> list[dict[str, Any]]:
         with self._connect() as conn:
-            where_clause = "WHERE status = ?" if status is not None else ""
-            params: tuple[Any, ...] = (status, limit) if status is not None else (limit,)
-            order_by = "ORDER BY score DESC, created_at DESC" if order_by_score else "ORDER BY created_at DESC"
-            rows = conn.execute(
-                """
-                SELECT *
-                FROM topic_candidates
-                """
-                + where_clause
-                + """
-                """
-                + order_by
-                + """
-                LIMIT ?
-                """,
-                params,
-            ).fetchall()
+            if status is not None and order_by_score:
+                rows = conn.execute(
+                    "SELECT * FROM topic_candidates WHERE status = ? ORDER BY score DESC, created_at DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
+            elif status is not None:
+                rows = conn.execute(
+                    "SELECT * FROM topic_candidates WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
+            elif order_by_score:
+                rows = conn.execute(
+                    "SELECT * FROM topic_candidates ORDER BY score DESC, created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM topic_candidates ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
             return [dict(row) for row in rows]
 
 
@@ -1234,7 +1314,7 @@ class DraftDatabase:
             where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
             params.append(limit)
             rows = conn.execute(
-                "SELECT * FROM topic_candidates " + where_clause + " ORDER BY score DESC, created_at DESC LIMIT ?",
+                "SELECT * FROM topic_candidates " + where_clause + " ORDER BY score DESC, created_at DESC LIMIT ?",  # nosec B608
                 tuple(params),
             ).fetchall()
             return [dict(row) for row in rows]
@@ -1269,7 +1349,7 @@ class DraftDatabase:
                 params.append(min_score)
             where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
             params.append(limit)
-            rows = conn.execute("SELECT * FROM topic_candidates " + where_clause + " ORDER BY score DESC, created_at DESC LIMIT ?", tuple(params)).fetchall()
+            rows = conn.execute("SELECT * FROM topic_candidates " + where_clause + " ORDER BY score DESC, created_at DESC LIMIT ?", tuple(params)).fetchall()  # nosec B608
             return [dict(r) for r in rows]
 
     def list_topic_candidates_min_score(self, limit: int = 15, status: str = "new", min_score: int = 75) -> list[dict[str, Any]]:
@@ -1325,8 +1405,15 @@ class DraftDatabase:
 
     def find_topic_candidate_by_url(self, url: str) -> dict[str, Any] | None:
         with self._connect() as conn:
-            row = conn.execute("SELECT * FROM topic_candidates WHERE url = ?", (url,)).fetchone()
+            row = self._find_topic_candidate_by_url_conn(conn, url)
             return dict(row) if row else None
+
+    def delete_topic_candidate(self, topic_id: int) -> bool:
+        """Delete a temporary candidate that failed the editorial relevance gate."""
+        with self._connect() as conn:
+            cursor = conn.execute("DELETE FROM topic_candidates WHERE id = ?", (topic_id,))
+            conn.commit()
+            return cursor.rowcount > 0
 
     def update_topic_status(self, topic_id: int, status: str) -> None:
         with self._connect() as conn:

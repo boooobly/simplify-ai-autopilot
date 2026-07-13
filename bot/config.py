@@ -27,6 +27,9 @@ class Settings:
     model_draft: str = "moonshotai/kimi-k2.6"
     model_topic_enrich: str = "tencent/hy3-preview"
     model_polish: str = "anthropic/claude-sonnet-4.5"
+    openai_model_draft: str = "gpt-4.1-mini"
+    openai_model_topic_enrich: str = "gpt-4.1-mini"
+    openai_model_polish: str = "gpt-4.1-mini"
     openrouter_site_url: str | None = None
     openrouter_app_name: str = "Simplify AI Autopilot"
     db_path: str = "data/drafts.db"
@@ -35,7 +38,6 @@ class Settings:
     post_soft_chars: int = 1100
     max_topic_age_days: int = 14
     topic_ai_enrich_limit: int = 8
-    topic_ai_translate_limit: int = 8
     enable_reddit_sources: bool = False
     enable_x_sources: bool = False
     enable_telegram_channel_sources: bool = False
@@ -302,6 +304,8 @@ def _validate_db_path_parent(db_path: str) -> None:
 
 
 def _ai_provider_label(openrouter_api_key: str | None, openai_api_key: str | None) -> str:
+    if openrouter_api_key and openai_api_key:
+        return "OpenRouter -> OpenAI fallback"
     if openrouter_api_key:
         return "OpenRouter"
     if openai_api_key:
@@ -316,12 +320,14 @@ def startup_diagnostics(settings: Settings) -> list[str]:
         f"model_draft: {settings.model_draft}",
         f"model_topic_enrich: {settings.model_topic_enrich}",
         f"model_polish: {settings.model_polish}",
+        f"openai_model_draft: {settings.openai_model_draft}",
+        f"openai_model_topic_enrich: {settings.openai_model_topic_enrich}",
+        f"openai_model_polish: {settings.openai_model_polish}",
         f"schedule_timezone: {settings.schedule_timezone}",
         f"daily_post_slots: {', '.join(settings.daily_post_slots)}",
         f"post_soft_chars/post_max_chars: {settings.post_soft_chars}/{settings.post_max_chars}",
         f"max_topic_age_days: {settings.max_topic_age_days}",
         f"topic_ai_enrich_limit: {settings.topic_ai_enrich_limit}",
-        f"topic_ai_translate_limit: {settings.topic_ai_translate_limit}",
         f"enable_reddit_sources: {settings.enable_reddit_sources}",
         f"enable_x_sources: {settings.enable_x_sources}",
         f"x_accounts count: {len(settings.x_accounts)}",
@@ -356,6 +362,9 @@ def load_settings() -> Settings:
     model_draft = os.getenv("MODEL_DRAFT", "moonshotai/kimi-k2.6").strip() or "moonshotai/kimi-k2.6"
     model_topic_enrich = os.getenv("MODEL_TOPIC_ENRICH", "tencent/hy3-preview").strip() or "tencent/hy3-preview"
     model_polish = os.getenv("MODEL_POLISH", "anthropic/claude-sonnet-4.5").strip() or "anthropic/claude-sonnet-4.5"
+    openai_model_draft = os.getenv("OPENAI_MODEL_DRAFT", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
+    openai_model_topic_enrich = os.getenv("OPENAI_MODEL_TOPIC_ENRICH", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
+    openai_model_polish = os.getenv("OPENAI_MODEL_POLISH", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
     openrouter_site_url_raw = os.getenv("OPENROUTER_SITE_URL", "").strip()
     openrouter_site_url = openrouter_site_url_raw or None
     openrouter_app_name = os.getenv("OPENROUTER_APP_NAME", "Simplify AI Autopilot").strip() or "Simplify AI Autopilot"
@@ -377,7 +386,6 @@ def load_settings() -> Settings:
     custom_emoji_aliases = _parse_custom_emoji_aliases(os.getenv("CUSTOM_EMOJI_ALIASES", ""), config_warnings)
     max_topic_age_days = _parse_int_range_env("MAX_TOPIC_AGE_DAYS", 14, 1, 60, config_warnings)
     topic_ai_enrich_limit = _parse_int_range_env("TOPIC_AI_ENRICH_LIMIT", 8, 0, 30, config_warnings)
-    topic_ai_translate_limit = _parse_int_range_env("TOPIC_AI_TRANSLATE_LIMIT", 8, 0, 30, config_warnings)
     enable_reddit_sources = _parse_bool_env("ENABLE_REDDIT_SOURCES", False)
     enable_x_sources = _parse_bool_env("ENABLE_X_SOURCES", False)
     x_api_bearer_token = os.getenv("X_API_BEARER_TOKEN", "").strip()
@@ -453,6 +461,9 @@ def load_settings() -> Settings:
         model_draft=model_draft,
         model_topic_enrich=model_topic_enrich,
         model_polish=model_polish,
+        openai_model_draft=openai_model_draft,
+        openai_model_topic_enrich=openai_model_topic_enrich,
+        openai_model_polish=openai_model_polish,
         openrouter_site_url=openrouter_site_url,
         openrouter_app_name=openrouter_app_name,
         db_path=db_path,
@@ -461,7 +472,6 @@ def load_settings() -> Settings:
         post_soft_chars=post_soft_chars,
         max_topic_age_days=max_topic_age_days,
         topic_ai_enrich_limit=topic_ai_enrich_limit,
-        topic_ai_translate_limit=topic_ai_translate_limit,
         enable_reddit_sources=enable_reddit_sources,
         enable_x_sources=enable_x_sources,
         x_api_bearer_token=x_api_bearer_token,

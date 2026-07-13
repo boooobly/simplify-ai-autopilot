@@ -60,6 +60,32 @@ from bot.source_handlers import sources_status_command
 from bot.telegram_safety import safe_send_message
 
 
+class SecretRedactionFilter(logging.Filter):
+    """Remove configured credentials from records before handlers format them."""
+
+    def __init__(self, secrets: list[str] | tuple[str, ...]) -> None:
+        super().__init__()
+        self._secrets = tuple(secret for secret in secrets if secret)
+
+    def _redact(self, message: str) -> str:
+        for secret in self._secrets:
+            message = message.replace(secret, "[REDACTED]")
+        return re.sub(r"/bot[\w:-]{10,}", "/bot[REDACTED]", message)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = self._redact(record.getMessage())
+        record.args = ()
+        if record.exc_info:
+            # Format once here, redact the complete traceback (including the
+            # exception value), then prevent the formatter from recreating the
+            # unredacted traceback from exc_info.
+            record.exc_text = self._redact(logging.Formatter().formatException(record.exc_info))
+            record.exc_info = None
+        if record.stack_info:
+            record.stack_info = self._redact(record.stack_info)
+        return True
+
+
 def setup_logging() -> None:
     token = (os.getenv("BOT_TOKEN") or "").strip()
     secrets = [
@@ -70,23 +96,18 @@ def setup_logging() -> None:
         (os.getenv("OPENAI_API_KEY") or "").strip(),
     ]
 
-    class _RedactSecretsFilter(logging.Filter):
-        def filter(self, record: logging.LogRecord) -> bool:
-            message = record.getMessage()
-            for secret in secrets:
-                if secret:
-                    message = message.replace(secret, "[REDACTED]")
-            message = re.sub(r"/bot[\w:-]{10,}", "/bot[REDACTED]", message)
-            record.msg = message
-            record.args = ()
-            return True
-
     logging.basicConfig(
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
     )
     for name in ("httpx", "httpcore", "telegram", "telegram.ext"):
         logging.getLogger(name).setLevel(logging.WARNING)
-    logging.getLogger().addFilter(_RedactSecretsFilter())
+    root_logger = logging.getLogger()
+    redactor = SecretRedactionFilter(secrets)
+    # Filters attached only to a logger are not applied to records propagated
+    # from child loggers. Put the filter on every output handler as well.
+    root_logger.addFilter(redactor)
+    for handler in root_logger.handlers:
+        handler.addFilter(redactor)
 
 
 

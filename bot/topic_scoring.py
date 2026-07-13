@@ -21,17 +21,21 @@ _MIN_FUZZY_KEY_LENGTH = 16
 _MIN_FUZZY_TOKEN_COUNT = 3
 _TOPIC_KEY_SIMILARITY_THRESHOLD = 0.86
 
-# Score scale: 85-100 = very strong, 70-84 = good, 50-69 = maybe useful, <50 = usually skip.
-_SOURCE_GROUP_BOOST = {
-    "official_ai": 0,
-    "tech_media": 4,
-    "ru_tech": 8,
-    "tools": 14,
-    "community": 14,
-    "github": 8,
-    "x": 10,
-    "custom": 8,
-    "telegram": 12,
+# Score scale: 85-98 = very strong, 70-84 = good, 50-69 = review, <50 = skip.
+# A source is evidence, not relevance by itself. Broad feeds intentionally start
+# lower so that a generic hardware or business story cannot enter the queue just
+# because it came from a popular publication.
+_SOURCE_GROUP_BASE = {
+    "official_ai": 38,
+    "tech_media": 36,
+    "ru_tech": 30,
+    "tools": 36,
+    "community": 30,
+    "github": 40,
+    "x": 30,
+    "custom": 30,
+    "telegram": 30,
+    "other": 28,
 }
 
 _UNRELIABLE_DATE_GROUPS = {"github", "tools", "community", "x"}
@@ -53,8 +57,24 @@ _SPAM_KEYWORDS = ["casino", "betting", "sportsbook", "porn", "xxx", "viagra", "c
 _RESEARCH_KEYWORDS = ["paper", "research", "arxiv", "study", "dataset", "eval", "benchmark", "исследован", "датасет"]
 _NARROW_DEV_KEYWORDS = ["library", "framework", "sdk", "api wrapper", "bindings", "kernel", "compiler", "runtime", "orm", "kubernetes", "ansible", "devops", "pgvector", "vector database", "vector search", "semantic search", "hybrid search", "sparse", "quantized", "terraform"]
 _USER_IMPACT_KEYWORDS = ["privacy", "leak", "hack", "lawsuit", "ban", "tracking", "data breach", "утеч", "взлом", "бан", "слеж"]
+_EFFICIENCY_KEYWORDS = ["faster", "cheaper", "efficiency", "efficient", "optimization", "lower cost", "cuts token", "ускор", "дешевле", "эконом"]
 _MAJOR_AI_BRANDS = ["openai", "chatgpt", "anthropic", "claude", "google", "gemini", "meta", "llama", "perplexity", "adobe", "apple", "microsoft", "copilot", "sora", "runway", "midjourney"]
 _TECHNICAL_TUTORIAL_KEYWORDS = ["ansible", "kubernetes", "devops", "pgvector", "vector database", "vector search", "semantic search", "hybrid search", "sparse", "quantized", "benchmark", "benchmarks", "infrastructure", "deployment", "postgres", "docker", "terraform", "llmops", "rag pipeline"]
+
+_PREFIX_KEYWORDS = {
+    "автоматизац", "бан", "бесплат", "ваканси", "вебинар", "взлом", "выручк", "датасет",
+    "инвестиц", "исследован", "конференц", "необычн", "оценен", "поглощен", "подписывай",
+    "регулирован", "слеж", "утеч",
+}
+_AI_RELEVANCE_KEYWORDS = [
+    "ai", "ии", "artificial intelligence", "machine learning", "generative ai", "neural network",
+    "language model", "large language model", "llm", "multimodal", "diffusion model", "computer vision",
+    "speech synthesis", "text to image", "text to video", "inference", "embedding", "embeddings", "rag",
+    "prompt", "chatbot", "copilot", "mcp", "openai", "chatgpt", "anthropic", "claude", "gemini",
+    "llama", "mistral", "qwen", "perplexity", "midjourney", "sora", "runway", "нейросет",
+    "искусственный интеллект", "машинное обучение", "языковая модель", "генеративн", "промпт",
+    "чат бот", "чатбот", "компьютерное зрение", "синтез речи",
+]
 
 
 
@@ -103,8 +123,40 @@ def normalize_topic_title(title: str) -> str:
     return " ".join(words)
 
 
+def _normalize_match_text(text: str) -> str:
+    """Normalize text for boundary-aware keyword and phrase matching."""
+    return " ".join(_TOPIC_KEY_TOKEN_RE.findall((text or "").casefold()))
+
+
+def _keyword_matches(normalized_text: str, keyword: str) -> bool:
+    normalized_keyword = _normalize_match_text(keyword)
+    if not normalized_keyword:
+        return False
+    if keyword.casefold() in _PREFIX_KEYWORDS:
+        return any(token.startswith(normalized_keyword) for token in normalized_text.split())
+    if " " not in normalized_keyword and len(normalized_keyword) >= 4:
+        tokens = set(normalized_text.split())
+        if normalized_keyword in tokens or f"{normalized_keyword}s" in tokens or f"{normalized_keyword}es" in tokens:
+            return True
+    return f" {normalized_keyword} " in f" {normalized_text} "
+
+
 def _has_any(text: str, keywords: list[str]) -> bool:
-    return any(k in text for k in keywords)
+    normalized = _normalize_match_text(text)
+    return any(_keyword_matches(normalized, keyword) for keyword in keywords)
+
+
+def _count_matches(text: str, keywords: list[str]) -> int:
+    normalized = _normalize_match_text(text)
+    return sum(1 for keyword in keywords if _keyword_matches(normalized, keyword))
+
+
+def has_ai_relevance_signal(text: str) -> bool:
+    """Return whether content explicitly concerns AI, without substring matches.
+
+    In particular, ``ai`` no longer matches words such as ``train`` or ``retail``.
+    """
+    return _has_any(text, _AI_RELEVANCE_KEYWORDS)
 
 
 def _parse_score_datetime(value: str | None) -> datetime | None:
@@ -135,8 +187,8 @@ def _extract_first_int(value: str | None) -> int:
 
 
 def _score_github_topic(title: str, source: str, url: str, description: str, stars_today: str | None) -> tuple[int, str, list[str]]:
-    text = f"{title} {source} {url} {description}".lower()
-    score = 48 + _SOURCE_GROUP_BOOST["github"]
+    text = f"{title} {description}".lower()
+    score = _SOURCE_GROUP_BASE["github"]
     reasons: list[str] = ["GitHub без автотопа"]
     category = "dev"
 
@@ -147,7 +199,7 @@ def _score_github_topic(title: str, source: str, url: str, description: str, sta
         score -= 22
         reasons.append("штраф: GitHub без описания")
 
-    practical_hits = sum(1 for keyword in _GITHUB_PRACTICAL_KEYWORDS if keyword in text)
+    practical_hits = _count_matches(text, _GITHUB_PRACTICAL_KEYWORDS)
     if practical_hits:
         score += min(24, 7 + practical_hits * 4)
         reasons.append("понятная практическая польза")
@@ -189,20 +241,29 @@ def score_topic(
     published_at: str | None = None,
     stars_today: str | None = None,
 ) -> tuple[int, str, str]:
-    text = f"{title} {source} {url} {description or ''}".lower()
+    text = f"{title} {description or ''}".lower()
+    source_context = f"{source} {url}".lower()
     source_group = (source_group or "other").strip().lower()
+    has_ai_signal = has_ai_relevance_signal(text)
     if source_group == "github":
         score, category, reason_parts = _score_github_topic(title, source, url, description or "", stars_today)
     else:
-        score = 45 + _SOURCE_GROUP_BOOST.get(source_group, 0)
+        score = _SOURCE_GROUP_BASE.get(source_group, _SOURCE_GROUP_BASE["other"])
         reason_parts: list[str] = []
         category = "other"
 
-        if _has_any(text, _SPAM_KEYWORDS + ["airdrop", "token", "nft"]):
+        if _has_any(text, _SPAM_KEYWORDS):
             score -= 45
             reason_parts.append("штраф: спам/крипта")
+        if has_ai_signal:
+            score += 12
+            reason_parts.append("явная связь с AI")
+        if has_ai_signal and _has_any(text, _EFFICIENCY_KEYWORDS):
+            score += 8
+            category = "model"
+            reason_parts.append("практическое улучшение скорости/стоимости")
         if _has_any(text, _USER_IMPACT_KEYWORDS + ["drama", "fail", "bug"]):
-            score += 24
+            score += 18
             category = "privacy" if _has_any(text, ["privacy", "data", "tracking", "leak", "утеч", "слеж"]) else "drama"
             reason_parts.append("затрагивает пользователей")
         is_technical_tutorial = _has_any(text, _TECHNICAL_TUTORIAL_KEYWORDS) and not _has_any(text, _MAJOR_AI_BRANDS + ["product hunt", "chatgpt", "consumer", "app", "tool", "video", "image", "audio"])
@@ -212,44 +273,44 @@ def score_topic(
                 category = "dev"
                 reason_parts.append("штраф: узкий devops/tutorial")
             else:
-                score += 18
+                score += 15
                 category = "guide"
                 reason_parts.append("можно сделать мини-гайд")
         if _has_any(text, ["creator", "image", "video", "audio", "voice", "avatar", "music", "design", "editor"]):
-            score += 20
+            score += 14
             category = "creator"
             reason_parts.append("креаторский инструмент")
         if _has_any(text, ["ios", "android", "mobile", "app", "chrome extension", "browser extension"]):
-            score += 16
+            score += 10
             category = "mobile"
             reason_parts.append("приложение/расширение")
         if _has_any(text, ["tool", "service", "website", "platform", "plugin", "extension", "automation"]):
-            score += 16
+            score += 12
             if category == "other":
                 category = "tool"
             reason_parts.append("понятный инструмент")
         if _has_any(text, ["launch", "launched", "release", "released", "demo", "beta", "product hunt"]):
-            score += 10
+            score += 8
             if category == "other":
                 category = "news"
             reason_parts.append("релиз/демо")
         if _has_any(text, ["agent", "agents", "computer use", "operator", "workflow"]):
-            score += 14
+            score += 12
             category = "agent"
             reason_parts.append("AI-агенты/процессы")
         if _has_any(text, ["free", "open-source", "open source", "бесплат"]):
-            score += 12
+            score += 8
             reason_parts.append("бесплатно/open-source")
         if _has_any(text, ["reddit", "x.com", "twitter", "tiktok", "viral", "meme", "weird", "strange", "необычн", "мем"]):
-            score += 14
+            score += 6
             category = "meme" if category == "other" else category
             reason_parts.append("соцсети/вирусность")
         if _has_any(text, _MAJOR_AI_BRANDS + ["gpt", "claude", "gemini", "llama", "mistral", "qwen", "model"]):
             if _has_any(text, ["app", "tool", "api", "free", "voice", "image", "video", "faster", "cheaper", "local"]):
-                score += 12
+                score += 6
                 reason_parts.append("модель с практическим смыслом")
             else:
-                score += 6
+                score += 4
             if category == "other":
                 category = "model"
         if _has_any(text, _TECHNICAL_TUTORIAL_KEYWORDS) and not _has_any(text, _MAJOR_AI_BRANDS + ["product hunt", "consumer", "app", "tool", "image", "video", "audio", "agent"]):
@@ -257,20 +318,20 @@ def score_topic(
             if category == "other":
                 category = "dev"
             reason_parts.append("штраф: слишком техническая тема")
-        if "marktechpost" in text and _has_any(text, _TECHNICAL_TUTORIAL_KEYWORDS + ["tutorial", "how to design", "how to build"]):
+        if "marktechpost" in source_context and _has_any(text, _TECHNICAL_TUTORIAL_KEYWORDS + ["tutorial", "how to design", "how to build"]):
             score -= 16
             reason_parts.append("штраф: MarkTechPost tutorial/devops")
         if _has_any(text, _MAJOR_AI_BRANDS) and _has_any(text, ["launch", "launched", "release", "released", "introduces", "unveils", "new", "update", "tool", "feature"]):
-            score += 16
+            score += 12
             reason_parts.append("крупный релиз AI-продукта")
         if source_group == "tools" and _has_any(text, ["product hunt", "app", "tool", "service", "workflow", "image", "video", "audio", "assistant"]):
-            score += 10
+            score += 6
             if category == "other":
                 category = "tool"
             reason_parts.append("практичный AI-инструмент")
         if _has_any(text, _RESEARCH_KEYWORDS):
             if _has_any(text, ["tool", "demo", "app", "benchmark", "faster", "cheaper", "open-source", "open source"]):
-                score += 6
+                score += 2
             else:
                 score -= 12
                 reason_parts.append("штраф: исследование без понятной пользы")
@@ -280,6 +341,14 @@ def score_topic(
             score -= 28
             category = "business"
             reason_parts.append("штраф: корпоративная новость")
+        if source_group == "official_ai" and re.match(
+            r"^\s*how\s+(?!to\b).+\s+(?:uses?|used|is|built|builds|transforms?|rewir(?:e|es|ing))\b",
+            title,
+            re.IGNORECASE,
+        ):
+            score -= 24
+            category = "business"
+            reason_parts.append("штраф: клиентский кейс/корпоративный PR")
         if _has_any(text, ["policy", "regulation", "senate", "law", "закон", "регулирован"]):
             if _has_any(text, _USER_IMPACT_KEYWORDS):
                 score += 4
@@ -295,6 +364,13 @@ def score_topic(
             if _has_any(text, ["подписывай", "join", "реклама", "promo", "розыгрыш", "airdrop", "casino", "ваканси", "webinar", "вебинар"]):
                 score -= 18
                 reason_parts.append("штраф: telegram promo/bait")
+
+    # Official AI product blogs are already scoped. Every broad or mixed source
+    # must say what the AI connection is in the actual title/description.
+    if source_group != "official_ai" and not has_ai_signal:
+        score = min(score, 39)
+        category = "other"
+        reason_parts.append("штраф: нет явного AI-сигнала")
 
     parsed_dt = _parse_score_datetime(published_at)
     if parsed_dt:
@@ -315,7 +391,7 @@ def score_topic(
     elif len(title) > 120:
         score -= 6
 
-    score = max(0, min(100, score))
+    score = max(0, min(98, score))
     if not reason_parts:
         reason_parts.append("нейтральная тема")
     return score, category, ", ".join(dict.fromkeys(reason_parts))
@@ -382,10 +458,11 @@ def content_format_for_lane(lane: str, score: int) -> str:
     return "post"
 
 def hybrid_topic_score(deterministic_score: int, ai_score: int | None) -> int:
-    """Blend deterministic and AI topic value scores conservatively.
+    """Blend deterministic signals with an editorial AI assessment.
 
-    The deterministic score remains the baseline. AI may move it only through
-    the weighted blend and never by more than 15 points in either direction.
+    AI receives enough weight to correct a keyword false positive or rescue a
+    borderline story, while a 30-point guardrail prevents a single model answer
+    from completely replacing deterministic evidence.
     """
     baseline = max(0, min(100, int(deterministic_score or 0)))
     if ai_score is None:
@@ -395,8 +472,8 @@ def hybrid_topic_score(deterministic_score: int, ai_score: int | None) -> int:
     except (TypeError, ValueError):
         return baseline
     ai_value = max(0, min(100, ai_value))
-    weighted = round(baseline * 0.65 + ai_value * 0.35)
-    clamped_delta = max(-15, min(15, weighted - baseline))
+    weighted = round(baseline * 0.55 + ai_value * 0.45)
+    clamped_delta = max(-30, min(30, weighted - baseline))
     return max(0, min(100, baseline + clamped_delta))
 
 def humanize_topic_reason_ru(category: str, score: int, source_group: str, reason: str) -> str:

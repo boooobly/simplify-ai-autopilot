@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from bot.handlers import _scheduled_at_for_slot, _select_daily_plan_topics
 
 
@@ -11,12 +13,13 @@ class FakeDB:
 
 
 def run() -> None:
+    fresh = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     topics = [
-        {"id": 1, "score": 95, "category": "tool", "source_group": "tools", "title": "t1", "source": "s", "url": "u1"},
-        {"id": 2, "score": 93, "category": "news", "source_group": "tech_media", "title": "t2", "source": "s", "url": "u2"},
-        {"id": 3, "score": 91, "category": "meme", "source_group": "community", "title": "t3", "source": "s", "url": "u3"},
-        {"id": 4, "score": 90, "category": "tool", "source_group": "tools", "title": "t4", "source": "s", "url": "u4"},
-        {"id": 5, "score": 89, "category": "model", "source_group": "official_ai", "title": "t5", "source": "s", "url": "u5"},
+        {"id": 1, "score": 95, "category": "tool", "source_group": "tools", "title": "t1", "source": "s", "url": "u1", "published_at": fresh},
+        {"id": 2, "score": 93, "category": "news", "source_group": "tech_media", "title": "t2", "source": "s", "url": "u2", "published_at": fresh},
+        {"id": 3, "score": 91, "category": "meme", "source_group": "community", "title": "t3", "source": "s", "url": "u3", "published_at": fresh},
+        {"id": 4, "score": 90, "category": "tool", "source_group": "tools", "title": "t4", "source": "s", "url": "u4", "published_at": fresh},
+        {"id": 5, "score": 89, "category": "model", "source_group": "official_ai", "title": "t5", "source": "s", "url": "u5", "published_at": fresh},
     ]
     db = FakeDB(topics)
     selected = _select_daily_plan_topics(db, limit=4)
@@ -30,6 +33,8 @@ def run() -> None:
         {"id": 13, "score": 97, "category": "tool", "source_group": "tools", "title": "c", "source": "s", "url": "uc"},
         {"id": 14, "score": 96, "category": "tool", "source_group": "tools", "title": "d", "source": "s", "url": "ud"},
     ]
+    for topic in same_group_topics:
+        topic["published_at"] = fresh
     same_group_selected = _select_daily_plan_topics(FakeDB(same_group_topics), limit=4)
     same_group_ids = [int(t["id"]) for t in same_group_selected]
     assert len(same_group_selected) == 4
@@ -41,6 +46,8 @@ def run() -> None:
         {"id": 22, "score": 97, "category": "model", "source_group": "official_ai", "title": "c", "source": "s", "url": "uc"},
         {"id": 23, "score": 96, "category": "meme", "source_group": "community", "title": "d", "source": "s", "url": "ud"},
     ]
+    for topic in duplicate_topics:
+        topic["published_at"] = fresh
     duplicate_selected = _select_daily_plan_topics(FakeDB(duplicate_topics), limit=3)
     duplicate_ids = [int(t["id"]) for t in duplicate_selected]
     assert len(duplicate_selected) == 3
@@ -53,6 +60,8 @@ def run() -> None:
         {"id": 34, "score": 96, "category": "tool", "source_group": "tools", "title": "d", "source": "s", "url": "u4"},
         {"id": 35, "score": 95, "category": "tool", "source_group": "tools", "title": "e", "source": "s", "url": "u5"},
     ]
+    for topic in relaxed_fill_topics:
+        topic["published_at"] = fresh
     relaxed_selected = _select_daily_plan_topics(FakeDB(relaxed_fill_topics), limit=5)
     assert len(relaxed_selected) == 5
 

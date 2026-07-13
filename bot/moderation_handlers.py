@@ -98,7 +98,7 @@ class ModerationCallbackDeps:
     get_pending_media: Callable[[Any], int | None]
     set_pending_media: Callable[[Any, int], None]
     send_moderation_preview: Callable[..., Awaitable[None]]
-    resolve_ai_provider: Callable[[Any], tuple[str, str, str | None, dict[str, str] | None]]
+    resolve_ai_request: Callable[[Any, str], Any]
     run_rewrite_post_draft: Callable[..., Awaitable[Any]]
     run_polish_post_draft: Callable[..., Awaitable[Any]]
     rewrite_test_draft: Callable[[str], str]
@@ -158,6 +158,20 @@ async def handle_draft_moderation_callback(
                 settings.custom_emoji_aliases,
             )
         except Exception as exc:
+            partial_message_ids = list(getattr(exc, "message_ids", []) or [])
+            if partial_message_ids:
+                db.mark_draft_published(
+                    draft_id,
+                    channel_id=settings.channel_id,
+                    message_ids=partial_message_ids,
+                    error=f"PartialPublish:{type(getattr(exc, 'cause', exc)).__name__}",
+                )
+                await deps.edit_callback_message(
+                    query,
+                    f"⚠️ Черновик #{draft_id} опубликован частично ({len(partial_message_ids)} сообщений). "
+                    "Повторная отправка заблокирована, чтобы не создать дубли. Проверь канал вручную.",
+                )
+                return True
             db.mark_draft_failed(draft_id, error=type(exc).__name__)
             raise
         db.mark_draft_published(draft_id, channel_id=settings.channel_id, message_ids=publish_result.message_ids)
@@ -535,27 +549,30 @@ async def handle_draft_moderation_callback(
             return True
         config = _rewrite_action_config(action)
         await deps.edit_callback_message(query, config["progress"].format(draft_id=draft_id))
-        api_key, provider, base_url, extra_headers = deps.resolve_ai_provider(settings)
-        logger.info("rewrite provider=%s model=%s mode=%s", provider, settings.model_polish, config["mode"])
+        route = deps.resolve_ai_request(settings, "polish")
+        logger.info("rewrite provider=%s model=%s mode=%s", route.provider, route.model, config["mode"])
         try:
             rewritten = await deps.run_rewrite_post_draft(
-                api_key,
-                model=settings.model_polish,
+                route.api_key,
+                model=route.model,
                 draft_text=draft["content"],
                 source_url=draft.get("source_url"),
                 mode=config["mode"],
                 max_chars=settings.post_max_chars,
                 soft_chars=settings.post_soft_chars,
-                base_url=base_url,
-                extra_headers=extra_headers,
+                base_url=route.base_url,
+                extra_headers=route.extra_headers,
+                provider=route.provider,
+                fallback=route.fallback,
             )
         except EmptyAIResponseError:
             await deps.edit_callback_message(query, deps.empty_ai_reply_text.replace("Черновик не создан", "Черновик не обновлён"))
             return True
-        estimated_cost = deps.estimate_ai_cost(provider, rewritten.prompt_tokens, rewritten.completion_tokens, settings)
+        used_provider = rewritten.provider or route.provider
+        estimated_cost = deps.estimate_ai_cost(used_provider, rewritten.prompt_tokens, rewritten.completion_tokens, settings)
         db.record_ai_usage(
-            provider=provider,
-            model=rewritten.model or settings.model_polish,
+            provider=used_provider,
+            model=rewritten.model or route.model,
             operation=config["operation"],
             prompt_tokens=rewritten.prompt_tokens,
             completion_tokens=rewritten.completion_tokens,
@@ -566,8 +583,8 @@ async def handle_draft_moderation_callback(
         )
         logger.info(
             "AI usage provider=%s model=%s operation=%s prompt=%s completion=%s total=%s cost=%s",
-            provider,
-            rewritten.model or settings.model_polish,
+            used_provider,
+            rewritten.model or route.model,
             config["operation"],
             rewritten.prompt_tokens,
             rewritten.completion_tokens,
@@ -605,25 +622,28 @@ async def handle_draft_moderation_callback(
             await deps.edit_callback_message(query, "AI-провайдер не настроен.")
             return True
         await deps.edit_callback_message(query, "Улучшаю текст через Claude...")
-        api_key, provider, base_url, extra_headers = deps.resolve_ai_provider(settings)
-        logger.info("polish provider=%s model=%s", provider, settings.model_polish)
+        route = deps.resolve_ai_request(settings, "polish")
+        logger.info("polish provider=%s model=%s", route.provider, route.model)
         polished = await deps.run_polish_post_draft(
-            api_key,
-            model=settings.model_polish,
+            route.api_key,
+            model=route.model,
             draft_text=draft["content"],
             source_url=draft.get("source_url"),
             max_chars=settings.post_max_chars,
             soft_chars=settings.post_soft_chars,
-            base_url=base_url,
-            extra_headers=extra_headers,
+            base_url=route.base_url,
+            extra_headers=route.extra_headers,
+            provider=route.provider,
+            fallback=route.fallback,
         )
-        estimated_cost = deps.estimate_ai_cost(provider, polished.prompt_tokens, polished.completion_tokens, settings)
+        used_provider = polished.provider or route.provider
+        estimated_cost = deps.estimate_ai_cost(used_provider, polished.prompt_tokens, polished.completion_tokens, settings)
         db.record_ai_usage(
-            provider=provider, model=polished.model or settings.model_polish, operation="polish",
+            provider=used_provider, model=polished.model or route.model, operation="polish",
             prompt_tokens=polished.prompt_tokens, completion_tokens=polished.completion_tokens,
             total_tokens=polished.total_tokens, estimated_cost_usd=estimated_cost, source_url=draft.get("source_url"), draft_id=draft_id
         )
-        logger.info("AI usage provider=%s model=%s operation=%s prompt=%s completion=%s total=%s cost=%s", provider, polished.model or settings.model_polish, "polish", polished.prompt_tokens, polished.completion_tokens, polished.total_tokens, estimated_cost)
+        logger.info("AI usage provider=%s model=%s operation=%s prompt=%s completion=%s total=%s cost=%s", used_provider, polished.model or route.model, "polish", polished.prompt_tokens, polished.completion_tokens, polished.total_tokens, estimated_cost)
         db.update_draft_content(draft_id, polished.content)
         db.update_status(draft_id, "draft")
         await deps.edit_callback_message(

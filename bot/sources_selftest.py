@@ -18,14 +18,17 @@ class _FakeResponse:
 
 
 def _with_env(env: dict[str, str], fn) -> None:
-    saved = dict(os.environ)
+    saved = {key: os.environ.get(key) for key in env}
     try:
-        os.environ.clear()
-        os.environ.update(env)
+        for key, value in env.items():
+            os.environ[key] = value
         fn()
     finally:
-        os.environ.clear()
-        os.environ.update(saved)
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def run() -> None:
