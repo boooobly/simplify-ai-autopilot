@@ -235,5 +235,17 @@ def main() -> None:
     application.run_polling(allowed_updates=["message", "callback_query"])
 
 
+def run_main_safely() -> None:
+    """Log fatal startup errors through the secret-redacting handlers."""
+    try:
+        main()
+    except Exception:
+        # Let the configured logging filter format and redact the traceback.
+        # Re-raising the original exception would make Python print a second,
+        # unfiltered traceback directly to stderr (including rejected tokens).
+        logging.getLogger(__name__).exception("fatal: bot startup failed")
+        raise SystemExit(1) from None
+
+
 if __name__ == "__main__":
-    main()
+    run_main_safely()
