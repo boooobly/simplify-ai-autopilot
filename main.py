@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 
 from telegram import BotCommand
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
@@ -86,6 +87,17 @@ class SecretRedactionFilter(logging.Filter):
         return True
 
 
+class BelowLevelFilter(logging.Filter):
+    """Allow records below a threshold so stdout/stderr do not duplicate."""
+
+    def __init__(self, exclusive_max_level: int) -> None:
+        super().__init__()
+        self._exclusive_max_level = exclusive_max_level
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno < self._exclusive_max_level
+
+
 def setup_logging() -> None:
     token = (os.getenv("BOT_TOKEN") or "").strip()
     secrets = [
@@ -96,8 +108,17 @@ def setup_logging() -> None:
         (os.getenv("OPENAI_API_KEY") or "").strip(),
     ]
 
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setLevel(logging.DEBUG)
+    stdout_handler.addFilter(BelowLevelFilter(logging.WARNING))
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setLevel(logging.WARNING)
+
     logging.basicConfig(
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        level=logging.INFO,
+        handlers=[stdout_handler, stderr_handler],
+        force=True,
     )
     for name in ("httpx", "httpcore", "telegram", "telegram.ext"):
         logging.getLogger(name).setLevel(logging.WARNING)
