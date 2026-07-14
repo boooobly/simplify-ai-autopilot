@@ -19,5 +19,7 @@ def test_railway_worker_configuration_is_explicit_and_singleton_safe() -> None:
     assert deploy["startCommand"] == "python main.py"
     assert deploy["restartPolicyType"] == "ON_FAILURE"
     assert deploy["restartPolicyMaxRetries"] >= 10
-    assert deploy["overlapSeconds"] == "0"
-    assert int(deploy["drainingSeconds"]) >= 10
+    assert isinstance(deploy["overlapSeconds"], int)
+    assert deploy["overlapSeconds"] == 0
+    assert isinstance(deploy["drainingSeconds"], int)
+    assert deploy["drainingSeconds"] >= 10
